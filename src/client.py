@@ -181,6 +181,8 @@ class PolymarketClient:
 
     def get_markets(self, limit: int = 200) -> list[Market]:
         """Return active, non-closed markets with sufficient liquidity."""
+        import json as _json
+
         data = self._get(
             f"{config.GAMMA_HOST}/markets",
             params={"active": "true", "closed": "false", "limit": limit},
@@ -191,11 +193,25 @@ class PolymarketClient:
         markets: list[Market] = []
         for raw in data:
             try:
-                tokens = raw.get("tokens", [])
-                yes = next((t for t in tokens if t.get("outcome", "").lower() == "yes"), None)
-                no  = next((t for t in tokens if t.get("outcome", "").lower() == "no"),  None)
-                if not yes or not no:
+                # Gamma API returns outcomes/prices/tokenIds as JSON strings
+                def _parse(field, default="[]"):
+                    v = raw.get(field, default)
+                    if isinstance(v, str):
+                        return _json.loads(v)
+                    return v if v else []
+
+                outcomes     = _parse("outcomes")
+                prices       = _parse("outcomePrices")
+                token_ids    = _parse("clobTokenIds")
+
+                if len(outcomes) < 2 or len(token_ids) < 2:
                     continue
+
+                yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), 0)
+                no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() == "no"),  1)
+
+                yes_price = float(prices[yes_idx]) if len(prices) > yes_idx else 0.5
+                no_price  = float(prices[no_idx])  if len(prices) > no_idx  else 0.5
 
                 m = Market(
                     id=str(raw.get("id", "")),
@@ -203,23 +219,23 @@ class PolymarketClient:
                     condition_id=raw.get("conditionId", ""),
                     slug=raw.get("slug", ""),
                     end_date=raw.get("endDate", ""),
-                    active=raw.get("active", False),
-                    closed=raw.get("closed", True),
-                    volume=float(raw.get("volume", 0) or 0),
-                    liquidity=float(raw.get("liquidity", 0) or 0),
+                    active=bool(raw.get("active", False)),
+                    closed=bool(raw.get("closed", True)),
+                    volume=float(raw.get("volumeClob") or raw.get("volume") or 0),
+                    liquidity=float(raw.get("liquidityClob") or raw.get("liquidity") or 0),
                     yes_token=Token(
-                        token_id=yes["token_id"],
+                        token_id=str(token_ids[yes_idx]),
                         outcome="Yes",
-                        price=float(yes.get("price", 0.5) or 0.5),
+                        price=yes_price,
                     ),
                     no_token=Token(
-                        token_id=no["token_id"],
+                        token_id=str(token_ids[no_idx]),
                         outcome="No",
-                        price=float(no.get("price", 0.5) or 0.5),
+                        price=no_price,
                     ),
                 )
                 markets.append(m)
-            except (KeyError, ValueError, TypeError) as exc:
+            except (KeyError, ValueError, TypeError, IndexError) as exc:
                 logger.debug(f"Skipping malformed market: {exc}")
 
         logger.info(f"Fetched {len(markets)} active markets from Gamma API.")
