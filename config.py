@@ -1,0 +1,31 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Wallet / auth ────────────────────────────────────────────────────────────
+PRIVATE_KEY: str = os.getenv("PRIVATE_KEY", "")
+CLOB_API_KEY: str = os.getenv("CLOB_API_KEY", "")
+CLOB_API_SECRET: str = os.getenv("CLOB_API_SECRET", "")
+CLOB_API_PASSPHRASE: str = os.getenv("CLOB_API_PASSPHRASE", "")
+
+# ── Network ──────────────────────────────────────────────────────────────────
+CHAIN_ID: int = int(os.getenv("CHAIN_ID", "137"))
+CLOB_HOST: str = "https://clob.polymarket.com"
+GAMMA_HOST: str = "https://gamma-api.polymarket.com"
+
+# ── Safety ───────────────────────────────────────────────────────────────────
+DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() != "false"
+
+# ── Position sizing ──────────────────────────────────────────────────────────
+MAX_POSITION_USDC: float = float(os.getenv("MAX_POSITION_USDC", "10"))
+MAX_TOTAL_EXPOSURE_USDC: float = float(os.getenv("MAX_TOTAL_EXPOSURE_USDC", "100"))
+KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
+
+# ── Strategy ─────────────────────────────────────────────────────────────────
+MIN_EDGE: float = float(os.getenv("MIN_EDGE", "0.03"))
+MIN_LIQUIDITY_USDC: float = float(os.getenv("MIN_LIQUIDITY_USDC", "1000"))
+MIN_VOLUME_24H_USDC: float = float(os.getenv("MIN_VOLUME_24H_USDC", "100"))
+
+# ── Loop ─────────────────────────────────────────────────────────────────────
+LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "60"))
