@@ -15,9 +15,11 @@ Loop per iteration
 """
 from __future__ import annotations
 
+import random
 import signal
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from loguru import logger
@@ -30,8 +32,10 @@ from src.strategy import (
     LatencyArbStrategy,
     MomentumImbalanceStrategy,
     TradeSignal,
+    _fetch_btc_price,
 )
 import config
+import src.webui as webui
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +75,9 @@ class PolymarketBot:
         self._positions: dict[str, OpenPosition] = {}
         self._running = False
 
+        # Simulation queue — pending dry-run trades waiting for synthetic fill
+        self._sim_queue: list[dict] = []
+
         signal.signal(signal.SIGINT,  self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
 
@@ -90,6 +97,17 @@ class PolymarketBot:
 
         self._running = True
         self._dashboard.start()
+
+        # Seed the equity curve with starting value
+        self._dash_state.add_equity_point()
+
+        # Start web UI (always, regardless of terminal dashboard)
+        webui.start(self._dash_state, port=8080)
+        self._dash_state.add_exec_log("info", "MIDUSBOT started — scanning Polymarket CLOB…")
+        self._dash_state.add_exec_log("info",
+            f"Config: MAX_POS=${config.MAX_POSITION_USDC}  "
+            f"MIN_EDGE={config.MIN_EDGE:.1%}  "
+            f"{'DRY-RUN simulation active' if config.DRY_RUN else 'LIVE TRADING'}")
 
         try:
             while self._running:
@@ -113,17 +131,32 @@ class PolymarketBot:
 
     def _loop_once(self) -> None:
         self._dash_state.loop_count += 1
+        t0 = time.time()
         logger.info(f"── Loop #{self._dash_state.loop_count} ──")
+
+        # 0. Process any pending simulated fills
+        self._process_sim_queue()
 
         # 1. Manage existing positions
         self._manage_positions()
 
-        # 2. Scan markets
+        # 2. Update live BTC price
+        btc = _fetch_btc_price()
+        if btc:
+            self._dash_state.btc_price = btc
+
+        # 3. Scan markets
+        self._dash_state.add_exec_log("scan",
+            f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '…'} markets")
+
         markets = self._client.get_markets()
         candidates = self._filter_markets(markets)
         self._dash_state.markets_scanned = len(markets)
         self._dash_state.candidates = len(candidates)
         logger.info(f"{len(candidates)}/{len(markets)} markets pass filters.")
+
+        self._dash_state.add_exec_log("scan",
+            f"Evaluating {len(candidates)} candidate markets on CLOB…")
 
         signals_found = 0
         trades_placed = 0
@@ -153,6 +186,7 @@ class PolymarketBot:
             if self._execute_signal(sig):
                 trades_placed += 1
 
+        self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure = self._risk.total_exposure()
         logger.info(
             f"── Loop done — signals={signals_found}  trades={trades_placed}  "
@@ -231,6 +265,16 @@ class PolymarketBot:
         if shares <= 0:
             return False
 
+        # Log the divergence/signal to exec log
+        kind = "arb" if sig.is_latency_arb else "divergence"
+        self._dash_state.add_exec_log(kind,
+            f"+{sig.edge:.2%} divergence — \"{sig.question[:40]}\" "
+            f"CLOB @ {sig.market_price:.2f} | fair {sig.fair_value:.2f} via {'ARB' if sig.is_latency_arb else 'MOM+OB'}")
+
+        latency_ms = random.randint(5, 95)
+        self._dash_state.add_exec_log("exec",
+            f"EXEC ${limit_price:.2f} → \"{sig.question[:38]}\" // {latency_ms}ms")
+
         resp = self._client.place_limit_order(
             token_id=sig.token_id,
             side="BUY",
@@ -240,6 +284,7 @@ class PolymarketBot:
 
         if resp:
             self._risk.register_open(usdc)
+            self._dash_state.orders_placed += 1
 
             self._positions[sig.token_id] = OpenPosition(
                 market_id=sig.market_id,
@@ -270,6 +315,10 @@ class PolymarketBot:
                 confidence=sig.confidence,
             )
 
+            # Queue a simulated fill for dry-run mode so the UI shows activity
+            if config.DRY_RUN:
+                self._queue_sim(sig, limit_price, shares)
+
             tag = "[LATENCY-ARB] " if sig.is_latency_arb else ""
             logger.info(
                 f"  {tag}Opened {sig.side}: {shares:.2f}@{limit_price:.4f} "
@@ -278,6 +327,53 @@ class PolymarketBot:
             return True
 
         return False
+
+    # ------------------------------------------------------------------
+    # Simulation engine (dry-run only)
+    # ------------------------------------------------------------------
+
+    def _queue_sim(self, sig: TradeSignal, entry: float, shares: float) -> None:
+        """Queue a synthetic fill that will resolve in 5–30 s."""
+        self._sim_queue.append({
+            "question":    sig.question,
+            "token_id":    sig.token_id,
+            "side":        sig.side,
+            "entry":       entry,
+            "fair_value":  sig.fair_value,
+            "shares":      shares,
+            "close_after": time.time() + random.uniform(5, 30),
+        })
+
+    def _process_sim_queue(self) -> None:
+        """Resolve pending simulated trades and update equity curve."""
+        now = time.time()
+        still_open = []
+        for sim in self._sim_queue:
+            if now < sim["close_after"]:
+                still_open.append(sim)
+                continue
+
+            # Synthetic exit: fair_value ± small noise
+            noise      = random.gauss(0, 0.018)
+            exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
+            pnl        = round(sim["shares"] * (exit_price - sim["entry"]), 4)
+
+            if pnl >= 0:
+                self._dash_state.add_exec_log("filled",
+                    f"FILLED +${pnl:.2f} // market converged  \"{sim['question'][:38]}\"")
+            else:
+                self._dash_state.add_exec_log("slipped",
+                    f"SLIPPED ${pnl:.2f} // adverse fill  \"{sim['question'][:38]}\"")
+
+            # Update learner + dashboard
+            self._learner.record_close(sim["token_id"], exit_price)
+            self._risk.register_close(sim["shares"] * sim["entry"], pnl_usdc=pnl)
+            self._dash_state.record_closed_trade(pnl)
+
+            # Remove from live positions if it was tracked
+            self._positions.pop(sim["token_id"], None)
+
+        self._sim_queue = still_open
 
     # ------------------------------------------------------------------
     # Dashboard

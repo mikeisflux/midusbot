@@ -79,6 +79,15 @@ class DashboardState:
         # Learned params (dict from learner)
         self.learned: dict = {}
 
+        # Web UI extras
+        self.equity_curve: list[dict] = []   # [{"t": ms, "v": portfolio_value}, ...]
+        self.exec_log: list[dict] = []        # [{"ts": "HH:MM:SS", "kind": str, "text": str}, ...]
+        self.scan_latency_ms: int = 0
+        self.orders_placed: int = 0
+        self.btc_price: float = 0.0
+        self.daily_pnl: float = 0.0
+        self._seed: float = config.MAX_TOTAL_EXPOSURE_USDC  # starting portfolio value
+
     # convenience -----------------------------------------------------------
 
     @property
@@ -96,11 +105,38 @@ class DashboardState:
     def record_closed_trade(self, pnl_usdc: float) -> None:
         self.total_trades += 1
         self.total_pnl += pnl_usdc
+        self.daily_pnl += pnl_usdc
         self.pnl_history.append(pnl_usdc)
         if pnl_usdc > 0:
             self.wins += 1
         self.best_trade = max(self.best_trade, pnl_usdc)
         self.worst_trade = min(self.worst_trade, pnl_usdc)
+        self.add_equity_point()
+
+    def add_equity_point(self) -> None:
+        """Append current portfolio value to the equity curve (max 500 points)."""
+        self.equity_curve.append({
+            "t": int(time.time() * 1000),
+            "v": round(self._seed + self.total_pnl, 4),
+        })
+        if len(self.equity_curve) > 500:
+            self.equity_curve = self.equity_curve[-500:]
+
+    def add_exec_log(self, kind: str, text: str) -> None:
+        """
+        Add an entry to the execution log (shown in web UI right panel).
+        kind: 'divergence' | 'exec' | 'filled' | 'slipped' | 'scan' | 'info'
+        """
+        self.exec_log.insert(0, {
+            "ts":   datetime.now().strftime("%H:%M:%S"),
+            "kind": kind,
+            "text": text,
+        })
+        self.exec_log = self.exec_log[:120]  # keep last 120 entries
+
+    @property
+    def balance(self) -> float:
+        return self._seed + self.total_pnl
 
 
 # ---------------------------------------------------------------------------

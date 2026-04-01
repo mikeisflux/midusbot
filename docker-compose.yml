@@ -30,6 +30,9 @@ services:
       # ── Loop ────────────────────────────────────────────────────────
       - LOOP_INTERVAL_SECONDS=${LOOP_INTERVAL_SECONDS:-60}
 
+    ports:
+      - "8080:8080"   # Web dashboard — access at http://<nas-ip>:8080
+
     volumes:
       # Persist logs and learned parameters across restarts / rebuilds
       - ./logs:/app/logs
