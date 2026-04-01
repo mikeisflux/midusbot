@@ -1,30 +1,12 @@
 """
 Risk manager — position sizing and exposure control.
 
-Position sizing
-───────────────
-Uses fractional Kelly Criterion:
-
-    f* = (b·p − q) / b
-
-where
-  p  = estimated probability of winning (our fair_value)
-  q  = 1 − p
-  b  = net odds = (1 / market_price) − 1   (profit per USDC staked)
-
-  Kelly fraction (KELLY_FRACTION) is applied on top (e.g. 0.25 = quarter-Kelly).
-
-The raw Kelly stake is then capped by:
-  • MAX_POSITION_USDC per trade
-  • Remaining headroom in MAX_TOTAL_EXPOSURE_USDC
-
-Stop-loss / take-profit
-───────────────────────
-Checked every loop iteration.  Positions are flagged for closure when:
-  • PnL% ≤ −STOP_LOSS_PCT  (default −50 %)
-  • PnL% ≥  TAKE_PROFIT_PCT (default +80 %)
+All tuneable constants (Kelly multiplier, stop-loss, take-profit) can be
+overridden at runtime by the AdaptiveLearner through a RiskParams object.
 """
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import numpy as np
 from loguru import logger
@@ -32,20 +14,39 @@ from loguru import logger
 from src.strategy import TradeSignal
 import config
 
-# ---------------------------------------------------------------------------
-# Constants (could be moved to config if you want env-var control)
-# ---------------------------------------------------------------------------
-STOP_LOSS_PCT   = -0.50   # close if position is down 50 %
-TAKE_PROFIT_PCT =  0.80   # close if position is up 80 %
-
+if TYPE_CHECKING:
+    from src.learner import RiskParams
 
 # ---------------------------------------------------------------------------
-# RiskManager
+# Defaults
 # ---------------------------------------------------------------------------
+DEFAULT_STOP_LOSS_PCT   = -0.50
+DEFAULT_TAKE_PROFIT_PCT =  0.80
+DEFAULT_KELLY_MULT      =  1.0
+DEFAULT_DAILY_LOSS_CAP  = -0.02  # stop trading if daily P&L < -2 %
+
 
 class RiskManager:
-    def __init__(self) -> None:
-        self._open_cost: float = 0.0   # total USDC currently at risk
+    def __init__(self, params: RiskParams | None = None) -> None:
+        self._params = params
+        self._open_cost: float = 0.0
+        # Daily P&L tracking
+        self._daily_pnl: float = 0.0
+        self._trades_today: int = 0
+
+    # -- adaptive getters --------------------------------------------------
+
+    @property
+    def _stop_loss(self) -> float:
+        return self._params.stop_loss_pct if self._params else DEFAULT_STOP_LOSS_PCT
+
+    @property
+    def _take_profit(self) -> float:
+        return self._params.take_profit_pct if self._params else DEFAULT_TAKE_PROFIT_PCT
+
+    @property
+    def _kelly_mult(self) -> float:
+        return self._params.kelly_multiplier if self._params else DEFAULT_KELLY_MULT
 
     # ------------------------------------------------------------------
     # Public API
@@ -53,72 +54,87 @@ class RiskManager:
 
     def position_size(self, signal: TradeSignal) -> float:
         """
-        Returns the number of USDC to spend on this trade (i.e. shares × price).
-        Returns 0.0 if the trade should be skipped.
+        Returns the USDC to spend.  0.0 = skip trade.
+        Latency-arb trades use a fixed risk budget (0.5 % of exposure cap).
         """
-        kelly_usdc = self._kelly_size(signal)
-        if kelly_usdc <= 0:
+        # Daily loss breaker
+        daily_pnl_pct = self._daily_pnl / config.MAX_TOTAL_EXPOSURE_USDC if config.MAX_TOTAL_EXPOSURE_USDC else 0
+        if daily_pnl_pct <= DEFAULT_DAILY_LOSS_CAP:
+            logger.warning(
+                f"Daily loss cap hit ({daily_pnl_pct:.1%}) — no new trades until reset."
+            )
             return 0.0
 
-        # Apply hard caps
-        capped = min(kelly_usdc, config.MAX_POSITION_USDC)
+        if signal.is_latency_arb:
+            # Fixed fractional risk for arb: 0.5 % of total exposure cap
+            usdc = config.MAX_TOTAL_EXPOSURE_USDC * 0.005
+        else:
+            usdc = self._kelly_size(signal)
 
-        # Remaining exposure budget
+        if usdc <= 0:
+            return 0.0
+
+        capped = min(usdc, config.MAX_POSITION_USDC)
+
         headroom = config.MAX_TOTAL_EXPOSURE_USDC - self._open_cost
         if headroom <= 0:
-            logger.warning("Total exposure limit reached — skipping new trades.")
+            logger.warning("Total exposure limit reached — skipping.")
             return 0.0
 
-        usdc_to_spend = min(capped, headroom)
-        logger.debug(
-            f"Kelly stake: {kelly_usdc:.2f} USDC → capped: {capped:.2f} "
-            f"→ after headroom: {usdc_to_spend:.2f} USDC"
-        )
-        return round(usdc_to_spend, 2)
+        result = min(capped, headroom)
+        return round(result, 2)
 
     def shares_from_usdc(self, usdc: float, price: float) -> float:
-        """Convert a USDC amount to number of shares at the given price."""
         if price <= 0:
             return 0.0
         return round(usdc / price, 2)
 
     def register_open(self, usdc_cost: float) -> None:
-        """Call after a position is opened."""
         self._open_cost += usdc_cost
-        logger.debug(f"Registered open position: ${usdc_cost:.2f}  total={self._open_cost:.2f}")
+        self._trades_today += 1
 
-    def register_close(self, usdc_cost: float) -> None:
-        """Call after a position is closed."""
+    def register_close(self, usdc_cost: float, pnl_usdc: float = 0.0) -> None:
         self._open_cost = max(0.0, self._open_cost - usdc_cost)
-        logger.debug(f"Registered closed position: ${usdc_cost:.2f}  total={self._open_cost:.2f}")
+        self._daily_pnl += pnl_usdc
 
     def should_stop_loss(self, pnl_pct: float) -> bool:
-        return pnl_pct <= STOP_LOSS_PCT
+        return pnl_pct <= self._stop_loss
 
     def should_take_profit(self, pnl_pct: float) -> bool:
-        return pnl_pct >= TAKE_PROFIT_PCT
+        return pnl_pct >= self._take_profit
 
     def total_exposure(self) -> float:
         return self._open_cost
+
+    def daily_pnl(self) -> float:
+        return self._daily_pnl
+
+    def reset_daily(self) -> None:
+        """Call at midnight to reset daily P&L tracking."""
+        self._daily_pnl = 0.0
+        self._trades_today = 0
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
     def _kelly_size(self, signal: TradeSignal) -> float:
-        """Compute fractional-Kelly stake in USDC."""
-        p = float(np.clip(signal.fair_value, 0.01, 0.99))  # prob of winning
+        p = float(np.clip(signal.fair_value, 0.01, 0.99))
         q = 1.0 - p
         mkt = float(np.clip(signal.market_price, 0.01, 0.99))
-        b = (1.0 / mkt) - 1.0  # net odds
+        b = (1.0 / mkt) - 1.0
 
         if b <= 0:
             return 0.0
 
         kelly_fraction = (b * p - q) / b
         if kelly_fraction <= 0:
-            logger.debug(f"Negative Kelly ({kelly_fraction:.4f}) — no edge, skip.")
             return 0.0
 
-        stake = kelly_fraction * config.KELLY_FRACTION * config.MAX_TOTAL_EXPOSURE_USDC
+        stake = (
+            kelly_fraction
+            * config.KELLY_FRACTION
+            * self._kelly_mult          # adaptive multiplier from learner
+            * config.MAX_TOTAL_EXPOSURE_USDC
+        )
         return float(stake)

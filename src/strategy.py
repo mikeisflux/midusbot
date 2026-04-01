@@ -1,53 +1,47 @@
 """
-Trading strategy — Momentum + Order-Book Imbalance.
+Trading strategies for Polymarket.
 
-Signal logic
-────────────
-For every active market we compute two sub-signals, each in [-1, +1]:
+Strategy 1 — Momentum + Order-Book Imbalance
+─────────────────────────────────────────────
+Combines 24-h price momentum with order-book bid/ask imbalance.
+Signal weights, thresholds, and adjustments are all dynamic — the
+AdaptiveLearner can tune them online based on trade outcomes.
 
-  1. Momentum signal
-     • Compare the current YES price to the price 24 h ago (from hourly
-       Gamma history).
-     • Positive → price is rising → bullish on YES.
-
-  2. Order-book imbalance signal
-     • Sum bid quantity vs. ask quantity in the top N levels.
-     • Positive → more buy pressure than sell pressure → bullish on YES.
-
-The composite signal is the equal-weight average of the two.  A signal above
-+THRESHOLD triggers a BUY on the YES token; below -THRESHOLD triggers a BUY
-on the NO token (i.e. we think YES will lose).
-
-Edge requirement
-────────────────
-Before trading we also check that the current market price gives us enough
-"edge" relative to our estimated fair value.  If the edge is smaller than
-MIN_EDGE the trade is skipped even if the composite signal is strong.
-
-Fair-value estimate
-───────────────────
-  fair_value = mid_price * (1 + signal * MAX_SIGNAL_ADJUST)
-
-where MAX_SIGNAL_ADJUST caps the adjustment at ±7 %.
+Strategy 2 — Latency Arbitrage (BTC / crypto contracts)
+───────────────────────────────────────────────────────
+Polymarket updates crypto-outcome contract prices slower than real-time
+exchange feeds.  This strategy:
+  1. Pulls the live BTC (or other asset) price from external feeds.
+  2. Compares it to the implied price in the Polymarket contract.
+  3. When the lag exceeds a configurable threshold it places a rapid
+     limit order to capture the mispricing before the market catches up.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
+import requests
 from loguru import logger
 
 from src.client import Market, OrderBook, PricePoint
 import config
 
+if TYPE_CHECKING:
+    from src.learner import StrategyParams
+
 # ---------------------------------------------------------------------------
-# Constants
+# Defaults (used when no adaptive params are provided)
 # ---------------------------------------------------------------------------
 
-SIGNAL_THRESHOLD = 0.15       # composite signal must exceed this to trade
-MAX_SIGNAL_ADJUST = 0.07      # max ±7 % price adjustment from signals
-OB_LEVELS = 10                # how many order-book levels to include
-MOMENTUM_NORMALISER = 0.20    # 20 % price move maps to ±1 signal
+DEFAULT_SIGNAL_THRESHOLD = 0.15
+DEFAULT_MAX_SIGNAL_ADJUST = 0.07
+DEFAULT_MOMENTUM_WEIGHT = 0.50
+DEFAULT_IMBALANCE_WEIGHT = 0.50
+OB_LEVELS = 10
+MOMENTUM_NORMALISER = 0.20
 
 
 # ---------------------------------------------------------------------------
@@ -58,31 +52,61 @@ MOMENTUM_NORMALISER = 0.20    # 20 % price move maps to ±1 signal
 class TradeSignal:
     market_id: str
     question: str
-    side: str           # "YES" | "NO"
+    side: str            # "YES" | "NO"
     token_id: str
     market_price: float  # current market mid price for the chosen token
     fair_value: float    # our estimated fair price
     edge: float          # fair_value - market_price (positive = we have edge)
     signal: float        # composite signal [-1, 1]
     confidence: str      # "LOW" | "MEDIUM" | "HIGH"
+    # Sub-signals (used by learner to attribute wins/losses)
+    momentum_signal: float  = 0.0
+    imbalance_signal: float = 0.0
+    # Latency arb fields
+    is_latency_arb: bool = False
+    lag_pct: float = 0.0
 
     def __str__(self) -> str:
+        tag = "[LATENCY-ARB] " if self.is_latency_arb else ""
         return (
-            f"[{self.confidence}] {self.side} {self.question[:60]} | "
+            f"{tag}[{self.confidence}] {self.side} {self.question[:60]} | "
             f"mkt={self.market_price:.3f}  fv={self.fair_value:.3f}  "
             f"edge={self.edge:+.3f}  sig={self.signal:+.3f}"
         )
 
 
-# ---------------------------------------------------------------------------
-# Strategy
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Strategy 1: Momentum + Imbalance
+# ═══════════════════════════════════════════════════════════════════════════
 
 class MomentumImbalanceStrategy:
     """
-    Scans a list of markets and returns TradeSignal objects for markets where
-    the composite signal is strong enough and the edge exceeds MIN_EDGE.
+    Scans a single market and returns a TradeSignal if an opportunity is
+    found.  All tuneable constants come from `params` (set by the learner).
     """
+
+    def __init__(self, params: StrategyParams | None = None) -> None:
+        self._params = params
+
+    # -- properties for current param values (fallback to defaults) --------
+
+    @property
+    def _momentum_weight(self) -> float:
+        return self._params.momentum_weight if self._params else DEFAULT_MOMENTUM_WEIGHT
+
+    @property
+    def _imbalance_weight(self) -> float:
+        return self._params.imbalance_weight if self._params else DEFAULT_IMBALANCE_WEIGHT
+
+    @property
+    def _signal_threshold(self) -> float:
+        return self._params.signal_threshold if self._params else DEFAULT_SIGNAL_THRESHOLD
+
+    @property
+    def _max_signal_adjust(self) -> float:
+        return self._params.max_signal_adjust if self._params else DEFAULT_MAX_SIGNAL_ADJUST
+
+    # -- analysis ----------------------------------------------------------
 
     def analyse(
         self,
@@ -90,56 +114,48 @@ class MomentumImbalanceStrategy:
         order_book: OrderBook | None,
         price_history: list[PricePoint],
     ) -> TradeSignal | None:
-        """
-        Returns a TradeSignal if an opportunity is found, else None.
-        """
         try:
-            momentum_sig = self._momentum_signal(market, price_history)
-            imbalance_sig = self._imbalance_signal(order_book)
+            mom_sig = self._momentum_signal(market, price_history)
+            imb_sig = self._imbalance_signal(order_book)
 
-            # Equal-weight composite
-            composite = 0.5 * momentum_sig + 0.5 * imbalance_sig
-
-            logger.debug(
-                f"{market.question[:50]} | mom={momentum_sig:+.3f}  "
-                f"imb={imbalance_sig:+.3f}  composite={composite:+.3f}"
+            composite = (
+                self._momentum_weight * mom_sig
+                + self._imbalance_weight * imb_sig
             )
 
-            if abs(composite) < SIGNAL_THRESHOLD:
+            logger.debug(
+                f"{market.question[:50]} | mom={mom_sig:+.3f}  "
+                f"imb={imb_sig:+.3f}  comp={composite:+.3f}"
+            )
+
+            if abs(composite) < self._signal_threshold:
                 return None
 
             # Choose direction
             if composite > 0:
-                # Bullish on YES
                 side = "YES"
                 token = market.yes_token
                 mid = order_book.mid if order_book else market.yes_price
             else:
-                # Bearish on YES = bullish on NO
                 side = "NO"
                 token = market.no_token
                 mid = (1.0 - order_book.mid) if order_book else market.no_price
-                composite = -composite  # flip so edge calc makes sense
+                composite = -composite  # flip for edge calc
 
-            # Fair value with signal adjustment
-            fair_value = mid * (1.0 + composite * MAX_SIGNAL_ADJUST)
+            fair_value = mid * (1.0 + composite * self._max_signal_adjust)
             fair_value = float(np.clip(fair_value, 0.01, 0.99))
-
             edge = fair_value - mid
 
             if edge < config.MIN_EDGE:
-                logger.debug(
-                    f"  → edge {edge:.3f} below MIN_EDGE {config.MIN_EDGE:.3f}, skip"
-                )
                 return None
 
             confidence = (
-                "HIGH"   if abs(composite) > 0.5 else
-                "MEDIUM" if abs(composite) > 0.3 else
+                "HIGH"   if composite > 0.5 else
+                "MEDIUM" if composite > 0.3 else
                 "LOW"
             )
 
-            signal = TradeSignal(
+            return TradeSignal(
                 market_id=market.id,
                 question=market.question,
                 side=side,
@@ -149,56 +165,185 @@ class MomentumImbalanceStrategy:
                 edge=edge,
                 signal=composite,
                 confidence=confidence,
+                momentum_signal=mom_sig,
+                imbalance_signal=imb_sig,
             )
-            logger.info(f"  → Signal: {signal}")
-            return signal
 
         except Exception as exc:
             logger.warning(f"Strategy error on market {market.id}: {exc}")
             return None
 
-    # ------------------------------------------------------------------
-    # Sub-signals
-    # ------------------------------------------------------------------
+    # -- sub-signals -------------------------------------------------------
 
     def _momentum_signal(
         self, market: Market, price_history: list[PricePoint]
     ) -> float:
-        """
-        Returns a value in [-1, 1].
-        Uses 24-h price change if history available, else 0.
-        """
         if len(price_history) < 2:
             return 0.0
-
-        # price_history is chronological; last element is most recent
         recent = price_history[-1].price
-        # ~24 h ago: with hourly fidelity that's ~24 points back
         lookback = min(24, len(price_history) - 1)
         past = price_history[-1 - lookback].price
-
         if past <= 0:
             return 0.0
-
         change = (recent - past) / past
         return float(np.clip(change / MOMENTUM_NORMALISER, -1.0, 1.0))
 
     def _imbalance_signal(self, ob: OrderBook | None) -> float:
-        """
-        Returns a value in [-1, 1].
-        Positive = more bid volume → buying pressure on YES.
-        """
         if ob is None:
             return 0.0
-
-        bid_qty = sum(
-            float(b.get("size", 0)) for b in ob.bids[:OB_LEVELS]
-        )
-        ask_qty = sum(
-            float(a.get("size", 0)) for a in ob.asks[:OB_LEVELS]
-        )
+        bid_qty = sum(float(b.get("size", 0)) for b in ob.bids[:OB_LEVELS])
+        ask_qty = sum(float(a.get("size", 0)) for a in ob.asks[:OB_LEVELS])
         total = bid_qty + ask_qty
         if total == 0:
             return 0.0
-
         return float((bid_qty - ask_qty) / total)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Strategy 2: Latency Arbitrage
+# ═══════════════════════════════════════════════════════════════════════════
+
+# External price feeds (tried in order; first success wins)
+_BTC_FEEDS = [
+    ("CoinGecko",    "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"),
+    ("Binance",      "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+]
+
+_PRICE_CACHE: dict[str, tuple[float, float]] = {}   # symbol → (price, timestamp)
+_CACHE_TTL = 2.0   # seconds
+
+
+def _fetch_btc_price() -> float | None:
+    """Best-effort BTC/USD price from public APIs (cached 2 s)."""
+    cached = _PRICE_CACHE.get("BTC")
+    if cached and (time.time() - cached[1]) < _CACHE_TTL:
+        return cached[0]
+
+    for name, url in _BTC_FEEDS:
+        try:
+            resp = requests.get(url, timeout=3)
+            resp.raise_for_status()
+            data = resp.json()
+            if "bitcoin" in data:
+                price = float(data["bitcoin"]["usd"])
+            elif "price" in data:
+                price = float(data["price"])
+            else:
+                continue
+            _PRICE_CACHE["BTC"] = (price, time.time())
+            return price
+        except Exception:
+            continue
+
+    return None
+
+
+# Keyword patterns that indicate BTC price-level contracts
+_BTC_KEYWORDS = [
+    "bitcoin", "btc", "btc/usd", "bitcoin price",
+]
+
+
+def _extract_btc_target(question: str) -> float | None:
+    """
+    Try to extract the dollar target from a market question like:
+      "Will Bitcoin be above $70,000 on June 30?"
+    Returns the dollar figure or None.
+    """
+    q = question.lower()
+    if not any(kw in q for kw in _BTC_KEYWORDS):
+        return None
+
+    import re
+    # Match $70,000 / $70000 / 70,000 / 70000
+    m = re.search(r"\$?([\d,]+(?:\.\d+)?)\s*(?:k|K)?", q)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1).replace(",", ""))
+        # Heuristic: if someone wrote "70k" the regex got "70"
+        if val < 500:
+            val *= 1000
+        return val
+    except ValueError:
+        return None
+
+
+class LatencyArbStrategy:
+    """
+    Detects when Polymarket crypto contracts lag behind real-time price feeds
+    and generates a signal to exploit the mispricing.
+
+    Parameters:
+        min_lag_pct – minimum % divergence to act on (default 0.3 %)
+    """
+
+    def __init__(self, min_lag_pct: float = 0.003) -> None:
+        self.min_lag_pct = min_lag_pct
+
+    def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
+        target = _extract_btc_target(market.question)
+        if target is None:
+            return None  # not a BTC price market
+
+        live_price = _fetch_btc_price()
+        if live_price is None:
+            return None
+
+        # Implied probability: how likely is BTC to be above $target?
+        # Simple model: if live BTC is far above target → probability ≈ 1,
+        # if far below → ≈ 0, linear in the band ±10 % around target.
+        band = target * 0.10
+        implied_prob = float(np.clip((live_price - target + band) / (2 * band), 0.01, 0.99))
+
+        # Market probability
+        mkt_yes = order_book.mid if order_book else market.yes_price
+
+        lag = implied_prob - mkt_yes          # positive → market is too low → buy YES
+        lag_pct = abs(lag)
+
+        if lag_pct < self.min_lag_pct:
+            return None
+
+        if lag > 0:
+            side = "YES"
+            token = market.yes_token
+            mkt_price = mkt_yes
+        else:
+            side = "NO"
+            token = market.no_token
+            mkt_price = 1.0 - mkt_yes
+
+        fair_value = float(np.clip(implied_prob if side == "YES" else 1.0 - implied_prob, 0.01, 0.99))
+        edge = fair_value - mkt_price
+
+        if edge < 0.002:  # ultra-thin arb still needs some edge
+            return None
+
+        confidence = (
+            "HIGH"   if lag_pct > 0.01 else
+            "MEDIUM" if lag_pct > 0.005 else
+            "LOW"
+        )
+
+        logger.info(
+            f"[LATENCY-ARB] BTC live=${live_price:,.0f}  target=${target:,.0f}  "
+            f"implied={implied_prob:.3f}  mkt={mkt_yes:.3f}  lag={lag:+.4f} "
+            f"→ {side}"
+        )
+
+        return TradeSignal(
+            market_id=market.id,
+            question=market.question,
+            side=side,
+            token_id=token.token_id,
+            market_price=mkt_price,
+            fair_value=fair_value,
+            edge=edge,
+            signal=lag_pct,
+            confidence=confidence,
+            momentum_signal=0.0,
+            imbalance_signal=0.0,
+            is_latency_arb=True,
+            lag_pct=lag_pct,
+        )

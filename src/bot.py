@@ -1,33 +1,36 @@
 """
-Bot orchestrator — ties together the client, strategy, and risk manager
-and runs the main trading loop.
+Bot orchestrator — ties together client, strategies, risk manager,
+adaptive learner, and live dashboard.
 
 Loop per iteration
 ──────────────────
-1. Fetch all active markets from Gamma API.
-2. Filter by liquidity / volume thresholds.
-3. For each candidate market:
-   a. Fetch order book (CLOB).
-   b. Fetch price history (Gamma).
-   c. Run strategy → TradeSignal or None.
-4. For signals with sufficient edge:
-   a. Ask risk manager for position size.
-   b. Place limit order (or log dry-run).
-5. Check existing open positions for stop-loss / take-profit.
+1. Manage existing positions (stop-loss / take-profit).
+2. Scan markets — run both strategies:
+     a. Momentum + Imbalance (all markets).
+     b. Latency Arbitrage    (BTC / crypto price-level markets).
+3. Size and place orders for valid signals.
+4. Record trades in the learner; learner adapts when enough data exists.
+5. Push state to the dashboard.
 6. Sleep until next iteration.
 """
 from __future__ import annotations
 
 import signal
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from loguru import logger
 
 from src.client import Market, PolymarketClient
-from src.strategy import MomentumImbalanceStrategy, TradeSignal
+from src.dashboard import Dashboard, DashboardState
+from src.learner import AdaptiveLearner
 from src.risk import RiskManager
+from src.strategy import (
+    LatencyArbStrategy,
+    MomentumImbalanceStrategy,
+    TradeSignal,
+)
 import config
 
 
@@ -40,10 +43,14 @@ class OpenPosition:
     market_id: str
     question: str
     token_id: str
-    side: str        # "YES" | "NO"
+    side: str
     shares: float
     entry_price: float
     cost_usdc: float
+    momentum_signal: float = 0.0
+    imbalance_signal: float = 0.0
+    composite_signal: float = 0.0
+    confidence: str = "LOW"
     order_id: Optional[str] = None
 
 
@@ -52,14 +59,18 @@ class OpenPosition:
 # ---------------------------------------------------------------------------
 
 class PolymarketBot:
-    def __init__(self) -> None:
-        self._client   = PolymarketClient()
-        self._strategy = MomentumImbalanceStrategy()
-        self._risk     = RiskManager()
-        self._positions: dict[str, OpenPosition] = {}  # token_id → position
-        self._running  = False
+    def __init__(self, *, dashboard_enabled: bool = True) -> None:
+        self._learner    = AdaptiveLearner()
+        self._client     = PolymarketClient()
+        self._strategy   = MomentumImbalanceStrategy(params=self._learner.strategy_params)
+        self._latency    = LatencyArbStrategy()
+        self._risk       = RiskManager(params=self._learner.risk_params)
+        self._dashboard  = Dashboard(enabled=dashboard_enabled)
+        self._dash_state = DashboardState()
 
-        # Graceful shutdown on SIGINT / SIGTERM
+        self._positions: dict[str, OpenPosition] = {}
+        self._running = False
+
         signal.signal(signal.SIGINT,  self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
 
@@ -68,25 +79,31 @@ class PolymarketBot:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        mode_tag = "[DRY-RUN]" if config.DRY_RUN else "[LIVE]"
-        logger.info(f"Polymarket bot starting — {mode_tag}")
+        mode = "[DRY-RUN]" if config.DRY_RUN else "[LIVE]"
+        logger.info(f"Polymarket bot starting — {mode}")
         logger.info(
-            f"Config: MAX_POS=${config.MAX_POSITION_USDC}  "
+            f"MAX_POS=${config.MAX_POSITION_USDC}  "
             f"MAX_EXPOSURE=${config.MAX_TOTAL_EXPOSURE_USDC}  "
             f"MIN_EDGE={config.MIN_EDGE:.1%}  "
             f"LOOP={config.LOOP_INTERVAL_SECONDS}s"
         )
+
         self._running = True
+        self._dashboard.start()
 
-        while self._running:
-            try:
-                self._loop_once()
-            except Exception as exc:
-                logger.exception(f"Unhandled error in main loop: {exc}")
+        try:
+            while self._running:
+                try:
+                    self._loop_once()
+                except Exception as exc:
+                    logger.exception(f"Unhandled error: {exc}")
 
-            if self._running:
-                logger.info(f"Sleeping {config.LOOP_INTERVAL_SECONDS}s …\n")
-                time.sleep(config.LOOP_INTERVAL_SECONDS)
+                self._refresh_dashboard()
+
+                if self._running:
+                    time.sleep(config.LOOP_INTERVAL_SECONDS)
+        finally:
+            self._dashboard.stop()
 
         logger.info("Bot stopped.")
 
@@ -95,14 +112,17 @@ class PolymarketBot:
     # ------------------------------------------------------------------
 
     def _loop_once(self) -> None:
-        logger.info("── Loop start ──────────────────────────────────────────────")
+        self._dash_state.loop_count += 1
+        logger.info(f"── Loop #{self._dash_state.loop_count} ──")
 
-        # 1. Check / manage existing positions
+        # 1. Manage existing positions
         self._manage_positions()
 
-        # 2. Scan for new opportunities
+        # 2. Scan markets
         markets = self._client.get_markets()
         candidates = self._filter_markets(markets)
+        self._dash_state.markets_scanned = len(markets)
+        self._dash_state.candidates = len(candidates)
         logger.info(f"{len(candidates)}/{len(markets)} markets pass filters.")
 
         signals_found = 0
@@ -111,26 +131,32 @@ class PolymarketBot:
         for market in candidates:
             if not self._running:
                 break
-
-            # Don't double-up on a market we already hold
             if self._already_positioned(market):
                 continue
 
-            order_book  = self._client.get_order_book(market.yes_token.token_id)
-            price_hist  = self._client.get_price_history(market.id)
+            ob = self._client.get_order_book(market.yes_token.token_id)
 
-            sig = self._strategy.analyse(market, order_book, price_hist)
+            # ── Strategy 1: Momentum + Imbalance ─────────────────────
+            price_hist = self._client.get_price_history(market.id)
+            sig = self._strategy.analyse(market, ob, price_hist)
+
+            # ── Strategy 2: Latency Arbitrage ─────────────────────────
+            if sig is None:
+                sig = self._latency.analyse(market, ob)
+
             if sig is None:
                 continue
 
             signals_found += 1
-            placed = self._execute_signal(sig)
-            if placed:
+            self._dash_state.push_signal(sig)
+
+            if self._execute_signal(sig):
                 trades_placed += 1
 
+        self._dash_state.exposure = self._risk.total_exposure()
         logger.info(
-            f"── Loop end — signals: {signals_found}  trades: {trades_placed}  "
-            f"exposure: ${self._risk.total_exposure():.2f} ──"
+            f"── Loop done — signals={signals_found}  trades={trades_placed}  "
+            f"exposure=${self._risk.total_exposure():.2f} ──"
         )
 
     # ------------------------------------------------------------------
@@ -139,30 +165,31 @@ class PolymarketBot:
 
     def _manage_positions(self) -> None:
         if not self._positions:
+            self._dash_state.positions = []
             return
 
         to_close: list[str] = []
+        position_snapshots: list[tuple[OpenPosition, float]] = []
 
         for token_id, pos in self._positions.items():
-            # Get current mid price from order book
             ob = self._client.get_order_book(token_id)
             current_price = ob.mid if ob else pos.entry_price
 
-            pnl_usdc = pos.shares * (current_price - pos.entry_price)
-            pnl_pct  = (current_price - pos.entry_price) / pos.entry_price if pos.entry_price else 0.0
-
-            logger.info(
-                f"  Position {pos.side} {pos.question[:50]} | "
-                f"entry={pos.entry_price:.3f}  now={current_price:.3f}  "
-                f"PnL={pnl_usdc:+.2f} USDC ({pnl_pct:+.1%})"
+            pnl_pct = (
+                (current_price - pos.entry_price) / pos.entry_price
+                if pos.entry_price else 0.0
             )
 
+            position_snapshots.append((pos, current_price))
+
             if self._risk.should_stop_loss(pnl_pct):
-                logger.warning(f"  → STOP-LOSS triggered ({pnl_pct:.1%})")
+                logger.warning(f"STOP-LOSS {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
                 to_close.append(token_id)
             elif self._risk.should_take_profit(pnl_pct):
-                logger.info(f"  → TAKE-PROFIT triggered ({pnl_pct:.1%})")
+                logger.info(f"TAKE-PROFIT {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
                 to_close.append(token_id)
+
+        self._dash_state.positions = position_snapshots
 
         for token_id in to_close:
             self._close_position(token_id)
@@ -182,23 +209,24 @@ class PolymarketBot:
             size=pos.shares,
         )
         if resp:
-            self._risk.register_close(pos.cost_usdc)
+            pnl = self._learner.record_close(token_id, sell_price)
+            self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
+            self._dash_state.record_closed_trade(pnl)
             del self._positions[token_id]
-            logger.info(f"Closed position: {pos.side} {pos.question[:50]}")
+            logger.info(f"Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}")
 
     # ------------------------------------------------------------------
     # Trade execution
     # ------------------------------------------------------------------
 
     def _execute_signal(self, sig: TradeSignal) -> bool:
-        usdc_to_spend = self._risk.position_size(sig)
-        if usdc_to_spend <= 0:
+        usdc = self._risk.position_size(sig)
+        if usdc <= 0:
             return False
 
-        # Buy slightly below fair value for a better fill
         limit_price = round(min(sig.fair_value, sig.market_price * 1.01), 4)
         limit_price = max(0.01, min(0.99, limit_price))
-        shares      = self._risk.shares_from_usdc(usdc_to_spend, limit_price)
+        shares = self._risk.shares_from_usdc(usdc, limit_price)
 
         if shares <= 0:
             return False
@@ -211,7 +239,8 @@ class PolymarketBot:
         )
 
         if resp:
-            self._risk.register_open(usdc_to_spend)
+            self._risk.register_open(usdc)
+
             self._positions[sig.token_id] = OpenPosition(
                 market_id=sig.market_id,
                 question=sig.question,
@@ -219,16 +248,44 @@ class PolymarketBot:
                 side=sig.side,
                 shares=shares,
                 entry_price=limit_price,
-                cost_usdc=usdc_to_spend,
+                cost_usdc=usdc,
+                momentum_signal=sig.momentum_signal,
+                imbalance_signal=sig.imbalance_signal,
+                composite_signal=sig.signal,
+                confidence=sig.confidence,
                 order_id=resp.get("id") if isinstance(resp, dict) else None,
             )
+
+            self._learner.record_open(
+                market_id=sig.market_id,
+                token_id=sig.token_id,
+                side=sig.side,
+                question=sig.question,
+                entry_price=limit_price,
+                shares=shares,
+                cost_usdc=usdc,
+                momentum_signal=sig.momentum_signal,
+                imbalance_signal=sig.imbalance_signal,
+                composite_signal=sig.signal,
+                confidence=sig.confidence,
+            )
+
+            tag = "[LATENCY-ARB] " if sig.is_latency_arb else ""
             logger.info(
-                f"  Opened {sig.side} position: {shares:.2f} shares @ {limit_price:.4f} "
-                f"= ${usdc_to_spend:.2f} USDC  [{sig.confidence}]"
+                f"  {tag}Opened {sig.side}: {shares:.2f}@{limit_price:.4f} "
+                f"= ${usdc:.2f}  [{sig.confidence}]"
             )
             return True
 
         return False
+
+    # ------------------------------------------------------------------
+    # Dashboard
+    # ------------------------------------------------------------------
+
+    def _refresh_dashboard(self) -> None:
+        self._dash_state.learned = self._learner.get_dashboard_dict()
+        self._dashboard.refresh(self._dash_state)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -241,7 +298,6 @@ class PolymarketBot:
             and m.volume   >= config.MIN_VOLUME_24H_USDC
             and not m.closed
             and m.active
-            # Avoid extreme prices where there's no real market
             and 0.02 <= m.yes_price <= 0.98
         ]
 
@@ -252,5 +308,5 @@ class PolymarketBot:
         )
 
     def _shutdown(self, *_) -> None:
-        logger.info("Shutdown signal received — stopping after current iteration…")
+        logger.info("Shutdown signal received…")
         self._running = False
