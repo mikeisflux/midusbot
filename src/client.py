@@ -264,7 +264,7 @@ class PolymarketClient:
 
     def get_order_book(self, token_id: str) -> OrderBook | None:
         data = self._get(
-            f"{config.CLOB_HOST}/order-book",
+            f"{config.CLOB_HOST}/book",
             params={"token_id": token_id},
         )
         if not data:
