@@ -1,0 +1,42 @@
+services:
+  midusbot:
+    build: .
+    container_name: midusbot
+    restart: unless-stopped
+
+    environment:
+      # ── Wallet ──────────────────────────────────────────────────────
+      - PRIVATE_KEY=${PRIVATE_KEY}
+
+      # ── CLOB API credentials (auto-derived on first run if blank) ───
+      - CLOB_API_KEY=${CLOB_API_KEY:-}
+      - CLOB_API_SECRET=${CLOB_API_SECRET:-}
+      - CLOB_API_PASSPHRASE=${CLOB_API_PASSPHRASE:-}
+
+      # ── Safety ──────────────────────────────────────────────────────
+      - DRY_RUN=${DRY_RUN:-true}
+      - CHAIN_ID=${CHAIN_ID:-137}
+
+      # ── Position sizing ─────────────────────────────────────────────
+      - MAX_POSITION_USDC=${MAX_POSITION_USDC:-10}
+      - MAX_TOTAL_EXPOSURE_USDC=${MAX_TOTAL_EXPOSURE_USDC:-100}
+      - KELLY_FRACTION=${KELLY_FRACTION:-0.25}
+
+      # ── Strategy ────────────────────────────────────────────────────
+      - MIN_EDGE=${MIN_EDGE:-0.03}
+      - MIN_LIQUIDITY_USDC=${MIN_LIQUIDITY_USDC:-1000}
+      - MIN_VOLUME_24H_USDC=${MIN_VOLUME_24H_USDC:-100}
+
+      # ── Loop ────────────────────────────────────────────────────────
+      - LOOP_INTERVAL_SECONDS=${LOOP_INTERVAL_SECONDS:-60}
+
+    volumes:
+      # Persist logs and learned parameters across restarts / rebuilds
+      - ./logs:/app/logs
+      - ./data:/app/data
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "7"
