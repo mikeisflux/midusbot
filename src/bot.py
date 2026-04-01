@@ -170,7 +170,7 @@ class PolymarketBot:
             ob = self._client.get_order_book(market.yes_token.token_id)
 
             # ── Strategy 1: Momentum + Imbalance ─────────────────────
-            price_hist = self._client.get_price_history(market.id)
+            price_hist = self._client.get_price_history(market.yes_token.token_id)
             sig = self._strategy.analyse(market, ob, price_hist)
 
             # ── Strategy 2: Latency Arbitrage ─────────────────────────

@@ -128,11 +128,15 @@ class PolymarketClient:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
 
-            client = ClobClient(
+            kwargs = dict(
                 host=config.CLOB_HOST,
                 chain_id=config.CHAIN_ID,
                 key=config.PRIVATE_KEY,
+                signature_type=config.SIGNATURE_TYPE,
             )
+            if config.FUNDER_ADDRESS:
+                kwargs["funder"] = config.FUNDER_ADDRESS
+            client = ClobClient(**kwargs)
 
             if config.CLOB_API_KEY and config.CLOB_API_SECRET and config.CLOB_API_PASSPHRASE:
                 creds = ApiCreds(
@@ -245,10 +249,11 @@ class PolymarketClient:
         """
         Fetch hourly (fidelity=60) price history for the YES token of a market.
         Returns most-recent points last.
+        Uses CLOB API with token_id (not Gamma market_id).
         """
         data = self._get(
-            f"{config.GAMMA_HOST}/prices-history",
-            params={"market": market_id, "interval": "1d", "fidelity": fidelity},
+            f"{config.CLOB_HOST}/prices-history",
+            params={"token_id": market_id, "interval": "1d", "fidelity": fidelity},
         )
         if not data or "history" not in data:
             return []

@@ -8,6 +8,11 @@ PRIVATE_KEY: str = os.getenv("PRIVATE_KEY", "")
 CLOB_API_KEY: str = os.getenv("CLOB_API_KEY", "")
 CLOB_API_SECRET: str = os.getenv("CLOB_API_SECRET", "")
 CLOB_API_PASSPHRASE: str = os.getenv("CLOB_API_PASSPHRASE", "")
+# Signature type: 0=EOA (MetaMask), 1=POLY_PROXY (Polymarket exported key), 2=GNOSIS_SAFE
+# If you got your private key from Polymarket.com Settings → Private Key, use 1
+SIGNATURE_TYPE: int = int(os.getenv("SIGNATURE_TYPE", "1"))
+# Funder address: your Polymarket wallet address (shown on polymarket.com top right)
+FUNDER_ADDRESS: str = os.getenv("FUNDER_ADDRESS", "")
 
 # ── Network ──────────────────────────────────────────────────────────────────
 CHAIN_ID: int = int(os.getenv("CHAIN_ID", "137"))
