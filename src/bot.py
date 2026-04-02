@@ -32,10 +32,12 @@ from src.strategy import (
     LatencyArbStrategy,
     MomentumImbalanceStrategy,
     UpDownMomentumStrategy,
+    BTCLevelStrategy,
     TradeSignal,
     _fetch_btc_price,
     _fetch_price,
     _detect_updown_market,
+    _parse_btc_level,
 )
 import config
 import src.webui as webui
@@ -72,6 +74,7 @@ class PolymarketBot:
         self._strategy   = MomentumImbalanceStrategy(params=self._learner.strategy_params)
         self._latency    = LatencyArbStrategy()
         self._updown     = UpDownMomentumStrategy()
+        self._btclevel   = BTCLevelStrategy()
         self._risk       = RiskManager(params=self._learner.risk_params)
         self._dashboard  = Dashboard(enabled=dashboard_enabled)
         self._dash_state = DashboardState()
@@ -210,6 +213,10 @@ class PolymarketBot:
 
             # ── Strategy 3: Up/Down 5-min Momentum (highest priority) ──
             sig = self._updown.analyse(market, ob)
+
+            # ── Strategy 4: BTC Price Level (daily/weekly/monthly) ────
+            if sig is None:
+                sig = self._btclevel.analyse(market, ob)
 
             # ── Strategy 1: Momentum + Imbalance ─────────────────────
             if sig is None:
@@ -492,12 +499,19 @@ class PolymarketBot:
             # fetched for momentum trading and have low liquidity by design.
             # Use _detect_updown_market on the question — more reliable than
             # trusting token outcome labels which get forced by get_updown_markets().
-            is_updown = _detect_updown_market(m.question) is not None
-
+            is_updown  = _detect_updown_market(m.question) is not None
+            is_btclevel = _parse_btc_level(m.question) is not None
 
             if is_updown:
-                # Skip only if both sides are stuck at the extremes
+                # UpDown 5-min: relaxed price check only
                 if not (0.01 <= m.yes_price <= 0.99):
+                    continue
+            elif is_btclevel:
+                # BTC level markets: allow through with loose liquidity ($50)
+                # so monthly "reach $X" cheap options are included
+                if m.liquidity < 50:
+                    continue
+                if not (0.001 <= m.yes_price <= 0.999):
                     continue
             else:
                 if m.liquidity < config.MIN_LIQUIDITY_USDC:
@@ -515,11 +529,12 @@ class PolymarketBot:
                     if secs_left < min_minutes * 60:
                         continue
                     hours_left = secs_left / 3600
-                    if not is_updown and hours_left > cutoff * 24:
+                    # BTC level markets allowed up to 35 days (monthly contracts)
+                    day_cap = 35 if is_btclevel else (999 if is_updown else cutoff)
+                    if hours_left > day_cap * 24:
                         continue
                 except Exception:
-                    # Can't parse end date — skip unless it's an UpDown market
-                    if not is_updown:
+                    if not is_updown and not is_btclevel:
                         continue
             else:
                 # No end date — skip unless it's an UpDown market

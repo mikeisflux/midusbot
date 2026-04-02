@@ -572,3 +572,200 @@ class UpDownMomentumStrategy:
             imbalance_signal=0.0,
             is_latency_arb=False,
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Strategy 4: BTC Price Level Markets (daily above/below + monthly reach/dip)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Modelled on Attentive-Silica ($723K PNL in 1 month, 67% win rate):
+#
+#  Pattern A — Daily "above $X" safe yield
+#    BTC safely above threshold → buy YES at 90-97¢, collect 3-7% edge.
+#
+#  Pattern B — Monthly/weekly "reach $X" cheap options
+#    Buy YES at 0.4-2¢ when true touch probability is 5-30%.
+#    Market massively underprices BTC volatility on far-out levels.
+#    This is how the +$195K trade (+7,360%) happened.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+import math as _math
+
+
+def _norm_cdf(z: float) -> float:
+    """Fast normal CDF (Abramowitz & Stegun)."""
+    if z >= 8.0:  return 1.0
+    if z <= -8.0: return 0.0
+    t = 1.0 / (1.0 + 0.2316419 * abs(z))
+    d = 0.3989423 * _math.exp(-z * z / 2.0)
+    p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.7814779 + t * (-1.8212560 + t * 1.3302744))))
+    return (1.0 - p) if z >= 0 else p
+
+
+def _prob_above(current: float, threshold: float, days: float, daily_vol: float = 0.04) -> float:
+    """P(log-normal price ends above threshold after `days` days)."""
+    if days <= 0:
+        return 1.0 if current >= threshold else 0.0
+    vol = daily_vol * _math.sqrt(days)
+    z   = _math.log(current / threshold) / vol
+    return _norm_cdf(z)
+
+
+def _prob_touch(current: float, target: float, days: float, daily_vol: float = 0.04) -> float:
+    """
+    P(price touches `target` at any point over `days` days).
+    Reflection principle: P(touch) = 2 * N(-|log(current/target)| / vol).
+    """
+    if days <= 0:
+        return 0.0
+    vol      = daily_vol * _math.sqrt(days)
+    log_dist = abs(_math.log(current / target))
+    return min(2.0 * _norm_cdf(-log_dist / vol), 0.999)
+
+
+def _parse_btc_level(question: str):
+    """
+    Parse a BTC price-level question.
+    Returns (mtype, p1, p2) or None.
+    mtype: 'above' | 'below' | 'between' | 'reach' | 'dip'
+    """
+    q = question.lower()
+    if "bitcoin" not in q and "btc" not in q:
+        return None
+
+    def _px(s: str) -> float | None:
+        s = s.replace(",", "").strip()
+        m = _re.match(r"(\d+(?:\.\d+)?)([kmb]?)", s)
+        if not m:
+            return None
+        v   = float(m.group(1))
+        mul = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}.get(m.group(2), 1)
+        return v * mul
+
+    for pat, mtype in (
+        (r"(?:be\s+)?(?:above|greater\s+than)\s+\$?([\d,]+(?:\.\d+)?)", "above"),
+        (r"(?:be\s+)?(?:less\s+than|below)\s+\$?([\d,]+(?:\.\d+)?)",    "below"),
+        (r"reach\s+\$?([\d,]+(?:\.\d+)?)",                               "reach"),
+        (r"dip\s+to\s+\$?([\d,]+(?:\.\d+)?)",                            "dip"),
+    ):
+        m = _re.search(pat, q)
+        if m:
+            p = _px(m.group(1))
+            return (mtype, p, None) if p else None
+
+    m = _re.search(r"between\s+\$?([\d,]+)\s+and\s+\$?([\d,]+)", q)
+    if m:
+        p1, p2 = _px(m.group(1)), _px(m.group(2))
+        return ("between", p1, p2) if p1 and p2 else None
+
+    return None
+
+
+class BTCLevelStrategy:
+    """
+    Trades BTC daily/weekly/monthly price level markets.
+
+    Four sub-patterns run simultaneously:
+
+    A) Daily above/below  — safe yield when BTC is far from threshold.
+    B) Weekly above/below — moderate certainty, multi-day window.
+    C) Reach/dip cheap options — buy YES at <5¢ when fair prob is 3×+
+       the market price. The +$195K trade was this pattern.
+    D) Range (between) — buy NO when BTC is far outside the range.
+    """
+
+    _DAILY_VOL             = 0.04   # 4% daily BTC vol (conservative)
+    _MIN_CHEAP_RATIO       = 3.0    # fair / market must be >= 3× for cheap options
+    _CHEAP_OPTION_MAX_PRICE = 0.05  # only pattern C when market price <= 5¢
+
+    def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
+        parsed = _parse_btc_level(market.question)
+        if parsed is None:
+            return None
+
+        mtype, p1, p2 = parsed
+        current_btc = _fetch_price("BTC")
+        if not current_btc or not p1:
+            return None
+
+        # Days to resolution
+        days = 1.0
+        if market.end_date:
+            try:
+                from datetime import datetime, timezone as _tz
+                end  = datetime.fromisoformat(market.end_date.replace("Z", "+00:00"))
+                days = max(0.05, (end - datetime.now(_tz.utc)).total_seconds() / 86400)
+            except Exception:
+                pass
+
+        mkt_yes = order_book.mid if order_book else market.yes_price
+        mkt_no  = 1.0 - mkt_yes
+
+        # ── Fair probabilities ────────────────────────────────────────────
+        if mtype == "above":
+            fair_yes = _prob_above(current_btc, p1, days, self._DAILY_VOL)
+        elif mtype == "below":
+            fair_yes = 1.0 - _prob_above(current_btc, p1, days, self._DAILY_VOL)
+        elif mtype in ("reach", "dip"):
+            fair_yes = _prob_touch(current_btc, p1, days, self._DAILY_VOL)
+        elif mtype == "between":
+            fair_yes = (_prob_above(current_btc, p1, days, self._DAILY_VOL)
+                        - _prob_above(current_btc, p2, days, self._DAILY_VOL))
+        else:
+            return None
+
+        fair_yes = float(np.clip(fair_yes, 0.001, 0.999))
+        fair_no  = 1.0 - fair_yes
+        edge_yes = fair_yes - mkt_yes
+        edge_no  = fair_no  - mkt_no
+
+        # ── Pattern C: cheap touch options ────────────────────────────────
+        if mtype in ("reach", "dip") and mkt_yes <= self._CHEAP_OPTION_MAX_PRICE:
+            ratio = fair_yes / max(mkt_yes, 0.001)
+            if ratio >= self._MIN_CHEAP_RATIO:
+                confidence = "HIGH" if ratio >= 8 else "MEDIUM" if ratio >= 5 else "LOW"
+                logger.info(
+                    f"[BTC-LEVEL CHEAP] {mtype.upper()} ${p1:,.0f}  BTC=${current_btc:,.0f}  "
+                    f"fair={fair_yes:.3f}  mkt={mkt_yes:.4f}  ratio={ratio:.1f}×  days={days:.0f}  "
+                    f"→ YES [{confidence}]  \"{market.question[:50]}\""
+                )
+                return TradeSignal(
+                    market_id=market.id,
+                    question=market.question,
+                    side="YES",
+                    token_id=market.yes_token.token_id,
+                    market_price=mkt_yes,
+                    fair_value=fair_yes,
+                    edge=fair_yes - mkt_yes,
+                    signal=fair_yes - mkt_yes,
+                    confidence=confidence,
+                    is_latency_arb=False,
+                )
+
+        # ── Patterns A/B/D: standard edge threshold ───────────────────────
+        if edge_yes >= edge_no and edge_yes > config.MIN_EDGE:
+            side, token, mkt_p, fair_p, edge = "YES", market.yes_token, mkt_yes, fair_yes, edge_yes
+        elif edge_no > config.MIN_EDGE:
+            side, token, mkt_p, fair_p, edge = "NO",  market.no_token,  mkt_no,  fair_no,  edge_no
+        else:
+            return None
+
+        confidence = "HIGH" if edge > 0.15 else "MEDIUM" if edge > 0.08 else "LOW"
+        logger.info(
+            f"[BTC-LEVEL] {mtype.upper()} ${p1:,.0f}  BTC=${current_btc:,.0f}  "
+            f"fair={fair_p:.3f}  mkt={mkt_p:.3f}  edge={edge:+.3f}  days={days:.1f}  "
+            f"→ {side} [{confidence}]  \"{market.question[:50]}\""
+        )
+        return TradeSignal(
+            market_id=market.id,
+            question=market.question,
+            side=side,
+            token_id=token.token_id,
+            market_price=mkt_p,
+            fair_value=fair_p,
+            edge=edge,
+            signal=edge,
+            confidence=confidence,
+            is_latency_arb=False,
+        )
