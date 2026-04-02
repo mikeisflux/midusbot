@@ -228,8 +228,8 @@ class PolymarketClient:
                 if len(outcomes) < 2 or len(token_ids) < 2:
                     continue
 
-                yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), 0)
-                no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() == "no"),  1)
+                yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("yes", "up")),   0)
+                no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no", "down")), 1)
 
                 yes_price = float(prices[yes_idx]) if len(prices) > yes_idx else 0.5
                 no_price  = float(prices[no_idx])  if len(prices) > no_idx  else 0.5
@@ -453,7 +453,7 @@ class PolymarketClient:
             logger.info(f"Fetched {len(markets)} Up/Down crypto markets (date-range).")
             return markets
 
-        # Strategy 2: text search for "up or down" — catches any missed by date filter.
+        # Strategy 2: text search for "up or down" / "higher or lower"
         for search_term in ("up or down", "higher or lower"):
             data = self._get(
                 f"{config.GAMMA_HOST}/markets",
@@ -469,7 +469,25 @@ class PolymarketClient:
                 logger.info(f"Fetched {len(markets)} Up/Down crypto markets (search '{search_term}').")
                 return markets
 
-        logger.debug("No Up/Down crypto markets in next 24h — no active slots right now.")
+        # Strategy 3: sort ALL active markets by soonest end date and scan the
+        # first 500.  UpDown 5-min markets resolve first, so they surface at the
+        # top regardless of volume.  This is the most reliable fallback.
+        data = self._get(
+            f"{config.GAMMA_HOST}/markets",
+            params={
+                "active":    "true",
+                "closed":    "false",
+                "limit":     500,
+                "order":     "endDate",
+                "ascending": "true",
+            },
+        )
+        markets = _collect(data)
+        if markets:
+            logger.info(f"Fetched {len(markets)} Up/Down crypto markets (soonest-first scan).")
+            return markets
+
+        logger.debug("No Up/Down crypto markets found — no active slots right now.")
         return []
 
     def get_price_history(self, market_id: str, fidelity: int = 60) -> list[PricePoint]:
