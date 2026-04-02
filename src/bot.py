@@ -611,7 +611,7 @@ class PolymarketBot:
                     effective_min_secs = 60 if is_updown else min_minutes * 60
                     if secs_left < effective_min_secs:
                         n_toosoon += 1
-                        logger.debug(f"too_soon: is_updown={is_updown} secs={secs_left:.0f} q={m.question[:70]}")
+                        logger.info(f"too_soon: is_updown={is_updown} secs={secs_left:.0f} slug={m.slug[:40]} q={m.question[:70]}")
                         continue
                     hours_left = secs_left / 3600
                     if is_btclevel:
