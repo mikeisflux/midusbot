@@ -30,6 +30,7 @@ class RiskManager:
     def __init__(self, params: RiskParams | None = None) -> None:
         self._params = params
         self._open_cost: float = 0.0
+        self._wallet_balance: float = 0.0
         # Daily P&L tracking
         self._daily_pnl: float = 0.0
         self._trades_today: int = 0
@@ -87,9 +88,16 @@ class RiskManager:
 
         capped = min(usdc, pos_cap)
 
-        headroom = config.MAX_TOTAL_EXPOSURE_USDC - self._open_cost
+        # Dynamic cap: 30% of wallet balance (or static MAX_TOTAL_EXPOSURE_USDC if wallet unknown)
+        if self._wallet_balance > 0:
+            dynamic_cap = self._wallet_balance * config.MAX_EXPOSURE_PCT
+        else:
+            dynamic_cap = config.MAX_TOTAL_EXPOSURE_USDC
+        headroom = dynamic_cap - self._open_cost
         if headroom <= 0:
-            logger.warning("Total exposure limit reached — skipping.")
+            logger.warning(
+                f"Exposure cap reached (cap={dynamic_cap:.2f} USDC, open={self._open_cost:.2f}) — skipping."
+            )
             return 0.0
 
         result = min(capped, headroom)
@@ -103,6 +111,10 @@ class RiskManager:
         if shares < config.MIN_ORDER_SHARES:
             return 0.0
         return round(shares, 2)
+
+    def set_wallet_balance(self, balance: float) -> None:
+        """Update known wallet balance for dynamic exposure cap calculation."""
+        self._wallet_balance = max(0.0, balance)
 
     def register_open(self, usdc_cost: float) -> None:
         self._open_cost += usdc_cost

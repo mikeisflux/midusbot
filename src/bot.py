@@ -972,6 +972,7 @@ class PolymarketBot:
         balance = self._client.get_usdc_balance()
         if balance is not None and balance > 0:
             self._dash_state.wallet_balance = balance
+            self._risk.set_wallet_balance(balance)
             # On first call, also set the equity-curve seed so P&L is relative
             # to the real starting balance
             if self._dash_state._seed == config.MAX_TOTAL_EXPOSURE_USDC:
