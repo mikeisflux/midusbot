@@ -503,17 +503,21 @@ class PolymarketBot:
                 try:
                     end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
                     secs_left = (end - now).total_seconds()
-                    # Too close to expiry — order won't fill in time
                     if secs_left < min_minutes * 60:
                         continue
                     hours_left = secs_left / 3600
-                    # Regular markets: enforce the day cap. UpDown markets close
-                    # in minutes so they always pass this.
                     if not is_updown and hours_left > cutoff * 24:
                         continue
                 except Exception:
-                    pass
-            filtered.append((m, hours_left if hours_left is not None else cutoff * 24))
+                    # Can't parse end date — skip unless it's an UpDown market
+                    if not is_updown:
+                        continue
+            else:
+                # No end date — skip unless it's an UpDown market
+                if not is_updown:
+                    continue
+
+            filtered.append((m, hours_left if hours_left is not None else 0.25))
 
         # Soonest-closing first — 5-min markets bubble to the top
         filtered.sort(key=lambda x: x[1])
