@@ -474,12 +474,23 @@ class PolymarketBot:
         for m in markets:
             if not m.active or m.closed:
                 continue
-            if m.liquidity < config.MIN_LIQUIDITY_USDC:
-                continue
-            if m.volume < config.MIN_VOLUME_24H_USDC:
-                continue
-            if not (0.02 <= m.yes_price <= 0.98):
-                continue
+
+            # UpDown 5-min markets use relaxed thresholds — they were explicitly
+            # fetched for momentum trading and have low liquidity by design.
+            is_updown = m.yes_token.outcome in ("Up", "Down") or m.no_token.outcome in ("Up", "Down")
+
+            if is_updown:
+                # Skip only if both sides are stuck at the extremes
+                if not (0.01 <= m.yes_price <= 0.99):
+                    continue
+            else:
+                if m.liquidity < config.MIN_LIQUIDITY_USDC:
+                    continue
+                if m.volume < config.MIN_VOLUME_24H_USDC:
+                    continue
+                if not (0.02 <= m.yes_price <= 0.98):
+                    continue
+
             hours_left = None
             if m.end_date:
                 try:
@@ -489,7 +500,9 @@ class PolymarketBot:
                     if secs_left < min_minutes * 60:
                         continue
                     hours_left = secs_left / 3600
-                    if hours_left > cutoff * 24:
+                    # Regular markets: enforce the day cap. UpDown markets close
+                    # in minutes so they always pass this.
+                    if not is_updown and hours_left > cutoff * 24:
                         continue
                 except Exception:
                     pass
