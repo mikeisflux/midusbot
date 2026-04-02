@@ -497,13 +497,44 @@ class PolymarketClient:
             return None
 
     def get_positions(self) -> list[dict]:
-        """Return open CLOB positions for the connected wallet."""
+        """
+        Return open positions for the connected wallet.
+        Uses the Polymarket Data API (data-api.polymarket.com/positions)
+        which returns rich position data including title, outcome, size, avgPrice.
+        Falls back to py_clob_client if FUNDER_ADDRESS is not set.
+        """
+        address = config.FUNDER_ADDRESS
+        if not address and self._clob_client:
+            # Try to derive from the CLOB client
+            try:
+                address = getattr(self._clob_client, "funder", None) or \
+                          getattr(self._clob_client, "address", None) or ""
+            except Exception:
+                address = ""
+
+        if address:
+            try:
+                data = self._get(
+                    "https://data-api.polymarket.com/positions",
+                    params={"user": address, "sizeThreshold": "0.01", "limit": "500"},
+                )
+                if isinstance(data, list):
+                    logger.info(f"get_positions: {len(data)} position(s) from data API for {address[:10]}…")
+                    return data
+                logger.warning(f"get_positions data API returned unexpected type: {type(data)}")
+            except Exception as exc:
+                logger.warning(f"get_positions data API failed: {exc}")
+
+        # Fallback: py_clob_client
         if not self._clob_client:
             return []
         try:
-            return self._clob_client.get_positions() or []
+            result = self._clob_client.get_positions() or []
+            if isinstance(result, list):
+                return result
+            return []
         except Exception as exc:
-            logger.error(f"get_positions failed: {exc}")
+            logger.error(f"get_positions fallback failed: {exc}")
             return []
 
     def get_open_orders(self) -> list[dict]:

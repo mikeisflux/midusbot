@@ -853,11 +853,13 @@ class PolymarketBot:
             logger.info("_reconcile_positions: no CLOB positions returned (wallet may be empty)")
             return
 
-        logger.info(f"_reconcile_positions: {len(raw_positions)} CLOB position(s) returned — reconciling…")
+        logger.info(f"_reconcile_positions: {len(raw_positions)} position(s) returned — reconciling…")
         added = 0
         for raw in raw_positions:
-            # py_clob_client field names vary — handle all known variants
+            # Data API fields: asset=token_id, title=question, outcome=YES/NO/Up/Down
+            # py_clob_client fields: asset_id / assetId / token_id / market
             token_id = (
+                raw.get("asset") or
                 raw.get("asset_id") or raw.get("assetId") or
                 raw.get("token_id") or raw.get("tokenId") or
                 raw.get("market") or ""
@@ -878,16 +880,28 @@ class PolymarketBot:
                 logger.debug(f"  Already tracked: {token_id[:16]}…")
                 continue
 
-            # Look up market info from Gamma API
-            market = self._client.get_market_by_clob_token_id(token_id)
-            if market:
-                question  = market.question
-                market_id = market.id
-                side      = "NO" if market.no_token.token_id == token_id else "YES"
+            # Data API gives us title and outcome directly
+            question  = raw.get("title") or raw.get("question") or ""
+            outcome   = raw.get("outcome") or ""
+            market_id = str(raw.get("conditionId") or raw.get("market_id") or "")
+
+            # Map outcome string to YES/NO
+            if outcome.lower() in ("yes", "up"):
+                side = "YES"
+            elif outcome.lower() in ("no", "down"):
+                side = "NO"
             else:
-                question  = f"[token:{token_id[:16]}]"
-                market_id = ""
-                side      = "YES"   # best guess; will be corrected next reconcile
+                side = "YES"  # fallback
+
+            # If data API didn't give us the question, ask Gamma API
+            if not question:
+                market = self._client.get_market_by_clob_token_id(token_id)
+                if market:
+                    question  = market.question
+                    market_id = market.id
+                    side      = "NO" if market.no_token.token_id == token_id else "YES"
+                else:
+                    question = f"[token:{token_id[:16]}]"
 
             cost_usdc = avg_price * size
             self._positions[token_id] = OpenPosition(
