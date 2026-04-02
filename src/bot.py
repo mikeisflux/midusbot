@@ -393,25 +393,29 @@ class PolymarketBot:
             else:
                 current_price = ob.mid
 
-            # Auto-claim: token resolved in our favour (worth $1.00).
-            if current_price >= 0.97:
-                logger.info(
-                    f"AUTO-CLAIM: resolved YES @ ${current_price:.3f} "
-                    f"({pos.shares:.2f} shares)  {pos.question[:50]}"
-                )
-                to_close.append((token_id, current_price))
-                position_snapshots.append((pos, current_price))
-                continue
+            # Auto-claim / auto-clear — LIVE mode only.
+            # In DRY_RUN we keep all positions visible so they can be
+            # manually reviewed and sold when the bot is switched back to live.
+            if not config.DRY_RUN:
+                # Auto-claim: token resolved in our favour (worth $1.00).
+                if current_price >= 0.97:
+                    logger.info(
+                        f"AUTO-CLAIM: resolved YES @ ${current_price:.3f} "
+                        f"({pos.shares:.2f} shares)  {pos.question[:50]}"
+                    )
+                    to_close.append((token_id, current_price))
+                    position_snapshots.append((pos, current_price))
+                    continue
 
-            # Auto-clear: token resolved against us (worth $0.00).
-            if current_price <= 0.03:
-                pnl = self._learner.record_close(token_id, current_price)
-                self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
-                self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
-                del self._positions[token_id]
-                self._save_positions()
-                logger.info(f"AUTO-CLEAR: resolved NO — position removed  {pos.question[:50]}")
-                continue
+                # Auto-clear: token resolved against us (worth $0.00).
+                if current_price <= 0.03:
+                    pnl = self._learner.record_close(token_id, current_price)
+                    self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
+                    self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
+                    del self._positions[token_id]
+                    self._save_positions()
+                    logger.info(f"AUTO-CLEAR: resolved NO — position removed  {pos.question[:50]}")
+                    continue
 
             pnl_pct = (
                 (current_price - pos.entry_price) / pos.entry_price
@@ -515,9 +519,12 @@ class PolymarketBot:
             pnl = self._learner.record_close(token_id, exit_price)
             self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
-            del self._positions[token_id]
-            self._save_positions()
-            logger.info(f"Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
+            # In DRY_RUN: simulate the close but keep position in tracking
+            # so it remains visible. Real deletion only happens in live mode.
+            if not config.DRY_RUN:
+                del self._positions[token_id]
+                self._save_positions()
+            logger.info(f"{'[SIM] ' if config.DRY_RUN else ''}Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
             return True
         return False
 
