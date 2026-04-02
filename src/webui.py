@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from flask import Flask, jsonify, Response, request
+from flask import Flask, jsonify, Response, request, current_app
 
 import config
 
@@ -79,6 +79,93 @@ def api_toggle_mode():
     if _state:
         _state.add_exec_log("info", f"Mode switched to {mode}")
     return jsonify({"ok": True, "dry_run": new_dry_run, "mode": mode})
+
+
+@app.route("/positions")
+def positions_page():
+    if _state is None:
+        return "<p>Bot starting...</p>"
+    s = _state
+    rows = ""
+    for pos, cur in s.positions:
+        pnl = pos.shares * (cur - pos.entry_price)
+        pnl_pct = (cur - pos.entry_price) / pos.entry_price * 100 if pos.entry_price else 0
+        pnl_color = "#00e676" if pnl >= 0 else "#ff1744"
+        sign = "+" if pnl >= 0 else ""
+        side_color = "#00e676" if pos.side == "YES" else "#ff1744"
+        rows += (
+            '<tr>'
+            '<td style="max-width:320px;white-space:normal">' + pos.question + '</td>'
+            '<td style="color:' + side_color + '">' + pos.side + '</td>'
+            '<td>' + str(round(pos.shares, 2)) + '</td>'
+            '<td>' + str(round(pos.entry_price * 100, 1)) + 'c</td>'
+            '<td>' + str(round(cur * 100, 1)) + 'c</td>'
+            '<td>$' + str(round(pos.cost_usdc, 2)) + '</td>'
+            '<td style="color:' + pnl_color + '">' + sign + '$' + str(round(abs(pnl), 2)) + ' (' + sign + str(round(pnl_pct, 1)) + '%)</td>'
+            '<td><button onclick="sellPos(\'' + pos.token_id + '\',this)" style="background:transparent;border:1px solid #ff1744;color:#ff1744;padding:4px 14px;border-radius:3px;cursor:pointer;font-family:monospace;font-size:11px">SELL</button></td>'
+            '</tr>'
+        )
+    if not rows:
+        rows = '<tr><td colspan="8" style="text-align:center;color:#4a6070;padding:40px">No open positions</td></tr>'
+
+    page = '''<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>MIDUSBOT // POSITIONS</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#080c10;color:#b0c8e0;font-family:"Courier New",monospace;font-size:12px;padding:20px}
+h1{color:#40c4ff;letter-spacing:3px;font-size:14px;margin-bottom:16px}
+table{width:100%;border-collapse:collapse}
+th{color:#4a6070;text-align:left;padding:8px 12px;border-bottom:1px solid #1c2a38;font-size:10px;text-transform:uppercase;letter-spacing:1px}
+td{padding:8px 12px;border-bottom:1px solid #111820;vertical-align:middle}
+tr:hover td{background:#0d1219}
+.btn{color:#40c4ff;text-decoration:none;border:1px solid #40c4ff;padding:4px 14px;border-radius:3px;font-size:10px;letter-spacing:1px;cursor:pointer;background:transparent;font-family:inherit;margin-right:8px}
+.btn:hover{background:#40c4ff;color:#080c10}
+</style></head><body>
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+  <h1>MIDUSBOT // OPEN POSITIONS</h1>
+  <a href="/" class="btn">HOME</a>
+</div>
+<table>
+<thead><tr>
+  <th>Market</th><th>Side</th><th>Shares</th><th>Entry</th><th>Now</th><th>Cost</th><th>P&L</th><th>Action</th>
+</tr></thead>
+<tbody>''' + rows + '''</tbody></table>
+<script>
+async function sellPos(tokenId, btn) {
+  if (!confirm("Sell this position?\\n\\nA limit SELL order will be placed at the current best bid.")) return;
+  btn.disabled = true;
+  btn.textContent = "SELLING...";
+  try {
+    var r = await fetch("/api/close_position", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({token_id: tokenId})
+    });
+    var d = await r.json();
+    if (d.ok) {
+      btn.textContent = "SOLD";
+      btn.style.color = "#00e676";
+      btn.style.borderColor = "#00e676";
+      btn.closest("tr").style.opacity = "0.4";
+    } else {
+      alert("Sell failed: " + (d.error || "unknown"));
+      btn.disabled = false;
+      btn.textContent = "SELL";
+    }
+  } catch(e) {
+    alert("Error: " + e);
+    btn.disabled = false;
+    btn.textContent = "SELL";
+  }
+}
+// Auto-refresh every 5 seconds
+setTimeout(function(){ location.reload(); }, 5000);
+</script>
+</body></html>'''
+
+    resp = current_app.make_response(page)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
 
 
 @app.route("/api/close_position", methods=["POST"])
@@ -363,51 +450,6 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 .g{color:var(--green)}.r{color:var(--red)}.y{color:var(--yellow)}.b{color:var(--blue)}.p{color:var(--purple)}.d{color:var(--dim)}
 .tag-arb{font-size:9px;background:#1a0a2a;color:var(--purple);border-radius:2px;padding:1px 4px;margin-left:4px;vertical-align:middle}
 
-/* ── POSITIONS DRAWER ── */
-#pos-overlay{
-  display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:999;
-}
-#pos-overlay.open{display:block}
-#pos-drawer{
-  position:fixed;top:0;right:0;width:580px;height:100%;
-  background:var(--bg2);border-left:2px solid var(--blue);
-  z-index:1000;display:flex;flex-direction:column;
-  transform:translateX(100%);transition:transform .25s ease;
-  box-shadow:-8px 0 32px rgba(0,0,0,.6);
-}
-#pos-drawer.open{transform:translateX(0)}
-#pos-hdr{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:12px 18px;border-bottom:1px solid var(--border);
-}
-#pos-hdr-title{color:var(--blue);font-size:12px;letter-spacing:2px;font-weight:bold}
-#pos-hdr-close{
-  background:transparent;border:1px solid var(--border);color:var(--dim);
-  padding:3px 10px;border-radius:3px;cursor:pointer;font-family:inherit;font-size:11px;
-}
-#pos-hdr-close:hover{background:var(--border);color:var(--text)}
-#pos-body{flex:1;overflow-y:auto;padding:10px 14px}
-#pos-body::-webkit-scrollbar{width:4px}
-#pos-body::-webkit-scrollbar-track{background:transparent}
-#pos-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-.pos-card{
-  background:var(--bg3);border:1px solid var(--border);border-radius:4px;
-  margin-bottom:8px;padding:10px 14px;
-}
-.pos-card:hover{border-color:#2a3a4a}
-.pos-question{color:var(--text);font-size:11px;margin-bottom:6px;line-height:1.4}
-.pos-meta{display:flex;gap:14px;font-size:11px;flex-wrap:wrap;align-items:center}
-.pos-meta .lbl{color:var(--dim)}
-.pos-meta .val{color:var(--text)}
-.pos-sell{
-  margin-left:auto;background:transparent;
-  border:1px solid var(--red);color:var(--red);
-  padding:3px 12px;border-radius:3px;cursor:pointer;
-  font-family:inherit;font-size:10px;letter-spacing:1px;
-}
-.pos-sell:hover{background:var(--red);color:var(--bg)}
-.pos-sell:disabled{opacity:.35;cursor:not-allowed}
-.pos-empty{color:var(--dim);text-align:center;padding:40px 0;font-size:12px}
 </style>
 </head>
 <body>
@@ -426,7 +468,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div>Edge <span id="h-edge" class="g">—</span></div>
     <div>Markets <span id="h-markets">—</span></div>
     <button id="mode-toggle" class="btn-action" onclick="toggleMode()" style="font-size:10px;letter-spacing:1px">⇄ SANDBOX</button>
-    <button class="btn-action" onclick="openPositions()" style="font-size:10px;letter-spacing:1px">POSITIONS <span id="h-pos-badge" style="background:var(--blue);color:var(--bg);border-radius:8px;padding:1px 6px;font-size:9px">0</span></button>
+    <a href="/positions" class="btn-action" style="font-size:10px;letter-spacing:1px;text-decoration:none">POSITIONS <span id="h-pos-badge" style="background:var(--blue);color:var(--bg);border-radius:8px;padding:1px 6px;font-size:9px">0</span></a>
     <div id="h-refresh" style="color:var(--dim)">connecting…</div>
   </div>
 </div>
@@ -504,18 +546,6 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div id="log-body"></div>
   </div>
 
-</div>
-
-<!-- POSITIONS DRAWER -->
-<div id="pos-overlay" onclick="closePositions()"></div>
-<div id="pos-drawer">
-  <div id="pos-hdr">
-    <span id="pos-hdr-title">OPEN POSITIONS</span>
-    <button id="pos-hdr-close" onclick="closePositions()">✕ CLOSE</button>
-  </div>
-  <div id="pos-body">
-    <div class="pos-empty">No open positions</div>
-  </div>
 </div>
 
 <!-- FOOTER -->
@@ -660,12 +690,9 @@ async function refresh() {
     setC('i-risk',  riskPct+'%', riskPct>=90?'r':riskPct>=60?'y':'g');
     setC('i-pos',   d.positions.length);
 
-    // Positions drawer data
-    _positions = d.positions || [];
-    const badge = $('h-pos-badge');
-    if (badge) badge.textContent = _positions.length;
-    // Re-render drawer if it's open
-    if ($('pos-drawer').classList.contains('open')) renderPositions();
+    // Positions badge
+    var badge = $('h-pos-badge');
+    if (badge) badge.textContent = (d.positions || []).length;
 
     // Fees (2 gas txs per round-trip + maker fee on typical position size)
     const typicalPos = d.max_exposure * 0.005;  // ~0.5% of exposure cap
@@ -731,77 +758,6 @@ async function resetTraining() {
   const d = await r.json();
   alert(d.message || 'Training reset complete.');
   refresh();
-}
-
-// ── POSITIONS DRAWER ─────────────────────────────────────────────────────
-let _positions = [];
-
-function openPositions() {
-  renderPositions();
-  $('pos-drawer').classList.add('open');
-  $('pos-overlay').classList.add('open');
-}
-function closePositions() {
-  $('pos-drawer').classList.remove('open');
-  $('pos-overlay').classList.remove('open');
-}
-
-function renderPositions() {
-  var body = $('pos-body');
-  if (!_positions.length) {
-    body.innerHTML = '<div class="pos-empty">No open positions</div>';
-    return;
-  }
-  var html = '';
-  for (var i = 0; i < _positions.length; i++) {
-    var p = _positions[i];
-    var pnlCls  = p.pnl_usdc >= 0 ? 'g' : 'r';
-    var pnlSign = p.pnl_usdc >= 0 ? '+' : '';
-    var pct     = (p.pnl_pct * 100).toFixed(1);
-    var pctSign = p.pnl_pct >= 0 ? '+' : '';
-    var sideCls = p.side === 'YES' ? 'g' : 'r';
-    html += '<div class="pos-card" id="card-' + p.token_id + '">';
-    html += '<div class="pos-question">' + escHtml(p.question) + '</div>';
-    html += '<div class="pos-meta">';
-    html += '<div><span class="lbl">SIDE </span><span class="val ' + sideCls + '">' + p.side + '</span></div>';
-    html += '<div><span class="lbl">SHARES </span><span class="val">' + p.shares.toFixed(2) + '</span></div>';
-    html += '<div><span class="lbl">ENTRY </span><span class="val">' + (p.entry_price*100).toFixed(1) + 'c</span></div>';
-    html += '<div><span class="lbl">NOW </span><span class="val">' + (p.current_price*100).toFixed(1) + 'c</span></div>';
-    html += '<div><span class="lbl">COST </span><span class="val">$' + (p.cost_usdc||0).toFixed(2) + '</span></div>';
-    html += '<div><span class="lbl">P&L </span><span class="val ' + pnlCls + '">' + pnlSign + '$' + Math.abs(p.pnl_usdc).toFixed(2) + ' (' + pctSign + pct + '%)</span></div>';
-    html += '<button class="pos-sell" id="sell-' + p.token_id + '" onclick="sellPosition(\'' + p.token_id + '\', this)">SELL</button>';
-    html += '</div></div>';
-  }
-  body.innerHTML = html;
-}
-
-async function sellPosition(tokenId, btn) {
-  if (!confirm('Sell this position now?\n\nA limit SELL order will be placed at the current best bid.')) return;
-  btn.disabled = true;
-  btn.textContent = 'SELLING…';
-  try {
-    const r = await fetch('/api/close_position', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({token_id: tokenId}),
-    });
-    const d = await r.json();
-    if (d.ok) {
-      const card = $('card-'+tokenId);
-      if (card) { card.style.opacity='0.4'; card.style.pointerEvents='none'; }
-      btn.textContent = 'SOLD';
-      btn.style.borderColor='var(--green)';
-      btn.style.color='var(--green)';
-    } else {
-      alert('Sell failed: ' + (d.error || 'unknown error'));
-      btn.disabled = false;
-      btn.textContent = 'SELL';
-    }
-  } catch(e) {
-    alert('Network error: ' + e);
-    btn.disabled = false;
-    btn.textContent = 'SELL';
-  }
 }
 
 refresh();
