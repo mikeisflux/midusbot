@@ -985,14 +985,10 @@ class PolymarketBot:
                     if is_updown:
                         logger.debug(f"[UD-PASS time] secs={secs_left:.0f} price={m.yes_price:.3f} q={m.question[:60]}")
                     hours_left = secs_left / 3600
-                    if is_btclevel:
-                        day_cap = 35
-                    elif is_updown:
-                        day_cap = 999
-                    elif is_sports_game:
-                        day_cap = 3
+                    if is_updown:
+                        day_cap = 999   # UpDown markets resolve in minutes/hours
                     else:
-                        day_cap = cutoff
+                        day_cap = cutoff  # MAX_DAYS_TO_RESOLUTION (default 2 = 48h)
                     if hours_left > day_cap * 24:
                         n_toolate += 1; continue
                 except Exception:

@@ -36,7 +36,7 @@ MAX_EXPOSURE_PCT: float = float(os.getenv("MAX_EXPOSURE_PCT", "0.60"))
 # ── Strategy ─────────────────────────────────────────────────────────────────
 MIN_EDGE: float = float(os.getenv("MIN_EDGE", "0.03"))
 MIN_ORDER_SHARES: float = float(os.getenv("MIN_ORDER_SHARES", "5.0"))    # Polymarket CLOB minimum
-MAX_DAYS_TO_RESOLUTION: int = int(os.getenv("MAX_DAYS_TO_RESOLUTION", "90"))   # 90 days covers Stanley Cup (75d); excludes only GTA VI / year-end markets
+MAX_DAYS_TO_RESOLUTION: int = int(os.getenv("MAX_DAYS_TO_RESOLUTION", "2"))   # 48-hour max — only bet on markets resolving soon
 MIN_MINUTES_TO_RESOLUTION: int = int(os.getenv("MIN_MINUTES_TO_RESOLUTION", "5"))  # don't enter near-expired (UpDown uses 1 min override)
 MIN_LIQUIDITY_USDC: float = float(os.getenv("MIN_LIQUIDITY_USDC", "500"))   # lower for 5-min markets
 MIN_VOLUME_24H_USDC: float = float(os.getenv("MIN_VOLUME_24H_USDC", "50"))  # lower for 5-min markets
