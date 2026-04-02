@@ -245,6 +245,68 @@ class PolymarketClient:
         logger.info(f"Fetched {len(markets)} active markets from Gamma API.")
         return markets
 
+    def get_updown_markets(self, limit: int = 100) -> list[Market]:
+        """
+        Fetch short-interval Up/Down crypto markets (XRP, BTC, ETH, SOL, DOGE).
+        These 5-15 min markets are not always in the top-200 by volume so we
+        query for them explicitly using the slug_contains filter.
+        """
+        import json as _json
+        markets: list[Market] = []
+        for keyword in ("up-or-down", "up-down"):
+            data = self._get(
+                f"{config.GAMMA_HOST}/markets",
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "limit": limit,
+                    "slug_contains": keyword,
+                },
+            )
+            if not data:
+                continue
+            for raw in data:
+                try:
+                    def _parse(field, default="[]"):
+                        v = raw.get(field, default)
+                        if isinstance(v, str):
+                            return _json.loads(v)
+                        return v if v else []
+
+                    outcomes  = _parse("outcomes")
+                    prices    = _parse("outcomePrices")
+                    token_ids = _parse("clobTokenIds")
+
+                    if len(outcomes) < 2 or len(token_ids) < 2:
+                        continue
+
+                    yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("yes", "up")), 0)
+                    no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no",  "down")), 1)
+
+                    yes_price = float(prices[yes_idx]) if len(prices) > yes_idx else 0.5
+                    no_price  = float(prices[no_idx])  if len(prices) > no_idx  else 0.5
+
+                    m = Market(
+                        id=str(raw.get("id", "")),
+                        question=raw.get("question", ""),
+                        condition_id=raw.get("conditionId", ""),
+                        slug=raw.get("slug", ""),
+                        end_date=raw.get("endDate", ""),
+                        active=bool(raw.get("active", False)),
+                        closed=bool(raw.get("closed", True)),
+                        volume=float(raw.get("volumeClob") or raw.get("volume") or 0),
+                        liquidity=float(raw.get("liquidityClob") or raw.get("liquidity") or 0),
+                        yes_token=Token(token_id=str(token_ids[yes_idx]), outcome="Up", price=yes_price),
+                        no_token=Token(token_id=str(token_ids[no_idx]),  outcome="Down", price=no_price),
+                    )
+                    if m.id not in {x.id for x in markets}:
+                        markets.append(m)
+                except Exception as exc:
+                    logger.debug(f"Skipping malformed up/down market: {exc}")
+
+        logger.info(f"Fetched {len(markets)} Up/Down crypto markets.")
+        return markets
+
     def get_price_history(self, market_id: str, fidelity: int = 60) -> list[PricePoint]:
         """
         Fetch hourly (fidelity=60) price history for the YES token of a market.

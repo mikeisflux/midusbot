@@ -162,8 +162,12 @@ class PolymarketBot:
             f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '…'} markets")
 
         markets = self._client.get_markets()
-        candidates = self._filter_markets(markets)
-        self._dash_state.markets_scanned = len(markets)
+        updown  = self._client.get_updown_markets()
+        # Deduplicate and put Up/Down markets first (they have highest urgency)
+        seen_ids = {m.id for m in updown}
+        all_markets = updown + [m for m in markets if m.id not in seen_ids]
+        candidates = self._filter_markets(all_markets)
+        self._dash_state.markets_scanned = len(all_markets)
         self._dash_state.candidates = len(candidates)
         logger.info(f"{len(candidates)}/{len(markets)} markets pass filters.")
 
