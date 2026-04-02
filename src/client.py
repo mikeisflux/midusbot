@@ -253,7 +253,7 @@ class PolymarketClient:
         """
         data = self._get(
             f"{config.CLOB_HOST}/prices-history",
-            params={"token_id": market_id, "interval": "1d", "fidelity": fidelity},
+            params={"market": market_id, "interval": "1d", "fidelity": fidelity},
         )
         if not data or "history" not in data:
             return []
