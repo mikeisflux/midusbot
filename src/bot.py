@@ -252,7 +252,7 @@ class PolymarketBot:
             for m in updown[:3]:
                 logger.info(f"  slug={m.slug[:50]}  q={m.question[:60]}  end={m.end_date}  price={m.yes_price:.3f}")
         elif not updown:
-            logger.warning("UpDown: 0 markets returned — no active 5-min crypto slots right now")
+            logger.debug("UpDown: 0 markets returned — no active slots right now")
 
         self._dash_state.add_exec_log("scan",
             f"Evaluating {len(candidates)} candidate markets on CLOB…")

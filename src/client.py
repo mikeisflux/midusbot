@@ -369,44 +369,20 @@ class PolymarketClient:
 
     def get_updown_markets(self) -> list[Market]:
         """
-        Fetch short-interval Up/Down crypto markets by:
-        1. Fetching all active markets closing within the next 4 hours
-           (using end_date_min / end_date_max Gamma API params).
-        2. Filtering locally via _detect_updown_market so only real
-           BTC/ETH/SOL/XRP etc. Up-or-Down slots are returned.
-
-        The previous slug_contains approach was broken — the Gamma API
-        ignored the param entirely and returned unrelated markets.
+        Fetch short-interval Up/Down crypto markets using multiple strategies:
+        1. Date-range query: markets closing in the next 24 hours
+        2. Text search fallback: search for "up or down" if date-range yields nothing
+        All results are filtered locally via _detect_updown_market.
         """
         import json as _json
         from datetime import datetime, timezone, timedelta
         from src.strategy import _detect_updown_market
 
-        now = datetime.now(timezone.utc)
-        end_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        end_max = (now + timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        data = self._get(
-            f"{config.GAMMA_HOST}/markets",
-            params={
-                "active": "true",
-                "closed": "false",
-                "limit": 200,
-                "end_date_min": end_min,
-                "end_date_max": end_max,
-            },
-        )
-        if not data:
-            logger.warning("No Up/Down crypto markets found — Polymarket may not have an active slot yet")
-            return []
-
-        markets: list[Market] = []
-        for raw in data:
+        def _parse_market(raw: dict) -> "Market | None":
+            question = raw.get("question", "")
+            if not _detect_updown_market(question):
+                return None
             try:
-                question = raw.get("question", "")
-                if not _detect_updown_market(question):
-                    continue  # only keep real Up/Down crypto markets
-
                 def _parse(field, default="[]"):
                     v = raw.get(field, default)
                     if isinstance(v, str):
@@ -418,15 +394,15 @@ class PolymarketClient:
                 token_ids = _parse("clobTokenIds")
 
                 if len(outcomes) < 2 or len(token_ids) < 2:
-                    continue
+                    return None
 
                 yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("yes", "up")), 0)
-                no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no",  "down")), 1)
+                no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no", "down")), 1)
 
                 yes_price = float(prices[yes_idx]) if len(prices) > yes_idx else 0.5
                 no_price  = float(prices[no_idx])  if len(prices) > no_idx  else 0.5
 
-                m = Market(
+                return Market(
                     id=str(raw.get("id", "")),
                     question=question,
                     condition_id=raw.get("conditionId", ""),
@@ -436,19 +412,65 @@ class PolymarketClient:
                     closed=bool(raw.get("closed", False)),
                     volume=float(raw.get("volumeClob") or raw.get("volume") or 0),
                     liquidity=float(raw.get("liquidityClob") or raw.get("liquidity") or 0),
-                    yes_token=Token(token_id=str(token_ids[yes_idx]), outcome="Up", price=yes_price),
+                    yes_token=Token(token_id=str(token_ids[yes_idx]), outcome="Up",   price=yes_price),
                     no_token=Token(token_id=str(token_ids[no_idx]),  outcome="Down", price=no_price),
                 )
-                if m.id not in {x.id for x in markets}:
-                    markets.append(m)
             except Exception as exc:
                 logger.debug(f"Skipping malformed up/down market: {exc}")
+                return None
 
+        def _collect(data: list | None) -> list:
+            if not data:
+                return []
+            seen: set[str] = set()
+            results = []
+            for raw in data:
+                m = _parse_market(raw)
+                if m and m.id and m.id not in seen:
+                    seen.add(m.id)
+                    results.append(m)
+            return results
+
+        now     = datetime.now(timezone.utc)
+        end_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Strategy 1: date-range query — markets closing in the next 24 hours.
+        # A 24h window catches both imminent slots AND upcoming batches Polymarket
+        # pre-creates (slots are typically created a few hours in advance).
+        end_max_24h = (now + timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        data = self._get(
+            f"{config.GAMMA_HOST}/markets",
+            params={
+                "active":       "true",
+                "closed":       "false",
+                "limit":        500,
+                "end_date_min": end_min,
+                "end_date_max": end_max_24h,
+            },
+        )
+        markets = _collect(data)
         if markets:
-            logger.info(f"Fetched {len(markets)} Up/Down crypto markets.")
-        else:
-            logger.warning("No Up/Down crypto markets found — Polymarket may not have an active slot yet")
-        return markets
+            logger.info(f"Fetched {len(markets)} Up/Down crypto markets (date-range).")
+            return markets
+
+        # Strategy 2: text search for "up or down" — catches any missed by date filter.
+        for search_term in ("up or down", "higher or lower"):
+            data = self._get(
+                f"{config.GAMMA_HOST}/markets",
+                params={
+                    "active":  "true",
+                    "closed":  "false",
+                    "limit":   500,
+                    "search":  search_term,
+                },
+            )
+            markets = _collect(data)
+            if markets:
+                logger.info(f"Fetched {len(markets)} Up/Down crypto markets (search '{search_term}').")
+                return markets
+
+        logger.debug("No Up/Down crypto markets in next 24h — no active slots right now.")
+        return []
 
     def get_price_history(self, market_id: str, fidelity: int = 60) -> list[PricePoint]:
         """
