@@ -361,11 +361,16 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 .tag-arb{font-size:9px;background:#1a0a2a;color:var(--purple);border-radius:2px;padding:1px 4px;margin-left:4px;vertical-align:middle}
 
 /* ── POSITIONS DRAWER ── */
+#pos-overlay{
+  display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:999;
+}
+#pos-overlay.open{display:block}
 #pos-drawer{
-  position:fixed;top:0;right:0;width:560px;height:100%;
-  background:var(--bg2);border-left:1px solid var(--border);
+  position:fixed;top:0;right:0;width:580px;height:100%;
+  background:var(--bg2);border-left:2px solid var(--blue);
   z-index:1000;display:flex;flex-direction:column;
-  transform:translateX(100%);transition:transform .22s ease;
+  transform:translateX(100%);transition:transform .25s ease;
+  box-shadow:-8px 0 32px rgba(0,0,0,.6);
 }
 #pos-drawer.open{transform:translateX(0)}
 #pos-hdr{
@@ -499,6 +504,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 </div>
 
 <!-- POSITIONS DRAWER -->
+<div id="pos-overlay" onclick="closePositions()"></div>
 <div id="pos-drawer">
   <div id="pos-hdr">
     <span id="pos-hdr-title">OPEN POSITIONS</span>
@@ -730,9 +736,11 @@ let _positions = [];
 function openPositions() {
   renderPositions();
   $('pos-drawer').classList.add('open');
+  $('pos-overlay').classList.add('open');
 }
 function closePositions() {
   $('pos-drawer').classList.remove('open');
+  $('pos-overlay').classList.remove('open');
 }
 
 function renderPositions() {
