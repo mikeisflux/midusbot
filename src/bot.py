@@ -219,13 +219,12 @@ class PolymarketBot:
         self._dash_state.candidates = len(candidates)
         updown_passing = [m for m in candidates if _detect_updown_market(m.question)]
         logger.info(f"{len(candidates)}/{len(all_markets)} markets pass filters — {len(updown_passing)} UpDown, {len(candidates)-len(updown_passing)} regular.")
-        if self._dash_state.loop_count == 1:
-            if updown:
-                logger.info(f"First {min(5,len(updown))} UpDown markets:")
-                for m in updown[:5]:
-                    logger.info(f"  slug={m.slug[:50]}  q={m.question[:60]}  end={m.end_date}")
-            else:
-                logger.warning("UpDown: 0 markets returned — no active 5-min crypto slots right now")
+        if updown and self._dash_state.loop_count <= 3:
+            logger.info(f"First {min(3,len(updown))} UpDown markets:")
+            for m in updown[:3]:
+                logger.info(f"  slug={m.slug[:50]}  q={m.question[:60]}  end={m.end_date}  price={m.yes_price:.3f}")
+        elif not updown:
+            logger.warning("UpDown: 0 markets returned — no active 5-min crypto slots right now")
 
         self._dash_state.add_exec_log("scan",
             f"Evaluating {len(candidates)} candidate markets on CLOB…")
@@ -560,7 +559,8 @@ class PolymarketBot:
         filtered = []
 
         # Debug counters — logged once per loop at INFO level
-        n_inactive = n_price = n_liquidity = n_volume = n_toosoon = n_toolate = n_nodate = 0
+        n_inactive = n_price = n_liquidity = n_volume = n_toosoon = n_toolate = n_nodate = n_expired = 0
+        n_updown_seen = n_updown_pass = 0
 
         for m in markets:
             if not m.active or m.closed:
@@ -568,6 +568,8 @@ class PolymarketBot:
                 continue
 
             is_updown   = _detect_updown_market(m.question) is not None
+            if is_updown:
+                n_updown_seen += 1
             is_btclevel = _parse_btc_level(m.question) is not None
             q_lower = m.question.lower()
             is_sports_game = any(kw in q_lower for kw in (
@@ -585,6 +587,7 @@ class PolymarketBot:
 
             if is_updown:
                 if not (0.01 <= m.yes_price <= 0.99):
+                    logger.debug(f"[UD-DROP price] yes_price={m.yes_price:.3f} q={m.question[:60]}")
                     n_price += 1; continue
             elif is_btclevel:
                 if m.liquidity < 50:
@@ -606,6 +609,10 @@ class PolymarketBot:
                 try:
                     end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
                     secs_left = (end - now).total_seconds()
+                    # Truly expired markets (Gamma API still marks active=true after resolution)
+                    if secs_left < -300:
+                        n_expired += 1
+                        continue
                     # UpDown 5-min markets: allow entry as long as >1 min remains
                     # Regular markets: use MIN_MINUTES_TO_RESOLUTION (default 5)
                     effective_min_secs = 60 if is_updown else min_minutes * 60
@@ -613,6 +620,8 @@ class PolymarketBot:
                         n_toosoon += 1
                         logger.info(f"too_soon: is_updown={is_updown} secs={secs_left:.0f} slug={m.slug[:40]} q={m.question[:70]}")
                         continue
+                    if is_updown:
+                        logger.debug(f"[UD-PASS time] secs={secs_left:.0f} price={m.yes_price:.3f} q={m.question[:60]}")
                     hours_left = secs_left / 3600
                     if is_btclevel:
                         day_cap = 35
@@ -631,15 +640,19 @@ class PolymarketBot:
                 if not is_updown and not is_sports_game:
                     n_nodate += 1; continue
 
+            if is_updown:
+                n_updown_pass += 1
             filtered.append((m, hours_left if hours_left is not None else 0.25))
 
-        total_dropped = n_inactive + n_price + n_liquidity + n_volume + n_toosoon + n_toolate + n_nodate
+        total_dropped = n_inactive + n_price + n_liquidity + n_volume + n_toosoon + n_toolate + n_nodate + n_expired
         if total_dropped > 0:
             logger.info(
                 f"Filter drops: inactive={n_inactive} price={n_price} "
                 f"liquidity={n_liquidity} volume={n_volume} "
-                f"too_soon={n_toosoon} too_late={n_toolate} no_date={n_nodate}"
+                f"too_soon={n_toosoon} too_late={n_toolate} no_date={n_nodate} expired={n_expired}"
             )
+        if n_updown_seen > 0:
+            logger.info(f"UpDown filter: {n_updown_seen} seen → {n_updown_pass} pass")
 
         # Soonest-closing first — 5-min markets bubble to the top
         filtered.sort(key=lambda x: x[1])

@@ -1120,29 +1120,78 @@ def _fetch_vegas_odds() -> list[dict]:
     return all_games
 
 
+_GENERIC_SPORT_WORDS = frozenset({
+    # Common English words that appear in many team names
+    "city", "united", "real", "club", "town", "county", "athletic",
+    "sport", "sports", "football", "soccer", "basketball", "baseball",
+    "hockey", "league", "national", "american", "international",
+    "north", "south", "east", "west", "central", "royal", "red", "blue",
+    "black", "white", "green", "gold", "silver", "state", "metro",
+    "college", "university",
+})
+
+# Map Odds-API sport keys to keywords that should appear in the question
+_SPORT_QUESTION_HINTS: dict[str, tuple[str, ...]] = {
+    "basketball_nba":         ("nba", "basketball"),
+    "americanfootball_nfl":   ("nfl", "super bowl", "football"),
+    "baseball_mlb":           ("mlb", "baseball", "world series"),
+    "icehockey_nhl":          ("nhl", "hockey", "stanley cup"),
+    "soccer_epl":             ("premier league", "epl", "soccer", "football"),
+    "soccer_mls":             ("mls", "major league soccer", "soccer"),
+    "soccer_uefa_champs_league": ("champions league", "ucl", "soccer"),
+}
+
+
 def _match_vegas_game(market_question: str, games: list[dict]) -> dict | None:
     """
     Fuzzy-match a Polymarket question to a Vegas game.
-    Returns the game dict if a confident match is found.
+    Returns the game dict only when we have high confidence:
+      - At least 2 meaningful (non-generic) words from each team must appear
+        in the question, OR the full team name substring is present.
+      - The sport type must be consistent with the question wording.
     """
     q = market_question.lower()
     best: dict | None = None
     best_score = 0
 
     for game in games:
-        home_parts = game["home_team"].lower().split()
-        away_parts = game["away_team"].lower().split()
+        sport_key = game.get("sport_key", "")
+        home_team = game["home_team"]
+        away_team = game["away_team"]
 
-        # Score = number of distinct team name words found in the question
-        score = 0
-        for word in home_parts + away_parts:
-            if len(word) >= 4 and word in q:
-                score += 1
+        home_lower = home_team.lower()
+        away_lower = away_team.lower()
 
-        # Require at least one word from each team
-        home_hit = any(len(w) >= 4 and w in q for w in home_parts)
-        away_hit = any(len(w) >= 4 and w in q for w in away_parts)
-        if home_hit and away_hit and score > best_score:
+        # Fast path: exact substring match for either team
+        home_exact = home_lower in q
+        away_exact = away_lower in q
+
+        if home_exact or away_exact:
+            score = 10 + int(home_exact) + int(away_exact)
+        else:
+            # Count non-generic meaningful words per team
+            home_parts = [w for w in home_lower.split() if w not in _GENERIC_SPORT_WORDS and len(w) >= 3]
+            away_parts = [w for w in away_lower.split() if w not in _GENERIC_SPORT_WORDS and len(w) >= 3]
+
+            home_hits = sum(1 for w in home_parts if w in q)
+            away_hits = sum(1 for w in away_parts if w in q)
+
+            # Need ≥1 meaningful hit from EACH team to avoid cross-sport matches
+            if home_hits == 0 or away_hits == 0:
+                continue
+
+            # At least 2 total meaningful hits to reduce false positives
+            score = home_hits + away_hits
+            if score < 2:
+                continue
+
+        # Sport-type consistency check: if we know the sport, the question
+        # should contain at least one hint word for that sport.
+        hints = _SPORT_QUESTION_HINTS.get(sport_key)
+        if hints and not any(h in q for h in hints):
+            continue
+
+        if score > best_score:
             best_score = score
             best = game
 
