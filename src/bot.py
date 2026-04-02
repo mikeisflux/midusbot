@@ -133,7 +133,7 @@ class PolymarketBot:
         self._dash_state.add_equity_point()
 
         # Start web UI (always, regardless of terminal dashboard)
-        webui.start(self._dash_state, port=8080, learner=self._learner)
+        webui.start(self._dash_state, port=8080, learner=self._learner, close_position_fn=self._close_position)
         self._dash_state.add_exec_log("info", "MIDUSBOT started — scanning Polymarket CLOB…")
         self._dash_state.add_exec_log("info",
             f"Config: MAX_POS=${config.MAX_POSITION_USDC}  "
@@ -397,10 +397,11 @@ class PolymarketBot:
         for token_id in to_close:
             self._close_position(token_id)
 
-    def _close_position(self, token_id: str) -> None:
+    def _close_position(self, token_id: str) -> bool:
         pos = self._positions.get(token_id)
         if not pos:
-            return
+            logger.warning(f"_close_position: token_id {token_id[:12]}… not found in open positions")
+            return False
 
         ob = self._client.get_order_book(token_id)
         sell_price = ob.best_bid if ob else pos.entry_price
@@ -419,6 +420,8 @@ class PolymarketBot:
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
             del self._positions[token_id]
             logger.info(f"Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Trade execution

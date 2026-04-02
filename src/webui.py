@@ -33,6 +33,7 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 app      = Flask(__name__)
 _state:   DashboardState | None = None
 _learner: AdaptiveLearner | None = None
+_close_position_fn = None   # injected by bot: fn(token_id) -> bool
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -75,6 +76,22 @@ def api_toggle_mode():
     if _state:
         _state.add_exec_log("info", f"Mode switched to {mode}")
     return jsonify({"ok": True, "dry_run": new_dry_run, "mode": mode})
+
+
+@app.route("/api/close_position", methods=["POST"])
+def api_close_position():
+    """Manually close (sell) an open position by token_id."""
+    if _close_position_fn is None:
+        return jsonify({"ok": False, "error": "close_position not wired"})
+    data = request.get_json(silent=True) or {}
+    token_id = data.get("token_id", "").strip()
+    if not token_id:
+        return jsonify({"ok": False, "error": "token_id required"})
+    try:
+        ok = _close_position_fn(token_id)
+        return jsonify({"ok": bool(ok)})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)})
 
 
 @app.route("/api/clear_logs", methods=["POST"])
@@ -172,11 +189,13 @@ def _build(s: DashboardState) -> dict:
         "exec_log":        s.exec_log[:80],
         "positions": [
             {
-                "question":      pos.question[:55],
+                "token_id":      pos.token_id,
+                "question":      pos.question[:60],
                 "side":          pos.side,
                 "shares":        pos.shares,
                 "entry_price":   pos.entry_price,
                 "current_price": cur,
+                "cost_usdc":     pos.cost_usdc,
                 "pnl_usdc":      round(pos.shares * (cur - pos.entry_price), 4),
                 "pnl_pct":       (cur - pos.entry_price) / pos.entry_price if pos.entry_price else 0,
             }
@@ -211,10 +230,11 @@ def _build(s: DashboardState) -> dict:
 # Start helper
 # ---------------------------------------------------------------------------
 
-def start(state: DashboardState, port: int = 8080, learner: AdaptiveLearner | None = None) -> None:
-    global _state, _learner
-    _state   = state
-    _learner = learner
+def start(state: DashboardState, port: int = 8080, learner: AdaptiveLearner | None = None, close_position_fn=None) -> None:
+    global _state, _learner, _close_position_fn
+    _state              = state
+    _learner            = learner
+    _close_position_fn  = close_position_fn
     t = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False),
         daemon=True,
@@ -339,6 +359,47 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 /* ── COLOURS ── */
 .g{color:var(--green)}.r{color:var(--red)}.y{color:var(--yellow)}.b{color:var(--blue)}.p{color:var(--purple)}.d{color:var(--dim)}
 .tag-arb{font-size:9px;background:#1a0a2a;color:var(--purple);border-radius:2px;padding:1px 4px;margin-left:4px;vertical-align:middle}
+
+/* ── POSITIONS DRAWER ── */
+#pos-drawer{
+  position:fixed;top:0;right:0;width:560px;height:100%;
+  background:var(--bg2);border-left:1px solid var(--border);
+  z-index:1000;display:flex;flex-direction:column;
+  transform:translateX(100%);transition:transform .22s ease;
+}
+#pos-drawer.open{transform:translateX(0)}
+#pos-hdr{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 18px;border-bottom:1px solid var(--border);
+}
+#pos-hdr-title{color:var(--blue);font-size:12px;letter-spacing:2px;font-weight:bold}
+#pos-hdr-close{
+  background:transparent;border:1px solid var(--border);color:var(--dim);
+  padding:3px 10px;border-radius:3px;cursor:pointer;font-family:inherit;font-size:11px;
+}
+#pos-hdr-close:hover{background:var(--border);color:var(--text)}
+#pos-body{flex:1;overflow-y:auto;padding:10px 14px}
+#pos-body::-webkit-scrollbar{width:4px}
+#pos-body::-webkit-scrollbar-track{background:transparent}
+#pos-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.pos-card{
+  background:var(--bg3);border:1px solid var(--border);border-radius:4px;
+  margin-bottom:8px;padding:10px 14px;
+}
+.pos-card:hover{border-color:#2a3a4a}
+.pos-question{color:var(--text);font-size:11px;margin-bottom:6px;line-height:1.4}
+.pos-meta{display:flex;gap:14px;font-size:11px;flex-wrap:wrap;align-items:center}
+.pos-meta .lbl{color:var(--dim)}
+.pos-meta .val{color:var(--text)}
+.pos-sell{
+  margin-left:auto;background:transparent;
+  border:1px solid var(--red);color:var(--red);
+  padding:3px 12px;border-radius:3px;cursor:pointer;
+  font-family:inherit;font-size:10px;letter-spacing:1px;
+}
+.pos-sell:hover{background:var(--red);color:var(--bg)}
+.pos-sell:disabled{opacity:.35;cursor:not-allowed}
+.pos-empty{color:var(--dim);text-align:center;padding:40px 0;font-size:12px}
 </style>
 </head>
 <body>
@@ -357,6 +418,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div>Edge <span id="h-edge" class="g">—</span></div>
     <div>Markets <span id="h-markets">—</span></div>
     <button id="mode-toggle" class="btn-action" onclick="toggleMode()" style="font-size:10px;letter-spacing:1px">⇄ SANDBOX</button>
+    <button class="btn-action" onclick="openPositions()" style="font-size:10px;letter-spacing:1px">POSITIONS <span id="h-pos-badge" style="background:var(--blue);color:var(--bg);border-radius:8px;padding:1px 6px;font-size:9px">0</span></button>
     <div id="h-refresh" style="color:var(--dim)">connecting…</div>
   </div>
 </div>
@@ -434,6 +496,17 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div id="log-body"></div>
   </div>
 
+</div>
+
+<!-- POSITIONS DRAWER -->
+<div id="pos-drawer">
+  <div id="pos-hdr">
+    <span id="pos-hdr-title">OPEN POSITIONS</span>
+    <button id="pos-hdr-close" onclick="closePositions()">✕ CLOSE</button>
+  </div>
+  <div id="pos-body">
+    <div class="pos-empty">No open positions</div>
+  </div>
 </div>
 
 <!-- FOOTER -->
@@ -578,6 +651,13 @@ async function refresh() {
     setC('i-risk',  riskPct+'%', riskPct>=90?'r':riskPct>=60?'y':'g');
     setC('i-pos',   d.positions.length);
 
+    // Positions drawer data
+    _positions = d.positions || [];
+    const badge = $('h-pos-badge');
+    if (badge) badge.textContent = _positions.length;
+    // Re-render drawer if it's open
+    if ($('pos-drawer').classList.contains('open')) renderPositions();
+
     // Fees (2 gas txs per round-trip + maker fee on typical position size)
     const typicalPos = d.max_exposure * 0.005;  // ~0.5% of exposure cap
     const feePerTrade = 2 * (d.gas_cost_usdc||0.02) + typicalPos * (d.maker_fee_pct||0) * 2;
@@ -642,6 +722,73 @@ async function resetTraining() {
   const d = await r.json();
   alert(d.message || 'Training reset complete.');
   refresh();
+}
+
+// ── POSITIONS DRAWER ─────────────────────────────────────────────────────
+let _positions = [];
+
+function openPositions() {
+  renderPositions();
+  $('pos-drawer').classList.add('open');
+}
+function closePositions() {
+  $('pos-drawer').classList.remove('open');
+}
+
+function renderPositions() {
+  const body = $('pos-body');
+  if (!_positions.length) {
+    body.innerHTML = '<div class="pos-empty">No open positions</div>';
+    return;
+  }
+  body.innerHTML = _positions.map(p => {
+    const pnlCls  = p.pnl_usdc >= 0 ? 'g' : 'r';
+    const pnlSign = p.pnl_usdc >= 0 ? '+' : '';
+    const pct     = (p.pnl_pct * 100).toFixed(1);
+    const pctSign = p.pnl_pct >= 0 ? '+' : '';
+    return `
+    <div class="pos-card" id="card-${p.token_id}">
+      <div class="pos-question">${escHtml(p.question)}</div>
+      <div class="pos-meta">
+        <div><span class="lbl">SIDE </span><span class="val ${p.side==='YES'?'g':'r'}">${p.side}</span></div>
+        <div><span class="lbl">SHARES </span><span class="val">${p.shares.toFixed(2)}</span></div>
+        <div><span class="lbl">ENTRY </span><span class="val">${(p.entry_price*100).toFixed(1)}¢</span></div>
+        <div><span class="lbl">NOW </span><span class="val">${(p.current_price*100).toFixed(1)}¢</span></div>
+        <div><span class="lbl">COST </span><span class="val">$${(p.cost_usdc||0).toFixed(2)}</span></div>
+        <div><span class="lbl">P&amp;L </span><span class="val ${pnlCls}">${pnlSign}$${Math.abs(p.pnl_usdc).toFixed(2)} (${pctSign}${pct}%)</span></div>
+        <button class="pos-sell" id="sell-${p.token_id}" onclick="sellPosition('${p.token_id}', this)">SELL</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function sellPosition(tokenId, btn) {
+  if (!confirm('Sell this position now?\n\nA limit SELL order will be placed at the current best bid.')) return;
+  btn.disabled = true;
+  btn.textContent = 'SELLING…';
+  try {
+    const r = await fetch('/api/close_position', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({token_id: tokenId}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      const card = $('card-'+tokenId);
+      if (card) { card.style.opacity='0.4'; card.style.pointerEvents='none'; }
+      btn.textContent = 'SOLD';
+      btn.style.borderColor='var(--green)';
+      btn.style.color='var(--green)';
+    } else {
+      alert('Sell failed: ' + (d.error || 'unknown error'));
+      btn.disabled = false;
+      btn.textContent = 'SELL';
+    }
+  } catch(e) {
+    alert('Network error: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'SELL';
+  }
 }
 
 refresh();
