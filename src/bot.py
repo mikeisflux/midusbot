@@ -141,8 +141,14 @@ class PolymarketBot:
                 logger.info(f"Cancelling {len(stale)} stale open order(s) from previous session…")
                 self._client.cancel_all_orders()
 
-        # Restore open positions from disk (before risk/exposure calculations)
-        self._load_positions()
+        # Start fresh — discard any stale positions.json from previous sessions.
+        # _reconcile_positions will re-add positions that are genuinely still open
+        # on Polymarket (active market, price not at 0.00 or 1.00).
+        self._positions.clear()
+        _pos_file = __import__("pathlib").Path("data/positions.json")
+        if _pos_file.exists():
+            _pos_file.unlink()
+            logger.info("Cleared stale positions file — will re-reconcile from CLOB.")
 
         # Reconcile with live CLOB positions — catches positions opened before
         # persistence was added, or opened directly on polymarket.com
@@ -1146,6 +1152,20 @@ class PolymarketBot:
             if not question:
                 question = market_id[:20] if market_id else f"[token:{token_id[:16]}]"
 
+            # Check current price — skip positions that have already resolved
+            # (price at 0.00 = lost, price at 1.00 = won). These show up in
+            # trade history but the market is done; adding them inflates exposure.
+            ob = self._client.get_order_book(token_id)
+            if ob is not None:
+                cur_price = ob.mid
+            else:
+                cur_price = avg_price  # fallback; will be checked next manage loop
+            if cur_price >= 0.97 or cur_price <= 0.03:
+                logger.info(
+                    f"  Skipping resolved position (price={cur_price:.2f}): {question[:55]}"
+                )
+                continue
+
             cost_usdc = avg_price * size
             self._positions[token_id] = OpenPosition(
                 market_id=market_id,
@@ -1160,7 +1180,7 @@ class PolymarketBot:
             added += 1
             logger.info(
                 f"  Reconciled {side} {size:.2f}@{avg_price:.4f} "
-                f"= ${cost_usdc:.2f} — {question[:55]}"
+                f"= ${cost_usdc:.2f}  price={cur_price:.2f} — {question[:55]}"
             )
 
         if added:

@@ -116,8 +116,16 @@ class RiskManager:
         self._daily_pnl += pnl_usdc
 
     def total_exposure(self) -> float:
-        """Live open exposure in USDC — computed directly from positions dict."""
-        return sum(p.cost_usdc for p in self._positions.values())
+        """Live open exposure in USDC — bot-placed positions only.
+
+        External (reconciled) positions are excluded: they represent capital
+        committed before the bot's risk management was active, so counting them
+        would incorrectly block new bot-placed trades.
+        """
+        return sum(
+            p.cost_usdc for p in self._positions.values()
+            if not p.is_external
+        )
 
     def should_stop_loss(self, pnl_pct: float) -> bool:
         return pnl_pct <= self._stop_loss
