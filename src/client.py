@@ -498,56 +498,122 @@ class PolymarketClient:
 
     def get_positions(self) -> list[dict]:
         """
-        Return open positions for the connected wallet.
-        Uses the Polymarket Data API (data-api.polymarket.com/positions)
-        which returns rich position data including title, outcome, size, avgPrice.
-        Falls back to py_clob_client if FUNDER_ADDRESS is not set.
+        Reconstruct open positions from confirmed trade history.
+
+        Algorithm:
+          1. Fetch all CONFIRMED trades via the authenticated CLOB API.
+          2. Group by token (asset_id): net_shares = sum(BUY) - sum(SELL).
+          3. For tokens with net_shares > 0.01 return synthetic position dicts
+             with the same field names that _reconcile_positions() expects.
+
+        Falls back to data-api.polymarket.com/positions if the trade history
+        call fails (e.g. CLOB client not initialised).
         """
-        address = config.FUNDER_ADDRESS
-        if not address and self._clob_client:
-            # Try to derive from the CLOB client
+        address = config.FUNDER_ADDRESS.lower() if config.FUNDER_ADDRESS else ""
+
+        # ── 1. Try authenticated trade history ──────────────────────────────
+        trades: list[dict] = []
+        if self._clob_client:
             try:
-                address = getattr(self._clob_client, "funder", None) or \
-                          getattr(self._clob_client, "address", None) or ""
-            except Exception:
-                address = ""
+                raw = self._clob_client.get_trades() or {}
+                if isinstance(raw, list):
+                    trades = raw
+                elif isinstance(raw, dict):
+                    for key in ("data", "trades", "results"):
+                        if key in raw and isinstance(raw[key], list):
+                            trades = raw[key]
+                            break
+                logger.info(f"get_positions: {len(trades)} trade(s) from py_clob_client")
+            except Exception as exc:
+                logger.warning(f"get_positions: py_clob_client.get_trades() failed: {exc}")
 
-        if address:
-            addr_lower = address.lower()
-            for endpoint in [
-                "https://data-api.polymarket.com/positions",
-                f"{config.GAMMA_HOST}/positions",
-            ]:
+        # If py_clob_client gave nothing, try the REST trade history endpoint
+        if not trades and address:
+            try:
+                raw = self._get(
+                    f"{config.CLOB_HOST}/data/tradeHistory",
+                    params={"maker_address": address, "limit": "500"},
+                )
+                if isinstance(raw, list):
+                    trades = raw
+                elif isinstance(raw, dict):
+                    for key in ("data", "trades", "results"):
+                        if key in raw and isinstance(raw[key], list):
+                            trades = raw[key]
+                            break
+                logger.info(f"get_positions: {len(trades)} trade(s) from REST tradeHistory")
+            except Exception as exc:
+                logger.warning(f"get_positions: REST tradeHistory failed: {exc}")
+
+        # ── 2. Aggregate into net positions ─────────────────────────────────
+        if trades:
+            from collections import defaultdict
+            buys: dict[str, list[tuple[float, float]]] = defaultdict(list)
+            sells: dict[str, float] = defaultdict(float)
+            meta: dict[str, dict] = {}  # token_id -> {outcome, conditionId}
+
+            for t in trades:
+                if t.get("status") not in ("CONFIRMED", "MINED", "MATCHED", None, ""):
+                    continue
+                tid = t.get("asset_id") or t.get("assetId") or ""
+                if not tid:
+                    continue
                 try:
-                    data = self._get(
-                        endpoint,
-                        params={"user": addr_lower, "sizeThreshold": "0", "limit": "500"},
-                    )
-                    logger.info(f"get_positions {endpoint}: raw type={type(data).__name__}  preview={str(data)[:200]}")
-                    # Response may be a list or a dict with a 'data'/'results' key
-                    if isinstance(data, list):
-                        logger.info(f"get_positions: {len(data)} position(s) from {endpoint}")
-                        return data
-                    if isinstance(data, dict):
-                        for key in ("data", "results", "positions"):
-                            if key in data and isinstance(data[key], list):
-                                logger.info(f"get_positions: {len(data[key])} position(s) from {endpoint}['{key}']")
-                                return data[key]
-                    logger.warning(f"get_positions {endpoint}: unrecognised response format")
-                except Exception as exc:
-                    logger.warning(f"get_positions {endpoint} failed: {exc}")
+                    sz = float(t.get("size", 0) or 0)
+                    pr = float(t.get("price", 0) or 0)
+                except (ValueError, TypeError):
+                    continue
+                side = (t.get("side") or "").upper()
+                if side == "BUY":
+                    buys[tid].append((sz, pr))
+                elif side == "SELL":
+                    sells[tid] += sz
+                meta[tid] = {
+                    "outcome":     t.get("outcome") or "",
+                    "conditionId": t.get("market") or "",
+                }
 
-        # Fallback: py_clob_client
-        if not self._clob_client:
-            return []
-        try:
-            result = self._clob_client.get_positions() or []
-            if isinstance(result, list):
-                return result
-            return []
-        except Exception as exc:
-            logger.error(f"get_positions fallback failed: {exc}")
-            return []
+            positions = []
+            for token_id, buy_list in buys.items():
+                total_buy  = sum(s for s, _ in buy_list)
+                total_sell = sells.get(token_id, 0.0)
+                net        = round(total_buy - total_sell, 6)
+                if net < 0.01:
+                    continue
+                avg_price = (
+                    sum(s * p for s, p in buy_list) / total_buy
+                    if total_buy > 0 else 0.5
+                )
+                m = meta.get(token_id, {})
+                positions.append({
+                    "asset":       token_id,
+                    "size":        net,
+                    "avgPrice":    avg_price,
+                    "outcome":     m.get("outcome", ""),
+                    "conditionId": m.get("conditionId", ""),
+                })
+            logger.info(f"get_positions: {len(positions)} net open position(s) from trade history")
+            return positions
+
+        # ── 3. Last resort: data-api.polymarket.com ──────────────────────────
+        if address:
+            try:
+                data = self._get(
+                    "https://data-api.polymarket.com/positions",
+                    params={"user": address, "sizeThreshold": "0", "limit": "500"},
+                )
+                logger.info(f"get_positions data-api: type={type(data).__name__} preview={str(data)[:200]}")
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    for key in ("data", "results", "positions"):
+                        if key in data and isinstance(data[key], list):
+                            return data[key]
+            except Exception as exc:
+                logger.warning(f"get_positions data-api failed: {exc}")
+
+        logger.warning("get_positions: all methods exhausted — returning empty list")
+        return []
 
     def get_open_orders(self) -> list[dict]:
         if not self._clob_client:
