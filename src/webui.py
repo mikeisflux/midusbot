@@ -20,17 +20,19 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify, Response, request
 
 import config
 
 if TYPE_CHECKING:
     from src.dashboard import DashboardState
+    from src.learner import AdaptiveLearner
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
-app  = Flask(__name__)
-_state: DashboardState | None = None
+app      = Flask(__name__)
+_state:   DashboardState | None = None
+_learner: AdaptiveLearner | None = None
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -45,6 +47,57 @@ def api_state():
     if _state is None:
         return jsonify({"status": "starting"})
     return jsonify(_build(  _state))
+
+@app.route("/api/toggle_mode", methods=["POST"])
+def api_toggle_mode():
+    """Toggle between DRY_RUN (sandbox) and live mode. Updates .env and in-process config."""
+    from pathlib import Path
+    new_dry_run = not config.DRY_RUN
+    config.DRY_RUN = new_dry_run
+
+    # Persist to .env so it survives a restart
+    env_path = Path(".env")
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+        found = False
+        new_lines = []
+        for line in lines:
+            if line.startswith("DRY_RUN="):
+                new_lines.append(f"DRY_RUN={'false' if not new_dry_run else 'true'}")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(f"DRY_RUN={'false' if not new_dry_run else 'true'}")
+        env_path.write_text("\n".join(new_lines) + "\n")
+
+    mode = "SANDBOX" if new_dry_run else "LIVE"
+    if _state:
+        _state.add_exec_log("info", f"Mode switched to {mode}")
+    return jsonify({"ok": True, "dry_run": new_dry_run, "mode": mode})
+
+
+@app.route("/api/clear_logs", methods=["POST"])
+def api_clear_logs():
+    """Clear the in-memory execution log shown in the right panel."""
+    if _state is not None:
+        _state.exec_log = []
+    return jsonify({"ok": True})
+
+
+@app.route("/api/reset_training", methods=["POST"])
+def api_reset_training():
+    """
+    Wipe trade journal + learned params (files + in-memory).
+    Performance stats on the dashboard are also zeroed.
+    Logs are kept intact.
+    """
+    if _learner is not None:
+        _learner.reset()
+    if _state is not None:
+        _state.reset_training_stats()
+    return jsonify({"ok": True, "message": "Training data cleared. Learner reset to factory defaults."})
+
 
 @app.route("/api/export")
 def api_export():
@@ -158,9 +211,10 @@ def _build(s: DashboardState) -> dict:
 # Start helper
 # ---------------------------------------------------------------------------
 
-def start(state: DashboardState, port: int = 8080) -> None:
-    global _state
-    _state = state
+def start(state: DashboardState, port: int = 8080, learner: AdaptiveLearner | None = None) -> None:
+    global _state, _learner
+    _state   = state
+    _learner = learner
     t = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False),
         daemon=True,
@@ -270,12 +324,17 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
   padding:5px 20px;background:var(--bg2);border-top:1px solid var(--border);
   font-size:10px;color:var(--dim);min-height:28px;
 }
-#footer a{
+#footer a, .btn-action{
   color:var(--blue);text-decoration:none;
   border:1px solid var(--blue);padding:2px 12px;border-radius:3px;
-  font-size:10px;letter-spacing:1px;
+  font-size:10px;letter-spacing:1px;cursor:pointer;background:transparent;
+  font-family:inherit;
 }
-#footer a:hover{background:var(--blue);color:var(--bg)}
+#footer a:hover,.btn-action:hover{background:var(--blue);color:var(--bg)}
+.btn-danger{color:var(--red)!important;border-color:var(--red)!important}
+.btn-danger:hover{background:var(--red)!important;color:var(--bg)!important}
+.btn-dim{color:var(--dim)!important;border-color:var(--border)!important}
+.btn-dim:hover{background:var(--border)!important;color:var(--text)!important}
 
 /* ── COLOURS ── */
 .g{color:var(--green)}.r{color:var(--red)}.y{color:var(--yellow)}.b{color:var(--blue)}.p{color:var(--purple)}.d{color:var(--dim)}
@@ -297,6 +356,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div>Cycle <span id="h-cycle">#0</span></div>
     <div>Edge <span id="h-edge" class="g">—</span></div>
     <div>Markets <span id="h-markets">—</span></div>
+    <button id="mode-toggle" class="btn-action" onclick="toggleMode()" style="font-size:10px;letter-spacing:1px">⇄ SANDBOX</button>
     <div id="h-refresh" style="color:var(--dim)">connecting…</div>
   </div>
 </div>
@@ -366,7 +426,10 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
   <div id="log-panel">
     <div id="log-title">
       <span>EXECUTION LOG</span>
-      <span id="log-count" class="d">0 entries</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="log-count" class="d">0 entries</span>
+        <button class="btn-action btn-dim" onclick="clearLogs()">CLEAR</button>
+      </div>
     </div>
     <div id="log-body"></div>
   </div>
@@ -378,7 +441,8 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
   <div id="f-refresh">last update: <span id="f-time">—</span></div>
   <div style="display:flex;gap:12px;align-items:center">
     <span id="f-learn" class="d">0 adaptations</span>
-    <a href="/api/export" download="midusbot_training_data.json">⬇ EXPORT TRAINING DATA</a>
+    <a href="/api/export" download="midusbot_training_data.json">⬇ EXPORT</a>
+    <button class="btn-action btn-danger" onclick="resetTraining()">RESET TRAINING</button>
   </div>
 </div>
 
@@ -464,6 +528,11 @@ async function refresh() {
     const badge = $('mode-badge');
     badge.textContent = d.mode;
     badge.className   = 'mode-badge ' + (d.mode==='LIVE' ? 'live' : 'dry');
+    const toggleBtn = $('mode-toggle');
+    if (toggleBtn) {
+      toggleBtn.textContent = d.mode === 'LIVE' ? '⇄ SANDBOX' : '⇄ GO LIVE';
+      toggleBtn.className = 'btn-action ' + (d.mode === 'LIVE' ? 'btn-dim' : '');
+    }
     $('h-uptime').textContent  = d.uptime;
     $('h-cycle').textContent   = '#' + d.loop_count;
     $('h-markets').textContent = d.candidates + '/' + d.markets_scanned;
@@ -548,6 +617,31 @@ async function refresh() {
 
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function toggleMode() {
+  const isLive = $('mode-badge').textContent === 'LIVE';
+  const target = isLive ? 'SANDBOX' : 'LIVE';
+  if (!confirm(`Switch to ${target} mode?\n\n${target === 'LIVE' ? 'Real money will be at risk.' : 'No real orders will be placed.'}`)) return;
+  const r = await fetch('/api/toggle_mode', {method:'POST'});
+  const d = await r.json();
+  const btn = $('mode-toggle');
+  btn.textContent = d.dry_run ? '⇄ GO LIVE' : '⇄ SANDBOX';
+  refresh();
+}
+
+async function clearLogs() {
+  await fetch('/api/clear_logs', {method:'POST'});
+  $('log-body').innerHTML = '';
+  $('log-count').textContent = '0 entries';
+}
+
+async function resetTraining() {
+  if (!confirm('Reset all training data?\n\nThis will:\n• Delete trade_journal.json\n• Delete learned_params.json\n• Zero all performance counters\n\nExecution logs are kept. This cannot be undone.')) return;
+  const r = await fetch('/api/reset_training', {method:'POST'});
+  const d = await r.json();
+  alert(d.message || 'Training reset complete.');
+  refresh();
 }
 
 refresh();

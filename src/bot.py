@@ -108,7 +108,7 @@ class PolymarketBot:
         self._dash_state.add_equity_point()
 
         # Start web UI (always, regardless of terminal dashboard)
-        webui.start(self._dash_state, port=8080)
+        webui.start(self._dash_state, port=8080, learner=self._learner)
         self._dash_state.add_exec_log("info", "MIDUSBOT started — scanning Polymarket CLOB…")
         self._dash_state.add_exec_log("info",
             f"Config: MAX_POS=${config.MAX_POSITION_USDC}  "
@@ -489,9 +489,6 @@ class PolymarketBot:
                     if secs_left < min_minutes * 60:
                         continue
                     hours_left = secs_left / 3600
-                    # Too far in the future
-                    if hours_left > cutoff * 24:
-                        continue
                 except Exception:
                     pass
             filtered.append((m, hours_left if hours_left is not None else cutoff * 24))

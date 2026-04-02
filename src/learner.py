@@ -133,6 +133,23 @@ class AdaptiveLearner:
 
         self._load()
 
+    def reset(self) -> None:
+        """Wipe journal + learned params files and restore factory defaults."""
+        try:
+            JOURNAL_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            PARAMS_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self.strategy_params      = StrategyParams()
+        self.risk_params          = RiskParams()
+        self._journal             = []
+        self._closed_since_adapt  = 0
+        self._adaptation_count    = 0
+        logger.info("AdaptiveLearner reset — journal and params cleared.")
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

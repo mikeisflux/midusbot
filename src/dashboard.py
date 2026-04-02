@@ -138,6 +138,19 @@ class DashboardState:
         })
         self.exec_log = self.exec_log[:120]  # keep last 120 entries
 
+    def reset_training_stats(self) -> None:
+        """Clear all performance counters and equity curve (called on Reset Training)."""
+        self.total_trades  = 0
+        self.wins          = 0
+        self.total_pnl     = 0.0
+        self.total_fees    = 0.0
+        self.daily_pnl     = 0.0
+        self.best_trade    = 0.0
+        self.worst_trade   = 0.0
+        self.pnl_history   = []
+        self.equity_curve  = []
+        self.learned       = {}
+
     @property
     def balance(self) -> float:
         # In live mode use the actual wallet balance; fall back to seed + P&L
