@@ -33,11 +33,14 @@ from src.strategy import (
     MomentumImbalanceStrategy,
     UpDownMomentumStrategy,
     BTCLevelStrategy,
+    SportsLiveStrategy,
+    NewsEventStrategy,
     TradeSignal,
     _fetch_btc_price,
     _fetch_price,
     _detect_updown_market,
     _parse_btc_level,
+    update_price_snapshot,
 )
 import config
 import src.webui as webui
@@ -75,6 +78,8 @@ class PolymarketBot:
         self._latency    = LatencyArbStrategy()
         self._updown     = UpDownMomentumStrategy()
         self._btclevel   = BTCLevelStrategy()
+        self._sports     = SportsLiveStrategy()
+        self._news       = NewsEventStrategy()
         self._risk       = RiskManager(params=self._learner.risk_params)
         self._dashboard  = Dashboard(enabled=dashboard_enabled)
         self._dash_state = DashboardState()
@@ -211,12 +216,24 @@ class PolymarketBot:
                 except Exception:
                     pass
 
+            # Update price snapshot for news detection BEFORE running strategies
+            current_yes = ob.mid if ob else market.yes_price
+            update_price_snapshot(market.id, current_yes)
+
             # ── Strategy 3: Up/Down 5-min Momentum (highest priority) ──
             sig = self._updown.analyse(market, ob)
 
             # ── Strategy 4: BTC Price Level (daily/weekly/monthly) ────
             if sig is None:
                 sig = self._btclevel.analyse(market, ob)
+
+            # ── Strategy 5: Live Sports Settlement Lag (kch123 pattern) ──
+            if sig is None:
+                sig = self._sports.analyse(market, ob)
+
+            # ── Strategy 6: News/Event Sudden Price Move ──────────────
+            if sig is None:
+                sig = self._news.analyse(market, ob)
 
             # ── Strategy 1: Momentum + Imbalance ─────────────────────
             if sig is None:
@@ -499,8 +516,23 @@ class PolymarketBot:
             # fetched for momentum trading and have low liquidity by design.
             # Use _detect_updown_market on the question — more reliable than
             # trusting token outcome labels which get forced by get_updown_markets().
-            is_updown  = _detect_updown_market(m.question) is not None
+            is_updown   = _detect_updown_market(m.question) is not None
             is_btclevel = _parse_btc_level(m.question) is not None
+            # Sports game markets: "win tonight", "win game X", team vs team today
+            # These are short-duration even if end_date says tomorrow
+            q_lower = m.question.lower()
+            is_sports_game = any(kw in q_lower for kw in (
+                " vs ", " beat ", " win game", "game 1", "game 2", "game 3",
+                "game 4", "game 5", "game 6", "game 7",
+                "tonight", "monday night", "tuesday night", "wednesday night",
+                "thursday night", "friday night", "saturday night", "sunday night",
+            )) and any(kw in q_lower for kw in (
+                "nfl", "nba", "mlb", "nhl", "epl", "premier league",
+                " fc ", "united", "city ", "lakers", "celtics", "bulls",
+                "yankees", "dodgers", "chiefs", "patriots", "eagles",
+                "oilers", "bruins", "maple leafs", "canadiens", "penguins",
+                "rangers", "kings", "canucks", "flames", "jets",
+            ))
 
             if is_updown:
                 # UpDown 5-min: relaxed price check only
@@ -530,15 +562,24 @@ class PolymarketBot:
                         continue
                     hours_left = secs_left / 3600
                     # BTC level markets allowed up to 35 days (monthly contracts)
-                    day_cap = 35 if is_btclevel else (999 if is_updown else cutoff)
+                    # Sports game markets: 3-day cap (game resolves same day or next)
+                    if is_btclevel:
+                        day_cap = 35
+                    elif is_updown:
+                        day_cap = 999
+                    elif is_sports_game:
+                        day_cap = 3
+                    else:
+                        day_cap = cutoff
                     if hours_left > day_cap * 24:
                         continue
                 except Exception:
                     if not is_updown and not is_btclevel:
                         continue
             else:
-                # No end date — skip everything except UpDown (which resolve in minutes)
-                if not is_updown:
+                # No end date — skip everything except UpDown (resolves in minutes)
+                # and sports games (resolve same day)
+                if not is_updown and not is_sports_game:
                     continue
 
             filtered.append((m, hours_left if hours_left is not None else 0.25))

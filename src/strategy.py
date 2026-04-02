@@ -769,3 +769,267 @@ class BTCLevelStrategy:
             confidence=confidence,
             is_latency_arb=False,
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Strategy 5: Live Sports Settlement Lag  (kch123 pattern)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# kch123 turned $340 → $10M+ by exploiting Polymarket's live sports markets.
+# His Super Bowl edge: $1.8M in one day on Seahawks spreads.
+#
+# The pattern: Polymarket's oracle updates with a delay during live games.
+# If a team scores making the outcome ~95% certain, the market still shows
+# 50-60¢ for 30-120 seconds. That's a massive edge.
+#
+# This strategy uses ESPN's free public API for live scores + win probability,
+# then finds the matching Polymarket market and trades the discrepancy.
+#
+# No API key needed — ESPN data is publicly accessible.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_SPORTS_PRICE_CACHE: dict[str, tuple[dict, float]] = {}
+_SPORTS_CACHE_TTL = 15.0   # refresh live scores every 15s
+
+
+def _fetch_live_sports() -> list[dict]:
+    """
+    Fetch live game scores + win probabilities from ESPN's public API.
+    Returns list of {home, away, home_score, away_score, home_win_prob,
+    status, sport, league}.
+    """
+    endpoints = [
+        ("nfl",  "americanfootball_nfl",  "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"),
+        ("nba",  "basketball_nba",        "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"),
+        ("mlb",  "baseball_mlb",          "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"),
+        ("nhl",  "hockey_nhl",            "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"),
+        ("soccer_epl", "soccer",          "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard"),
+    ]
+    games = []
+    now = time.time()
+
+    for sport, league, url in endpoints:
+        cached = _SPORTS_PRICE_CACHE.get(sport)
+        if cached and (now - cached[1]) < _SPORTS_CACHE_TTL:
+            games.extend(cached[0].get("games", []))
+            continue
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            sport_games = []
+            for event in data.get("events", []):
+                comp = event.get("competitions", [{}])[0]
+                status = comp.get("status", {}).get("type", {})
+                if not status.get("inProgress", False):
+                    continue   # only care about LIVE games
+                competitors = comp.get("competitors", [])
+                if len(competitors) < 2:
+                    continue
+                home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
+                away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
+
+                # Win probability from ESPN (available for NFL/NBA/MLB)
+                home_win_prob = 0.5
+                for pred in comp.get("predictor", {}).get("homeTeam", {}).get("statistics", []):
+                    if pred.get("name") == "winPercentage":
+                        home_win_prob = float(pred.get("displayValue", "50").replace("%", "")) / 100
+                        break
+
+                # Fallback: infer from score + time remaining
+                clock = status.get("detail", "")
+                home_score = int(home.get("score", 0) or 0)
+                away_score = int(away.get("score", 0) or 0)
+
+                g = {
+                    "sport":         sport,
+                    "home":          home.get("team", {}).get("displayName", ""),
+                    "away":          away.get("team", {}).get("displayName", ""),
+                    "home_abbr":     home.get("team", {}).get("abbreviation", ""),
+                    "away_abbr":     away.get("team", {}).get("abbreviation", ""),
+                    "home_score":    home_score,
+                    "away_score":    away_score,
+                    "home_win_prob": home_win_prob,
+                    "clock":         clock,
+                    "period":        status.get("period", 0),
+                }
+                sport_games.append(g)
+                games.append(g)
+            _SPORTS_PRICE_CACHE[sport] = ({"games": sport_games}, now)
+        except Exception:
+            pass
+    return games
+
+
+def _match_sports_market(market_question: str, live_games: list[dict]) -> dict | None:
+    """
+    Fuzzy-match a Polymarket market question to a live game.
+    Returns the live game dict if matched, else None.
+    """
+    q = market_question.lower()
+    for game in live_games:
+        home = game["home"].lower()
+        away = game["away"].lower()
+        home_abbr = game["home_abbr"].lower()
+        away_abbr = game["away_abbr"].lower()
+        # Match if both team names (or abbreviations) appear in the question
+        home_match = any(part in q for part in [home, home_abbr, home.split()[-1]])
+        away_match = any(part in q for part in [away, away_abbr, away.split()[-1]])
+        if home_match and away_match:
+            return game
+    return None
+
+
+class SportsLiveStrategy:
+    """
+    Exploits Polymarket's live sports market settlement lag.
+
+    The kch123 pattern: during a live game, Polymarket's oracle updates
+    slowly. When a team is effectively certain to win but the market
+    still shows 50-60¢, that's a 30-40¢ free edge.
+
+    Uses ESPN's public API for real-time win probability.
+    No API key required.
+
+    Edge threshold: only fires when ESPN win_prob vs market_price
+    diverges by more than MIN_SPORTS_EDGE (default 15%).
+    """
+
+    MIN_SPORTS_EDGE = 0.15   # minimum edge to trade
+
+    def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
+        live_games = _fetch_live_sports()
+        if not live_games:
+            return None
+
+        game = _match_sports_market(market.question, live_games)
+        if game is None:
+            return None
+
+        home_win_prob = game["home_win_prob"]
+        away_win_prob = 1.0 - home_win_prob
+
+        mkt_yes = order_book.mid if order_book else market.yes_price
+
+        # Determine which team the YES outcome represents
+        q = market.question.lower()
+        home_name = game["home"].lower().split()[-1]
+        home_is_yes = home_name in q
+
+        if home_is_yes:
+            fair_yes = home_win_prob
+        else:
+            fair_yes = away_win_prob
+
+        fair_no  = 1.0 - fair_yes
+        mkt_no   = 1.0 - mkt_yes
+        edge_yes = fair_yes - mkt_yes
+        edge_no  = fair_no  - mkt_no
+
+        if edge_yes >= edge_no and edge_yes >= self.MIN_SPORTS_EDGE:
+            side, token, mkt_p, fair_p, edge = "YES", market.yes_token, mkt_yes, fair_yes, edge_yes
+        elif edge_no >= self.MIN_SPORTS_EDGE:
+            side, token, mkt_p, fair_p, edge = "NO",  market.no_token,  mkt_no,  fair_no,  edge_no
+        else:
+            return None
+
+        confidence = "HIGH" if edge > 0.30 else "MEDIUM" if edge > 0.20 else "LOW"
+        logger.info(
+            f"[SPORTS-LIVE] {game['away_abbr']} {game['away_score']} @ "
+            f"{game['home_abbr']} {game['home_score']}  {game['clock']}  "
+            f"ESPN_win={fair_yes:.2f}  mkt={mkt_p:.2f}  edge={edge:+.2f}  "
+            f"→ {side} [{confidence}]  \"{market.question[:50]}\""
+        )
+        return TradeSignal(
+            market_id=market.id,
+            question=market.question,
+            side=side,
+            token_id=token.token_id,
+            market_price=mkt_p,
+            fair_value=fair_p,
+            edge=edge,
+            signal=edge,
+            confidence=confidence,
+            is_latency_arb=True,   # this IS a latency arb — oracle vs ESPN
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Strategy 6: Sudden Price Move Detection (news/event arb)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# When news breaks, Polymarket prices move fast but not instantly.
+# If a market's YES price jumped >15% since last loop, someone knows something.
+# We follow the move assuming it continues for at least 1-2 more loops.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_PREV_PRICES: dict[str, float] = {}   # market_id → last YES price
+
+
+def update_price_snapshot(market_id: str, yes_price: float) -> None:
+    _PREV_PRICES[market_id] = yes_price
+
+
+class NewsEventStrategy:
+    """
+    Momentum follow on sudden market price moves.
+
+    If a market's YES price moved ≥ JUMP_THRESHOLD since last scan,
+    follow the direction — the move likely reflects breaking news that
+    hasn't fully propagated through the market yet.
+
+    This is the "Trump tariff announcement" pattern: market goes from
+    40¢ to 75¢ in one loop. We catch the remaining 25¢ move.
+    """
+
+    JUMP_THRESHOLD = 0.12   # 12% sudden move triggers the signal
+    MIN_EDGE       = 0.08   # minimum remaining edge after the jump
+
+    def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
+        prev = _PREV_PRICES.get(market.id)
+        current = order_book.mid if order_book else market.yes_price
+        update_price_snapshot(market.id, current)
+
+        if prev is None:
+            return None   # first time seeing this market
+
+        move = current - prev
+        if abs(move) < self.JUMP_THRESHOLD:
+            return None
+
+        # Follow the move direction
+        if move > 0:
+            # YES jumped — buy YES (momentum continuation)
+            fair_yes = min(current + move * 0.5, 0.97)   # extrapolate 50% more
+            edge = fair_yes - current
+            if edge < self.MIN_EDGE:
+                return None
+            side, token, mkt_p, fair_p = "YES", market.yes_token, current, fair_yes
+        else:
+            # YES dumped — buy NO
+            fair_no  = min((1 - current) + abs(move) * 0.5, 0.97)
+            mkt_no   = 1.0 - current
+            edge     = fair_no - mkt_no
+            if edge < self.MIN_EDGE:
+                return None
+            side, token, mkt_p, fair_p = "NO", market.no_token, mkt_no, fair_no
+
+        confidence = "HIGH" if abs(move) > 0.25 else "MEDIUM"
+        logger.info(
+            f"[NEWS-EVENT] {market.question[:55]}  "
+            f"prev={prev:.3f}  now={current:.3f}  move={move:+.3f}  "
+            f"→ {side} [{confidence}]"
+        )
+        return TradeSignal(
+            market_id=market.id,
+            question=market.question,
+            side=side,
+            token_id=token.token_id,
+            market_price=mkt_p,
+            fair_value=fair_p,
+            edge=edge,
+            signal=move,
+            confidence=confidence,
+            is_latency_arb=True,
+        )
