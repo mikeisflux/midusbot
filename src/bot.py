@@ -770,6 +770,7 @@ class PolymarketBot:
                 imbalance_signal=sig.imbalance_signal,
                 composite_signal=sig.signal,
                 confidence=sig.confidence,
+                dry_run=config.DRY_RUN,
             )
             if sig.is_news_arb:
                 self._news_token_ids.add(sig.token_id)

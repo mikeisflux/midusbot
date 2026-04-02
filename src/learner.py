@@ -100,6 +100,7 @@ class TradeRecord:
     opened_at: float          # unix timestamp
     closed_at: float          # 0.0 while open
     closed: bool = False
+    dry_run: bool = False     # True when recorded under DRY_RUN simulation
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -180,6 +181,7 @@ class AdaptiveLearner:
         imbalance_signal: float,
         composite_signal: float,
         confidence: str,
+        dry_run: bool = False,
     ) -> None:
         rec = TradeRecord(
             market_id=market_id,
@@ -199,6 +201,7 @@ class AdaptiveLearner:
             opened_at=time.time(),
             closed_at=0.0,
             closed=False,
+            dry_run=dry_run,
         )
         self._journal.append(rec)
         # Prune in-memory journal to last 500 entries to prevent unbounded growth
@@ -397,6 +400,22 @@ class AdaptiveLearner:
                 )
             except Exception as exc:
                 logger.warning(f"[Learner] Could not load params: {exc}")
+
+        # Recompute _closed_since_adapt from the journal so partially-completed
+        # adaptation cycles survive restarts (including dry-run → live switches).
+        # If the journal has enough unprocessed closed trades, adapt immediately
+        # so params always reflect the full journal on startup.
+        closed_total = sum(1 for r in self._journal if r.closed)
+        accounted_for = self._adaptation_count * ADAPT_EVERY_N
+        unprocessed = max(0, closed_total - accounted_for)
+        self._closed_since_adapt = unprocessed % ADAPT_EVERY_N
+
+        if unprocessed >= ADAPT_EVERY_N:
+            logger.info(
+                f"[Learner] {unprocessed} unprocessed closed trades found on load — "
+                "running adaptation now to carry dry-run learning into live mode."
+            )
+            self._adapt()
 
     # ------------------------------------------------------------------
     # Helpers
