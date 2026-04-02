@@ -187,8 +187,8 @@ class PolymarketBot:
         candidates = self._filter_markets(all_markets)
         self._dash_state.markets_scanned = len(all_markets)
         self._dash_state.candidates = len(candidates)
-        updown_passing = [m for m in candidates if m.yes_token.outcome in ("Up", "Down") or m.no_token.outcome in ("Up", "Down")]
-        logger.info(f"{len(candidates)}/{len(markets)} markets pass filters — {len(updown_passing)} UpDown.")
+        updown_passing = [m for m in candidates if _detect_updown_market(m.question)]
+        logger.info(f"{len(candidates)}/{len(all_markets)} markets pass filters — {len(updown_passing)} UpDown, {len(candidates)-len(updown_passing)} regular.")
         if self._dash_state.loop_count == 1 and updown:
             logger.info("First 5 UpDown markets fetched:")
             for m in updown[:5]:
@@ -514,18 +514,17 @@ class PolymarketBot:
         now = datetime.now(timezone.utc)
         min_minutes = config.MIN_MINUTES_TO_RESOLUTION
         filtered = []
+
+        # Debug counters — logged once per loop at INFO level
+        n_inactive = n_price = n_liquidity = n_volume = n_toosoon = n_toolate = n_nodate = 0
+
         for m in markets:
             if not m.active or m.closed:
+                n_inactive += 1
                 continue
 
-            # UpDown 5-min markets use relaxed thresholds — they were explicitly
-            # fetched for momentum trading and have low liquidity by design.
-            # Use _detect_updown_market on the question — more reliable than
-            # trusting token outcome labels which get forced by get_updown_markets().
             is_updown   = _detect_updown_market(m.question) is not None
             is_btclevel = _parse_btc_level(m.question) is not None
-            # Sports game markets: "win tonight", "win game X", team vs team today
-            # These are short-duration even if end_date says tomorrow
             q_lower = m.question.lower()
             is_sports_game = any(kw in q_lower for kw in (
                 " vs ", " beat ", " win game", "game 1", "game 2", "game 3",
@@ -541,23 +540,20 @@ class PolymarketBot:
             ))
 
             if is_updown:
-                # UpDown 5-min: relaxed price check only
                 if not (0.01 <= m.yes_price <= 0.99):
-                    continue
+                    n_price += 1; continue
             elif is_btclevel:
-                # BTC level markets: allow through with loose liquidity ($50)
-                # so monthly "reach $X" cheap options are included
                 if m.liquidity < 50:
-                    continue
+                    n_liquidity += 1; continue
                 if not (0.001 <= m.yes_price <= 0.999):
-                    continue
+                    n_price += 1; continue
             else:
                 if m.liquidity < config.MIN_LIQUIDITY_USDC:
-                    continue
+                    n_liquidity += 1; continue
                 if m.volume < config.MIN_VOLUME_24H_USDC:
-                    continue
+                    n_volume += 1; continue
                 if not (0.02 <= m.yes_price <= 0.98):
-                    continue
+                    n_price += 1; continue
 
             hours_left = None
             if m.end_date:
@@ -565,10 +561,8 @@ class PolymarketBot:
                     end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
                     secs_left = (end - now).total_seconds()
                     if secs_left < min_minutes * 60:
-                        continue
+                        n_toosoon += 1; continue
                     hours_left = secs_left / 3600
-                    # BTC level markets allowed up to 35 days (monthly contracts)
-                    # Sports game markets: 3-day cap (game resolves same day or next)
                     if is_btclevel:
                         day_cap = 35
                     elif is_updown:
@@ -578,17 +572,23 @@ class PolymarketBot:
                     else:
                         day_cap = cutoff
                     if hours_left > day_cap * 24:
-                        continue
+                        n_toolate += 1; continue
                 except Exception:
                     if not is_updown and not is_btclevel:
-                        continue
+                        n_nodate += 1; continue
             else:
-                # No end date — skip everything except UpDown (resolves in minutes)
-                # and sports games (resolve same day)
                 if not is_updown and not is_sports_game:
-                    continue
+                    n_nodate += 1; continue
 
             filtered.append((m, hours_left if hours_left is not None else 0.25))
+
+        total_dropped = n_inactive + n_price + n_liquidity + n_volume + n_toosoon + n_toolate + n_nodate
+        if total_dropped > 0:
+            logger.info(
+                f"Filter drops: inactive={n_inactive} price={n_price} "
+                f"liquidity={n_liquidity} volume={n_volume} "
+                f"too_soon={n_toosoon} too_late={n_toolate} no_date={n_nodate}"
+            )
 
         # Soonest-closing first — 5-min markets bubble to the top
         filtered.sort(key=lambda x: x[1])
