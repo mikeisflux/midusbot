@@ -454,18 +454,25 @@ class PolymarketClient:
     # ------------------------------------------------------------------
 
     def get_order_book(self, token_id: str) -> OrderBook | None:
-        data = self._get(
-            f"{config.CLOB_HOST}/book",
-            params={"token_id": token_id},
-        )
-        if not data:
+        # Single-shot, no retries — called every loop for every position.
+        # 404 = market resolved (expected); no point retrying.
+        try:
+            resp = self._session.get(
+                f"{config.CLOB_HOST}/book",
+                params={"token_id": token_id},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                return None
+            return OrderBook(
+                token_id=token_id,
+                bids=data.get("bids", []),
+                asks=data.get("asks", []),
+            )
+        except Exception:
             return None
-
-        return OrderBook(
-            token_id=token_id,
-            bids=data.get("bids", []),
-            asks=data.get("asks", []),
-        )
 
     # ------------------------------------------------------------------
     # Authenticated operations (require CLOB client + private key)

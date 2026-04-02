@@ -435,22 +435,26 @@ class PolymarketBot:
 
     def _gamma_position_price(self, pos: OpenPosition) -> float:
         """
-        When the CLOB order book is empty, fetch the current outcome price
-        from the Gamma API using the stored market_id.
-        Returns the price for the side we hold (YES or NO token).
-        Falls back to entry_price if the Gamma call fails.
+        When the CLOB order book is empty (market resolved or inactive), fetch
+        the current token price from the CLOB markets endpoint (fast, single-shot).
+        Falls back to entry_price if all calls fail.
         """
-        try:
-            market = self._client.get_market_by_id(pos.market_id)
-            if market:
-                price = market.yes_price if pos.side == "YES" else market.no_price
-                logger.debug(
-                    f"[Gamma fallback] {pos.side} price={price:.3f}  "
-                    f"closed={market.closed}  {pos.question[:50]}"
-                )
-                return price
-        except Exception as exc:
-            logger.warning(f"_gamma_position_price failed for {pos.market_id}: {exc}")
+        if pos.market_id:
+            try:
+                mkt = self._client.get_clob_market(pos.market_id)
+                if mkt:
+                    tokens = mkt.get("tokens") or []
+                    for tok in tokens:
+                        if str(tok.get("token_id", "")) == pos.token_id:
+                            price = float(tok.get("price") or 0)
+                            if price > 0:
+                                logger.debug(
+                                    f"[CLOB fallback] {pos.side} price={price:.3f}  "
+                                    f"{pos.question[:50]}"
+                                )
+                                return price
+            except Exception as exc:
+                logger.debug(f"_gamma_position_price CLOB fallback failed: {exc}")
         return pos.entry_price
 
     def _close_position(self, token_id: str, current_price: float | None = None) -> bool:
