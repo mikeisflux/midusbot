@@ -525,6 +525,8 @@ class PolymarketBot:
     # ------------------------------------------------------------------
 
     def _execute_signal(self, sig: TradeSignal) -> bool:
+        if config.TRADING_PAUSED:
+            return False
         usdc = self._risk.position_size(sig)
         if usdc <= 0:
             return False

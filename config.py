@@ -21,6 +21,9 @@ GAMMA_HOST: str = "https://gamma-api.polymarket.com"
 
 # ── Safety ───────────────────────────────────────────────────────────────────
 DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() != "false"
+# Set TRADING_PAUSED=true to stop all new buys without stopping the bot.
+# Position management and manual sells via /positions still work normally.
+TRADING_PAUSED: bool = os.getenv("TRADING_PAUSED", "false").lower() == "true"
 
 # ── Position sizing ──────────────────────────────────────────────────────────
 MAX_POSITION_USDC: float = float(os.getenv("MAX_POSITION_USDC", "10"))
