@@ -170,20 +170,38 @@ def _update_strategy_cache(symbol: str, price: float) -> None:
 # ---------------------------------------------------------------------------
 
 _RSS_SOURCES = [
+    # Crypto-native
     ("CoinDesk",       "https://www.coindesk.com/arc/outboundfeeds/rss/"),
     ("Cointelegraph",  "https://cointelegraph.com/rss"),
     ("Decrypt",        "https://decrypt.co/feed"),
+    ("TheBlock",       "https://www.theblock.co/rss.xml"),
+    # Macro / finance
     ("Reuters-Biz",    "https://feeds.reuters.com/reuters/businessNews"),
     ("Reuters-Tech",   "https://feeds.reuters.com/reuters/technologyNews"),
+    ("AP-Business",    "https://feeds.apnews.com/apnews/Business"),
+    ("AP-Politics",    "https://feeds.apnews.com/apnews/Politics"),
+    # Prediction-market relevant
+    ("Axios",          "https://api.axios.com/feed/"),
+    ("BBC-World",      "https://feeds.bbci.co.uk/news/world/rss.xml"),
 ]
 
-# Keywords that suggest a headline is relevant to prediction markets
+# Keywords relevant to prediction markets — crypto, macro, political, geopolitical
+# (sports removed — bot no longer trades sports markets)
 _MARKET_KEYWORDS = (
-    "bitcoin", "btc", "ethereum", "eth", "crypto", "fed", "rate", "inflation",
-    "trump", "election", "president", "war", "ceasefire", "ukraine", "russia",
-    "china", "taiwan", "recession", "gdp", "jobs", "nfp", "fomc", "interest",
-    "sec", "etf", "ipo", "default", "bank", "oil", "gold", "nasdaq", "s&p",
-    "nfl", "nba", "super bowl", "championship", "playoffs",
+    # Crypto assets
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp", "ripple",
+    "dogecoin", "doge", "bnb", "binance", "crypto", "defi", "nft", "stablecoin",
+    "polymarket", "coinbase", "sec", "etf", "spot etf",
+    # Macro / Fed
+    "fed", "federal reserve", "rate", "interest rate", "inflation", "cpi", "pce",
+    "fomc", "powell", "gdp", "recession", "jobs", "nfp", "payroll", "treasury",
+    # Political / geopolitical
+    "trump", "president", "election", "congress", "senate", "tariff", "sanction",
+    "ukraine", "russia", "china", "taiwan", "war", "ceasefire", "nato",
+    "iran", "north korea", "israel", "gaza",
+    # Markets / finance
+    "nasdaq", "s&p", "dow", "oil", "gold", "bank", "ipo", "default", "debt",
+    "dollar", "yen", "euro", "currency",
 )
 
 
@@ -214,11 +232,14 @@ class NewsFeed:
     """
 
     POLL_INTERVAL = 60   # seconds between RSS polls
-    MAX_AGE_HOURS = 4    # ignore headlines older than this
+    MAX_AGE_HOURS  = 6    # ignore headlines older than this
+    MEMORY_HOURS   = 24   # keep recent headlines in memory for context lookup
+    MEMORY_MAX     = 500  # cap on stored headlines
 
     def __init__(self) -> None:
         self._seen_urls: set[str] = set()
         self._new: list[Headline] = []
+        self._memory: list[Headline] = []   # rolling 24h headline buffer
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._running = False
@@ -257,6 +278,28 @@ class NewsFeed:
             score = len(overlap) / max(len(q_words), 1)
             best = max(best, score)
         return best
+
+    def recent_for_market(self, question: str, max_results: int = 5, min_score: float = 0.15) -> list[Headline]:
+        """
+        Return up to max_results recent headlines from the 24h memory that are
+        relevant to the given market question. Used by strategies to get news
+        context before deciding whether to trade.
+        """
+        q_words = {w for w in re.findall(r"[a-z]{4,}", question.lower())}
+        if not q_words:
+            return []
+        scored: list[tuple[float, Headline]] = []
+        with self._lock:
+            for h in self._memory:
+                title_words = set(re.findall(r"[a-z]{4,}", h.title.lower()))
+                overlap = q_words & title_words
+                if not overlap:
+                    continue
+                score = len(overlap) / max(len(q_words), 1)
+                if score >= min_score:
+                    scored.append((score, h))
+        scored.sort(key=lambda x: (-x[0], -x[1].published_ts))
+        return [h for _, h in scored[:max_results]]
 
     # ------------------------------------------------------------------
 
@@ -322,3 +365,9 @@ class NewsFeed:
                         + " | ".join(h.title[:40] for h in new_this_poll[:3]))
             with self._lock:
                 self._new.extend(new_this_poll)
+                # Add to rolling memory buffer, evict headlines older than MEMORY_HOURS
+                cutoff = now - self.MEMORY_HOURS * 3600
+                self._memory = [h for h in self._memory if h.published_ts > cutoff]
+                self._memory.extend(new_this_poll)
+                if len(self._memory) > self.MEMORY_MAX:
+                    self._memory = self._memory[-self.MEMORY_MAX:]
