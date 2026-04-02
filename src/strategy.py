@@ -346,16 +346,34 @@ def _multitf_consensus(symbol: str) -> tuple[float, str]:
 
     Returns: (direction_score, confidence)
       direction_score: positive = UP, negative = DOWN, magnitude = strength
-      confidence: "HIGH" | "MEDIUM" | "LOW" | None (insufficient data)
+      confidence: "HIGH" | "MEDIUM" | "LOW" | "NONE" (insufficient data)
     """
-    m30 = _price_momentum_30s(symbol)
-    m60 = _price_momentum_60s(symbol)
-    m5m = _price_momentum_5m(symbol)
-    pressure = _exchange_pressure(symbol)
-    accel = _price_acceleration(symbol)
+    sym = symbol.upper()
+    hist = _PRICE_HISTORY.get(sym, [])
+
+    # Require at least 5 distinct ticks AND 90 seconds of real price history.
+    # With fewer ticks, all three timeframes return the same value (same 1-2 points
+    # fall in every window) — this looks like strong agreement but is just noise.
+    if len(hist) < 5:
+        return 0.0, "NONE"
+    time_span = hist[-1][1] - hist[0][1]
+    if time_span < 90:
+        return 0.0, "NONE"
+
+    m30 = _price_momentum_30s(sym)
+    m60 = _price_momentum_60s(sym)
+    m5m = _price_momentum_5m(sym)
+    pressure = _exchange_pressure(sym)
+    accel = _price_acceleration(sym)
 
     available = sum(x is not None for x in [m30, m60, m5m])
     if available < 2:
+        return 0.0, "NONE"
+
+    # Reject signals where all available timeframes are identical — that means
+    # only one distinct price exists in the history window (still warming up).
+    vals = [x for x in [m30, m60, m5m] if x is not None]
+    if len(vals) >= 2 and len(set(round(v, 8) for v in vals)) == 1:
         return 0.0, "NONE"
 
     signals = []
@@ -394,9 +412,9 @@ def _multitf_consensus(symbol: str) -> tuple[float, str]:
 
     if agreement_ratio >= 0.75 and strength >= 0.004:
         conf = "HIGH"
-    elif agreement_ratio >= 0.60 and strength >= 0.002:
+    elif agreement_ratio >= 0.60 and strength >= 0.003:
         conf = "MEDIUM"
-    elif strength >= 0.001:
+    elif agreement_ratio >= 0.50 and strength >= 0.002:
         conf = "LOW"
     else:
         conf = "NONE"
@@ -684,13 +702,16 @@ class UpDownMomentumStrategy:
         # Multi-timeframe consensus: combines 30s + 60s + 5m + exchange pressure
         consensus, conf_label = _multitf_consensus(symbol)
 
-        if conf_label == "NONE" or abs(consensus) < self.min_momentum_pct:
+        # Require at least MEDIUM confidence — LOW means only marginal cross-TF agreement
+        # and fires too easily when price history is sparse.
+        if conf_label in ("NONE", "LOW") or abs(consensus) < self.min_momentum_pct:
             m30 = _price_momentum_30s(symbol)
             m60 = _price_momentum_60s(symbol)
+            hist_len = len(_PRICE_HISTORY.get(symbol.upper(), []))
             reason = (
-                "no price history yet — waiting for Binance WS data to accumulate"
-                if m30 is None and m60 is None
-                else f"momentum too weak (conf={conf_label} consensus={consensus:+.4%})"
+                f"warming up — only {hist_len} price ticks so far (need ≥5 over ≥90s)"
+                if hist_len < 5
+                else f"momentum below threshold (conf={conf_label} consensus={consensus:+.4%})"
             )
             logger.debug(f"[UPDOWN SKIP] {symbol} \"{market.question[:50]}\" — {reason}")
             return None   # insufficient data or too weak
