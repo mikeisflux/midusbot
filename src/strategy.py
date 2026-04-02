@@ -614,13 +614,24 @@ def _detect_updown_market(question: str) -> str | None:
 def _updown_window_mins(question: str) -> int | None:
     """
     Extract the time-window duration in minutes from an UpDown market question.
-    "BTC Up or Down - 3:00AM-3:05AM ET" → 5
-    "BTC Up or Down - 3AM-4AM ET"        → 60
+    "BTC Up or Down - 3:00AM-3:05AM ET"  → 5
+    "BTC Up or Down - 3AM-4AM ET"         → 60
+    "BTC 5 Minute Up or Down"             → 5   (new perpetual format)
+    "BTC 15 Minute Up or Down"            → 15
+    "BTC 1 Hour Up or Down"               → 60
+    "BTC 4 Hour Up or Down"               → 240
     Returns None if the format isn't recognised.
     """
     import re as _re2
     q = question.lower()
-    # "H:MMam-H:MMam" format (5-min, 15-min etc.)
+    # New perpetual format: "N Minute" or "N Hour"
+    m = _re2.search(r'(\d+)\s*(minute|min)\b', q)
+    if m:
+        return int(m.group(1))
+    m = _re2.search(r'(\d+)\s*(hour|hr)\b', q)
+    if m:
+        return int(m.group(1)) * 60
+    # Old per-slot format: "H:MMam-H:MMam"
     m = _re2.search(r'(\d{1,2}):(\d{2})\s*[ap]m\s*[-–]\s*(\d{1,2}):(\d{2})\s*[ap]m', q)
     if m:
         h1, mn1, h2, mn2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
@@ -628,7 +639,7 @@ def _updown_window_mins(question: str) -> int | None:
         if delta <= 0:
             delta += 12 * 60  # AM/PM rollover
         return delta
-    # "HAM-H+1AM" format (hourly)
+    # Old hourly format: "HAM-H+1AM"
     m = _re2.search(r'(\d{1,2})\s*[ap]m\s*[-–]\s*(\d{1,2})\s*[ap]m', q)
     if m:
         h1, h2 = int(m.group(1)), int(m.group(2))
@@ -674,6 +685,14 @@ class UpDownMomentumStrategy:
         consensus, conf_label = _multitf_consensus(symbol)
 
         if conf_label == "NONE" or abs(consensus) < self.min_momentum_pct:
+            m30 = _price_momentum_30s(symbol)
+            m60 = _price_momentum_60s(symbol)
+            reason = (
+                "no price history yet — waiting for Binance WS data to accumulate"
+                if m30 is None and m60 is None
+                else f"momentum too weak (conf={conf_label} consensus={consensus:+.4%})"
+            )
+            logger.debug(f"[UPDOWN SKIP] {symbol} \"{market.question[:50]}\" — {reason}")
             return None   # insufficient data or too weak
 
         # Map consensus strength → fair probability
@@ -697,6 +716,10 @@ class UpDownMomentumStrategy:
         edge = fair_value - mkt_price
 
         if edge < config.MIN_EDGE:
+            logger.debug(
+                f"[UPDOWN SKIP] {symbol} edge={edge:+.3f} < min_edge={config.MIN_EDGE:.3f}  "
+                f"fair={fair_value:.3f}  mkt={mkt_price:.3f}  conf={conf_label}"
+            )
             return None
 
         confidence = conf_label  # already set by _multitf_consensus

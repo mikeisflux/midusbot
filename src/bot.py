@@ -341,6 +341,13 @@ class PolymarketBot:
                 sig = self._latency.analyse(market, ob)
 
             if sig is None:
+                # Log why no strategy fired for this market (DEBUG — noisy but useful)
+                is_ud = _detect_updown_market(market.question) is not None
+                if is_ud:
+                    logger.debug(
+                        f"NO-SIGNAL UpDown \"{market.question[:55]}\" "
+                        f"price={current_yes:.3f}  ob={'yes' if ob else 'no'}"
+                    )
                 continue
 
             # Skip if we already hold this exact token
@@ -363,6 +370,29 @@ class PolymarketBot:
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure = self._risk.total_exposure()
+
+        # "Why no bet" summary — only shown when we found candidates but placed nothing
+        if signals_found == 0 and len(candidates) > 0:
+            reasons = []
+            updown_cands = [m for m in candidates if _detect_updown_market(m.question)]
+            reg_cands    = [m for m in candidates if not _detect_updown_market(m.question)]
+            if updown_cands:
+                reasons.append(
+                    f"UpDown ({len(updown_cands)} markets): momentum/consensus too weak "
+                    f"or edge below {config.MIN_EDGE:.0%} threshold"
+                )
+            if reg_cands:
+                reasons.append(
+                    f"Regular ({len(reg_cands)} markets): composite signal below threshold "
+                    f"or edge too small — best candidates: "
+                    + ", ".join(f'\"{m.question[:40]}\"' for m in reg_cands[:2])
+                )
+            if not updown_cands and not reg_cands:
+                reasons.append("no candidate markets passed filters")
+            logger.info(f"No trades this loop — " + " | ".join(reasons))
+        elif signals_found > 0 and trades_placed == 0:
+            logger.info(f"Signals found but no trades placed — risk/position guards blocked execution")
+
         logger.info(
             f"── Loop done — signals={signals_found}  trades={trades_placed}  "
             f"exposure=${self._risk.total_exposure():.2f} ──"
@@ -844,6 +874,8 @@ class PolymarketBot:
         # Debug counters — logged once per loop at INFO level
         n_inactive = n_price = n_liquidity = n_volume = n_toosoon = n_toolate = n_nodate = n_expired = 0
         n_updown_seen = n_updown_pass = 0
+        # UpDown-specific drop reasons (for "why no UpDown bet" diagnostics)
+        n_ud_expired = n_ud_toosoon = n_ud_price = 0
 
         for m in markets:
             if not m.active or m.closed:
@@ -871,7 +903,7 @@ class PolymarketBot:
             if is_updown:
                 if not (0.01 <= m.yes_price <= 0.99):
                     logger.debug(f"[UD-DROP price] yes_price={m.yes_price:.3f} q={m.question[:60]}")
-                    n_price += 1; continue
+                    n_price += 1; n_ud_price += 1; continue
             elif is_btclevel:
                 if m.liquidity < 50:
                     n_liquidity += 1; continue
@@ -895,13 +927,17 @@ class PolymarketBot:
                     # Truly expired markets (Gamma API still marks active=true after resolution)
                     if secs_left < -300:
                         n_expired += 1
+                        if is_updown:
+                            n_ud_expired += 1
                         continue
                     # UpDown 5-min markets: allow entry as long as >1 min remains
                     # Regular markets: use MIN_MINUTES_TO_RESOLUTION (default 5)
                     effective_min_secs = 60 if is_updown else min_minutes * 60
                     if secs_left < effective_min_secs:
                         n_toosoon += 1
-                        logger.info(f"too_soon: is_updown={is_updown} secs={secs_left:.0f} slug={m.slug[:40]} q={m.question[:70]}")
+                        if is_updown:
+                            n_ud_toosoon += 1
+                        logger.debug(f"too_soon: is_updown={is_updown} secs={secs_left:.0f} slug={m.slug[:40]} q={m.question[:70]}")
                         continue
                     if is_updown:
                         logger.debug(f"[UD-PASS time] secs={secs_left:.0f} price={m.yes_price:.3f} q={m.question[:60]}")
@@ -935,7 +971,15 @@ class PolymarketBot:
                 f"too_soon={n_toosoon} too_late={n_toolate} no_date={n_nodate} expired={n_expired}"
             )
         if n_updown_seen > 0:
-            logger.info(f"UpDown filter: {n_updown_seen} seen → {n_updown_pass} pass")
+            if n_updown_pass == 0:
+                reasons = []
+                if n_ud_expired:  reasons.append(f"expired={n_ud_expired} (stale past-date slots)")
+                if n_ud_toosoon:  reasons.append(f"too_soon={n_ud_toosoon} (<60s left)")
+                if n_ud_price:    reasons.append(f"price={n_ud_price} (outside 0.01-0.99)")
+                reason_str = ", ".join(reasons) if reasons else "all filtered"
+                logger.info(f"UpDown: {n_updown_seen} found → 0 tradeable — {reason_str}")
+            else:
+                logger.info(f"UpDown filter: {n_updown_seen} seen → {n_updown_pass} tradeable")
 
         # Soonest-closing first — 5-min markets bubble to the top
         filtered.sort(key=lambda x: x[1])

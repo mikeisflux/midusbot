@@ -199,9 +199,18 @@ class PolymarketClient:
             "win the super bowl", "win the world series",
         )
 
+        # Sort by volume descending so high-activity markets (e.g. "BTC 5 Minute
+        # Up or Down" with $35M vol) always appear regardless of how many total
+        # markets exist. Limit raised to 500 to cover more ground.
         data = self._get(
             f"{config.GAMMA_HOST}/markets",
-            params={"active": "true", "closed": "false", "limit": limit},
+            params={
+                "active":    "true",
+                "closed":    "false",
+                "limit":     max(limit, 500),
+                "order":     "volumeClob",
+                "ascending": "false",
+            },
         )
         if not data:
             return []
@@ -453,33 +462,42 @@ class PolymarketClient:
             logger.info(f"Fetched {len(markets)} Up/Down crypto markets (date-range).")
             return markets
 
-        # Strategy 2: text search for "up or down" / "higher or lower"
-        for search_term in ("up or down", "higher or lower"):
+        # Strategy 2: text search — covers multiple naming conventions:
+        #   Old per-slot: "XRP Up or Down - April 2, 2:55AM-3:00AM ET"
+        #   New perpetual: "BTC 5 Minute Up or Down", "Bitcoin Up or Down on April 2?"
+        #   Hourly:        "BTC 1 Hour Up or Down"
+        all_found: list = []
+        seen_ids: set[str] = set()
+        for search_term in (
+            "up or down",       # catches both old and new formats
+            "5 minute",         # "BTC 5 Minute Up or Down"
+            "15 minute",        # "BTC 15 Minute Up or Down"
+            "1 hour",           # "BTC 1 Hour Up or Down"
+        ):
             data = self._get(
                 f"{config.GAMMA_HOST}/markets",
-                params={
-                    "active":  "true",
-                    "closed":  "false",
-                    "limit":   500,
-                    "search":  search_term,
-                },
+                params={"active": "true", "closed": "false", "limit": 500, "search": search_term},
             )
-            markets = _collect(data)
-            if markets:
-                logger.info(f"Fetched {len(markets)} Up/Down crypto markets (search '{search_term}').")
-                return markets
+            for m in _collect(data):
+                if m.id not in seen_ids:
+                    seen_ids.add(m.id)
+                    all_found.append(m)
+        if all_found:
+            logger.info(f"Fetched {len(all_found)} Up/Down crypto markets (text search).")
+            return all_found
 
-        # Strategy 3: sort ALL active markets by soonest end date and scan the
-        # first 500.  UpDown 5-min markets resolve first, so they surface at the
-        # top regardless of volume.  This is the most reliable fallback.
+        # Strategy 3: sort active markets by soonest end date (future only).
+        # end_date_min=now ensures we only see markets that haven't resolved yet.
+        # UpDown 5-min markets expire first so they surface at the top.
         data = self._get(
             f"{config.GAMMA_HOST}/markets",
             params={
-                "active":    "true",
-                "closed":    "false",
-                "limit":     500,
-                "order":     "endDate",
-                "ascending": "true",
+                "active":       "true",
+                "closed":       "false",
+                "limit":        500,
+                "order":        "endDate",
+                "ascending":    "true",
+                "end_date_min": end_min,   # future markets only — skip resolved stale entries
             },
         )
         markets = _collect(data)
