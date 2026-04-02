@@ -231,6 +231,17 @@ class PolymarketBot:
 
         signals_found = 0
         trades_placed = 0
+        # Per-loop dedup: track which UpDown assets we've already bet on.
+        # DOGE DOWN fires on 10+ time slots simultaneously — we want at most
+        # ONE bet per asset per loop (the first/closest one wins).
+        _updown_bet_this_loop: set[str] = set()
+        # Also track assets currently held in open positions so we don't
+        # pile on the same asset across loops.
+        _updown_assets_held: set[str] = set()
+        for pos in self._positions.values():
+            sym = _detect_updown_market(pos.question)
+            if sym:
+                _updown_assets_held.add(sym)
 
         for market in candidates:
             if not self._running:
@@ -242,6 +253,12 @@ class PolymarketBot:
             if (market.yes_token.token_id in self._positions or
                     market.no_token.token_id in self._positions):
                 continue
+            # For UpDown markets: one bet per asset per loop, and skip if we
+            # already hold a position on that asset from a previous loop.
+            _asset = _detect_updown_market(market.question)
+            if _asset:
+                if _asset in _updown_bet_this_loop or _asset in _updown_assets_held:
+                    continue
 
             ob = self._client.get_order_book(market.yes_token.token_id)
 
@@ -314,6 +331,10 @@ class PolymarketBot:
 
             if self._execute_signal(sig):
                 trades_placed += 1
+                # Mark asset as bet so we skip remaining slots for same asset
+                if _asset:
+                    _updown_bet_this_loop.add(_asset)
+                    _updown_assets_held.add(_asset)
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure = self._risk.total_exposure()
@@ -337,6 +358,25 @@ class PolymarketBot:
         for token_id, pos in list(self._positions.items()):
             ob = self._client.get_order_book(token_id)
             current_price = ob.mid if ob else pos.entry_price
+
+            # Auto-claim: if the token is priced at ≥$0.97 the market has
+            # resolved YES (our side won) — sell immediately to collect.
+            # Polymarket CLOB accepts SELL orders at resolved prices.
+            if current_price >= 0.97:
+                logger.info(f"AUTO-CLAIM: market resolved YES — selling {pos.shares:.2f} shares @ ${current_price:.3f}  {pos.question[:50]}")
+                to_close.append(token_id)
+                position_snapshots.append((pos, current_price))
+                continue
+
+            # Auto-clear: if priced at ≤$0.03 the market resolved against us
+            # — clear it from tracking (no value to sell, just burns gas)
+            if current_price <= 0.03:
+                pnl = self._learner.record_close(token_id, current_price)
+                self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
+                self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
+                del self._positions[token_id]
+                logger.info(f"AUTO-CLEAR: market resolved NO — position removed  {pos.question[:50]}")
+                continue
 
             pnl_pct = (
                 (current_price - pos.entry_price) / pos.entry_price
@@ -438,6 +478,12 @@ class PolymarketBot:
         latency_ms = random.randint(5, 95)
         self._dash_state.add_exec_log("exec",
             f"EXEC ${limit_price:.2f} → \"{sig.question[:38]}\" // {latency_ms}ms")
+
+        # Abort early if wallet balance is clearly too low (avoids 400 error spam)
+        wallet = self._dash_state.wallet_balance or 0.0
+        if wallet > 0 and wallet < usdc * 0.5:
+            logger.debug(f"Skipping — wallet ${wallet:.2f} too low for ${usdc:.2f} order")
+            return False
 
         resp = self._client.place_limit_order(
             token_id=sig.token_id,
