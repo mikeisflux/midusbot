@@ -38,8 +38,6 @@ from src.strategy import (
     MomentumImbalanceStrategy,
     UpDownMomentumStrategy,
     BTCLevelStrategy,
-    SportsLiveStrategy,
-    SportsSpreadArbStrategy,
     NewsEventStrategy,
     TradeSignal,
     _fetch_btc_price,
@@ -70,6 +68,9 @@ class OpenPosition:
     composite_signal: float = 0.0
     confidence: str = "LOW"
     order_id: Optional[str] = None
+    # True for positions reconciled from external trade history (not opened by
+    # this bot session). These are NEVER auto-sold — only manual SELL applies.
+    is_external: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +85,6 @@ class PolymarketBot:
         self._latency    = LatencyArbStrategy()
         self._updown     = UpDownMomentumStrategy()
         self._btclevel   = BTCLevelStrategy()
-        self._sports     = SportsLiveStrategy()
-        self._spread_arb = SportsSpreadArbStrategy()
         self._news       = NewsEventStrategy()
         self._risk       = RiskManager(params=self._learner.risk_params)
         self._dashboard  = Dashboard(enabled=dashboard_enabled)
@@ -309,15 +308,7 @@ class PolymarketBot:
             if sig is None:
                 sig = self._btclevel.analyse(market, ob)
 
-            # ── Strategy 5: Sports Spread Arb vs Vegas (kch123 pattern) ──
-            if sig is None:
-                sig = self._spread_arb.analyse(market, ob)
-
-            # ── Strategy 6: Live Sports Settlement Lag (ESPN in-game) ──
-            if sig is None:
-                sig = self._sports.analyse(market, ob)
-
-            # ── Strategy 7: News/Event Sudden Price Move ───────────────
+            # ── Strategy 5: News/Event Sudden Price Move ───────────────
             if sig is None:
                 sig = self._news.analyse(market, ob)
 
@@ -393,10 +384,10 @@ class PolymarketBot:
             else:
                 current_price = ob.mid
 
-            # Auto-claim / auto-clear — LIVE mode only.
-            # In DRY_RUN we keep all positions visible so they can be
-            # manually reviewed and sold when the bot is switched back to live.
-            if not config.DRY_RUN:
+            # Auto-claim / auto-clear / stop-loss — LIVE mode only, and NEVER
+            # for externally-reconciled positions (is_external=True).
+            # External positions are only closed via the manual SELL button.
+            if not config.DRY_RUN and not pos.is_external:
                 # Auto-claim: token resolved in our favour (worth $1.00).
                 if current_price >= 0.97:
                     logger.info(
@@ -424,12 +415,13 @@ class PolymarketBot:
 
             position_snapshots.append((pos, current_price))
 
-            if self._risk.should_stop_loss(pnl_pct):
-                logger.warning(f"STOP-LOSS {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
-                to_close.append((token_id, current_price))
-            elif self._risk.should_take_profit(pnl_pct):
-                logger.info(f"TAKE-PROFIT {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
-                to_close.append((token_id, current_price))
+            if not pos.is_external:
+                if self._risk.should_stop_loss(pnl_pct):
+                    logger.warning(f"STOP-LOSS {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
+                    to_close.append((token_id, current_price))
+                elif self._risk.should_take_profit(pnl_pct):
+                    logger.info(f"TAKE-PROFIT {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
+                    to_close.append((token_id, current_price))
 
         self._dash_state.positions = position_snapshots
 
@@ -958,6 +950,7 @@ class PolymarketBot:
                 shares=size,
                 entry_price=avg_price,
                 cost_usdc=cost_usdc,
+                is_external=True,  # never auto-sold, only manual SELL
             )
             self._risk.register_open(cost_usdc)
             added += 1
