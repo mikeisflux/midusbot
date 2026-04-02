@@ -744,30 +744,32 @@ function closePositions() {
 }
 
 function renderPositions() {
-  const body = $('pos-body');
+  var body = $('pos-body');
   if (!_positions.length) {
     body.innerHTML = '<div class="pos-empty">No open positions</div>';
     return;
   }
-  body.innerHTML = _positions.map(p => {
-    const pnlCls  = p.pnl_usdc >= 0 ? 'g' : 'r';
-    const pnlSign = p.pnl_usdc >= 0 ? '+' : '';
-    const pct     = (p.pnl_pct * 100).toFixed(1);
-    const pctSign = p.pnl_pct >= 0 ? '+' : '';
-    return `
-    <div class="pos-card" id="card-${p.token_id}">
-      <div class="pos-question">${escHtml(p.question)}</div>
-      <div class="pos-meta">
-        <div><span class="lbl">SIDE </span><span class="val ${p.side==='YES'?'g':'r'}">${p.side}</span></div>
-        <div><span class="lbl">SHARES </span><span class="val">${p.shares.toFixed(2)}</span></div>
-        <div><span class="lbl">ENTRY </span><span class="val">${(p.entry_price*100).toFixed(1)}¢</span></div>
-        <div><span class="lbl">NOW </span><span class="val">${(p.current_price*100).toFixed(1)}¢</span></div>
-        <div><span class="lbl">COST </span><span class="val">$${(p.cost_usdc||0).toFixed(2)}</span></div>
-        <div><span class="lbl">P&amp;L </span><span class="val ${pnlCls}">${pnlSign}$${Math.abs(p.pnl_usdc).toFixed(2)} (${pctSign}${pct}%)</span></div>
-        <button class="pos-sell" id="sell-${p.token_id}" onclick="sellPosition('${p.token_id}', this)">SELL</button>
-      </div>
-    </div>`;
-  }).join('');
+  var html = '';
+  for (var i = 0; i < _positions.length; i++) {
+    var p = _positions[i];
+    var pnlCls  = p.pnl_usdc >= 0 ? 'g' : 'r';
+    var pnlSign = p.pnl_usdc >= 0 ? '+' : '';
+    var pct     = (p.pnl_pct * 100).toFixed(1);
+    var pctSign = p.pnl_pct >= 0 ? '+' : '';
+    var sideCls = p.side === 'YES' ? 'g' : 'r';
+    html += '<div class="pos-card" id="card-' + p.token_id + '">';
+    html += '<div class="pos-question">' + escHtml(p.question) + '</div>';
+    html += '<div class="pos-meta">';
+    html += '<div><span class="lbl">SIDE </span><span class="val ' + sideCls + '">' + p.side + '</span></div>';
+    html += '<div><span class="lbl">SHARES </span><span class="val">' + p.shares.toFixed(2) + '</span></div>';
+    html += '<div><span class="lbl">ENTRY </span><span class="val">' + (p.entry_price*100).toFixed(1) + 'c</span></div>';
+    html += '<div><span class="lbl">NOW </span><span class="val">' + (p.current_price*100).toFixed(1) + 'c</span></div>';
+    html += '<div><span class="lbl">COST </span><span class="val">$' + (p.cost_usdc||0).toFixed(2) + '</span></div>';
+    html += '<div><span class="lbl">P&L </span><span class="val ' + pnlCls + '">' + pnlSign + '$' + Math.abs(p.pnl_usdc).toFixed(2) + ' (' + pctSign + pct + '%)</span></div>';
+    html += '<button class="pos-sell" id="sell-' + p.token_id + '" onclick="sellPosition(\'' + p.token_id + '\', this)">SELL</button>';
+    html += '</div></div>';
+  }
+  body.innerHTML = html;
 }
 
 async function sellPosition(tokenId, btn) {
