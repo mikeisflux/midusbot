@@ -386,10 +386,39 @@ class PolymarketClient:
         if not self._clob_client:
             return []
         try:
-            return self._clob_client.get_orders() or []
+            result = self._clob_client.get_orders() or []
+            # py_clob_client may return a dict with 'data' key
+            if isinstance(result, dict):
+                result = result.get("data", []) or []
+            return result
         except Exception as exc:
             logger.error(f"get_open_orders failed: {exc}")
             return []
+
+    def cancel_all_orders(self) -> int:
+        """Cancel all open orders. Returns count cancelled."""
+        cancelled = 0
+        try:
+            # Try the bulk cancel endpoint first
+            if self._clob_client:
+                try:
+                    self._clob_client.cancel_all()
+                    logger.info("cancel_all() called on CLOB client.")
+                    return -1  # unknown count but done
+                except Exception:
+                    pass
+            # Fall back to individual cancels
+            for order in self.get_open_orders():
+                oid = order.get("id") or order.get("orderID") or order.get("order_id")
+                if oid:
+                    try:
+                        self._clob_client.cancel_order(oid)
+                        cancelled += 1
+                    except Exception as exc:
+                        logger.warning(f"cancel_order {oid} failed: {exc}")
+        except Exception as exc:
+            logger.error(f"cancel_all_orders failed: {exc}")
+        return cancelled
 
     def place_limit_order(
         self,
@@ -442,8 +471,3 @@ class PolymarketClient:
             logger.error(f"cancel_order {order_id} failed: {exc}")
             return False
 
-    def cancel_all_orders(self) -> None:
-        for order in self.get_open_orders():
-            oid = order.get("id") or order.get("order_id")
-            if oid:
-                self.cancel_order(oid)

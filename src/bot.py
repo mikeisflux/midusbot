@@ -537,7 +537,7 @@ class PolymarketBot:
                     if not is_updown and not is_btclevel:
                         continue
             else:
-                # No end date — skip unless it's an UpDown market
+                # No end date — skip everything except UpDown (which resolve in minutes)
                 if not is_updown:
                     continue
 
