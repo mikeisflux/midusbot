@@ -183,11 +183,17 @@ class PolymarketBot:
         for sym in ("XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE"):
             _fetch_price(sym)
 
-        # Drain new news headlines — collect market questions for scoring
+        # 3. Scan markets
+        self._dash_state.add_exec_log("scan",
+            f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '…'} markets")
+
+        markets = self._client.get_markets()
+        updown  = self._client.get_updown_markets()
+
+        # Drain new news headlines and score against fetched markets
         new_headlines = self._news_feed.drain_new()
         _news_flagged: set[str] = set()
         if new_headlines:
-            mkt_questions = [m.question for m in (updown + [m for m in markets])]
             for h in new_headlines:
                 for m in (updown + markets):
                     score = self._news_feed.score_against_markets(h, [m.question])
@@ -195,13 +201,6 @@ class PolymarketBot:
                         _news_flagged.add(m.id)
                         self._dash_state.add_exec_log("news",
                             f"[NEWS] {h.source}: \"{h.title[:55]}\" → \"{m.question[:40]}\"")
-
-        # 3. Scan markets
-        self._dash_state.add_exec_log("scan",
-            f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '…'} markets")
-
-        markets = self._client.get_markets()
-        updown  = self._client.get_updown_markets()
         # Deduplicate and put Up/Down markets first (they have highest urgency)
         seen_ids = {m.id for m in updown}
         all_markets = updown + [m for m in markets if m.id not in seen_ids]
