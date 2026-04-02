@@ -402,14 +402,31 @@ class PolymarketBot:
     # ------------------------------------------------------------------
 
     def _filter_markets(self, markets: list[Market]) -> list[Market]:
-        return [
-            m for m in markets
-            if m.liquidity >= config.MIN_LIQUIDITY_USDC
-            and m.volume   >= config.MIN_VOLUME_24H_USDC
-            and not m.closed
-            and m.active
-            and 0.02 <= m.yes_price <= 0.98
-        ]
+        from datetime import datetime, timezone
+        cutoff = config.MAX_DAYS_TO_RESOLUTION
+
+        filtered = []
+        for m in markets:
+            if not m.active or m.closed:
+                continue
+            if m.liquidity < config.MIN_LIQUIDITY_USDC:
+                continue
+            if m.volume < config.MIN_VOLUME_24H_USDC:
+                continue
+            if not (0.02 <= m.yes_price <= 0.98):
+                continue
+            # Skip markets that resolve too far in the future — capital would
+            # be locked up until resolution with no ability to exit easily
+            if m.end_date:
+                try:
+                    end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
+                    days_left = (end - datetime.now(timezone.utc)).days
+                    if days_left > cutoff:
+                        continue
+                except Exception:
+                    pass  # unparseable date → allow through
+            filtered.append(m)
+        return filtered
 
     def _already_positioned(self, market: Market) -> bool:
         return (
