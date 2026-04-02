@@ -7,9 +7,13 @@ metrics, and the current learned parameters.
 """
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from loguru import logger
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -24,6 +28,7 @@ if TYPE_CHECKING:
 
 import config
 
+_EQUITY_FILE = Path("data/equity_curve.json")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,6 +95,8 @@ class DashboardState:
         self._seed: float = config.MAX_TOTAL_EXPOSURE_USDC  # starting portfolio value
         self.wallet_balance: float = 0.0      # live wallet USDC (updated each loop in live mode)
 
+        self._load_equity_curve()
+
     # convenience -----------------------------------------------------------
 
     @property
@@ -118,13 +125,14 @@ class DashboardState:
         self.add_equity_point()
 
     def add_equity_point(self) -> None:
-        """Append current portfolio value to the equity curve (max 500 points)."""
+        """Append current portfolio value to the equity curve (max 2000 points)."""
         self.equity_curve.append({
             "t": int(time.time() * 1000),
             "v": round(self._seed + self.total_pnl, 4),
         })
-        if len(self.equity_curve) > 500:
-            self.equity_curve = self.equity_curve[-500:]
+        if len(self.equity_curve) > 2000:
+            self.equity_curve = self.equity_curve[-2000:]
+        self._save_equity_curve()
 
     def add_exec_log(self, kind: str, text: str) -> None:
         """
@@ -138,6 +146,38 @@ class DashboardState:
         })
         self.exec_log = self.exec_log[:120]  # keep last 120 entries
 
+    def restore_from_journal(self, journal) -> None:
+        """
+        Reconstruct performance stats from the persisted trade journal on startup.
+        Called once after the AdaptiveLearner has loaded its journal.
+        """
+        closed = [r for r in journal if r.closed]
+        if not closed:
+            return
+
+        self.total_trades = len(closed)
+        self.wins         = sum(1 for r in closed if r.pnl_usdc > 0)
+        self.total_pnl    = sum(r.pnl_usdc for r in closed)
+        self.best_trade   = max((r.pnl_usdc for r in closed), default=0.0)
+        self.worst_trade  = min((r.pnl_usdc for r in closed), default=0.0)
+        self.pnl_history  = [r.pnl_usdc for r in closed]
+        # total_fees can't be recovered from journal; leave at 0 (minor)
+
+        # Rebuild equity curve from journal if no saved curve exists
+        if not self.equity_curve and closed:
+            cumulative = 0.0
+            for r in sorted(closed, key=lambda x: x.closed_at):
+                cumulative += r.pnl_usdc
+                self.equity_curve.append({
+                    "t": int(r.closed_at * 1000),
+                    "v": round(self._seed + cumulative, 4),
+                })
+
+        logger.info(
+            f"[Dashboard] Restored from journal: {self.total_trades} trades, "
+            f"P&L=${self.total_pnl:+.2f}, {self.wins}W/{self.total_trades}T"
+        )
+
     def reset_training_stats(self) -> None:
         """Clear all performance counters and equity curve (called on Reset Training)."""
         self.total_trades  = 0
@@ -150,6 +190,31 @@ class DashboardState:
         self.pnl_history   = []
         self.equity_curve  = []
         self.learned       = {}
+        try:
+            _EQUITY_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _load_equity_curve(self) -> None:
+        """Load persisted equity curve from disk on startup (if it exists)."""
+        try:
+            if _EQUITY_FILE.exists():
+                with open(_EQUITY_FILE) as f:
+                    data = json.load(f)
+                if isinstance(data, list) and data:
+                    self.equity_curve = data[-2000:]
+                    logger.info(f"[Dashboard] Loaded {len(self.equity_curve)} equity curve points from disk.")
+        except Exception as exc:
+            logger.warning(f"[Dashboard] Could not load equity curve: {exc}")
+
+    def _save_equity_curve(self) -> None:
+        """Persist equity curve to disk (non-blocking best-effort write)."""
+        try:
+            _EQUITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(_EQUITY_FILE, "w") as f:
+                json.dump(self.equity_curve, f)
+        except Exception:
+            pass  # don't crash the bot loop on a disk write failure
 
     @property
     def balance(self) -> float:

@@ -126,10 +126,13 @@ class PolymarketBot:
                 logger.info(f"Cancelling {len(stale)} stale open order(s) from previous session…")
                 self._client.cancel_all_orders()
 
+        # Restore performance stats + equity curve from persisted journal/file
+        self._dash_state.restore_from_journal(self._learner.journal)
+
         # Pull live wallet balance and use it as the portfolio seed
         self._sync_wallet_balance()
 
-        # Seed the equity curve with starting value
+        # Add a restart marker to the equity curve so gaps are visible on the chart
         self._dash_state.add_equity_point()
 
         # Start web UI (always, regardless of terminal dashboard)
