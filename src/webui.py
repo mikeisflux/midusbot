@@ -110,6 +110,7 @@ def _build(s: DashboardState) -> dict:
         "maker_fee_pct":   config.MAKER_FEE_PCT,
         "daily_pnl":       s.daily_pnl,
         "balance":         s.balance,
+        "wallet_balance":  s.wallet_balance,
         "seed":            s._seed,
         "scan_latency_ms": s.scan_latency_ms,
         "orders_placed":   s.orders_placed,
@@ -305,7 +306,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
   <div class="stat-block">
     <div class="stat-lbl">Balance</div>
     <div class="stat-val b" id="s-balance">$0.00</div>
-    <div class="stat-sub">seed: <span id="s-seed" class="d">$0</span></div>
+    <div class="stat-sub" id="s-bal-sub">seed: <span id="s-seed" class="d">$0</span></div>
   </div>
   <div class="stat-block">
     <div class="stat-lbl">Total P&amp;L</div>
@@ -478,8 +479,13 @@ async function refresh() {
     const pnl    = d.performance.total_pnl;
     const fees   = d.performance.total_fees || 0;
     const pnlPct = d.seed > 0 ? pnl / d.seed * 100 : 0;
-    setC('s-balance', '$' + d.balance.toFixed(2), 'stat-val b');
-    setC('s-seed',    '$' + d.seed.toFixed(0));
+    if (d.wallet_balance > 0) {
+      setC('s-balance', '$' + d.wallet_balance.toFixed(2), 'stat-val b');
+      $('s-bal-sub').innerHTML = 'wallet · P&L <span class="'+cc(pnl)+'">'+(pnl>=0?'+':'')+pnl.toFixed(2)+'</span>';
+    } else {
+      setC('s-balance', '$' + d.balance.toFixed(2), 'stat-val b');
+      setC('s-seed',    '$' + d.seed.toFixed(0));
+    }
     setC('s-pnl',     (pnl>=0?'+':'')+' $'+Math.abs(pnl).toFixed(2), 'stat-val '+cc(pnl));
     $('s-pnl-pct').innerHTML = `<span class="${cc(pnl)}">${pnl>=0?'+':''}${pnlPct.toFixed(1)}%</span>`;
     setC('s-latency', d.scan_latency_ms + 'ms');

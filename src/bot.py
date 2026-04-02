@@ -98,6 +98,9 @@ class PolymarketBot:
         self._running = True
         self._dashboard.start()
 
+        # Pull live wallet balance and use it as the portfolio seed
+        self._sync_wallet_balance()
+
         # Seed the equity curve with starting value
         self._dash_state.add_equity_point()
 
@@ -134,7 +137,11 @@ class PolymarketBot:
         t0 = time.time()
         logger.info(f"── Loop #{self._dash_state.loop_count} ──")
 
-        # 0. Process any pending simulated fills
+        # 0a. Refresh wallet balance every 10 loops (or every loop in live mode)
+        if not config.DRY_RUN or self._dash_state.loop_count % 10 == 0:
+            self._sync_wallet_balance()
+
+        # 0b. Process any pending simulated fills
         self._process_sim_queue()
 
         # 1. Manage existing positions
@@ -408,6 +415,20 @@ class PolymarketBot:
             market.yes_token.token_id in self._positions
             or market.no_token.token_id in self._positions
         )
+
+    def _sync_wallet_balance(self) -> None:
+        """Fetch live USDC balance and update the dashboard seed."""
+        balance = self._client.get_usdc_balance()
+        if balance is not None and balance > 0:
+            self._dash_state.wallet_balance = balance
+            # On first call, also set the equity-curve seed so P&L is relative
+            # to the real starting balance
+            if self._dash_state._seed == config.MAX_TOTAL_EXPOSURE_USDC:
+                self._dash_state._seed = balance
+            logger.info(f"Wallet balance: ${balance:.2f} USDC")
+            self._dash_state.add_exec_log("info", f"Wallet: ${balance:.2f} USDC")
+        else:
+            logger.debug("Wallet balance unavailable (no auth or dry-run)")
 
     def _shutdown(self, *_) -> None:
         logger.info("Shutdown signal received…")

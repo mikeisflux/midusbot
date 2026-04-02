@@ -285,6 +285,31 @@ class PolymarketClient:
     # Authenticated operations (require CLOB client + private key)
     # ------------------------------------------------------------------
 
+    def get_usdc_balance(self) -> float | None:
+        """
+        Fetch the live USDC balance from the Polymarket CLOB API.
+        USDC on Polygon has 6 decimals, so raw value 1000000 = $1.00.
+        Returns the balance in human-readable USDC (e.g. 250.00).
+        Returns None if unauthenticated or the call fails.
+        """
+        if not self._clob_client:
+            return None
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            resp = self._clob_client.get_balance_allowance(
+                params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            raw = resp.get("balance", "0")
+            # Some versions return an already-scaled float; others return raw integer string
+            balance = float(raw)
+            # Heuristic: if it looks like a raw 6-decimal value (> 1,000,000) scale down
+            if balance > 100_000:
+                balance = balance / 1_000_000
+            return round(balance, 2)
+        except Exception as exc:
+            logger.error(f"get_usdc_balance failed: {exc}")
+            return None
+
     def get_positions(self) -> list[dict]:
         """Return open CLOB positions for the connected wallet."""
         if not self._clob_client:

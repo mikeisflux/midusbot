@@ -88,6 +88,7 @@ class DashboardState:
         self.btc_price: float = 0.0
         self.daily_pnl: float = 0.0
         self._seed: float = config.MAX_TOTAL_EXPOSURE_USDC  # starting portfolio value
+        self.wallet_balance: float = 0.0      # live wallet USDC (updated each loop in live mode)
 
     # convenience -----------------------------------------------------------
 
@@ -139,6 +140,9 @@ class DashboardState:
 
     @property
     def balance(self) -> float:
+        # In live mode use the actual wallet balance; fall back to seed + P&L
+        if self.wallet_balance > 0:
+            return self.wallet_balance
         return self._seed + self.total_pnl
 
 
