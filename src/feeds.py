@@ -60,8 +60,9 @@ class BinanceWSFeed:
         feed.stop()
     """
 
+    # Port 9443 is often blocked by VPS firewalls; port 443 is always open
     _WS_URL = (
-        "wss://stream.binance.com:9443/stream?streams="
+        "wss://stream.binance.com:443/stream?streams="
         + "/".join(f"{sym}@aggTrade" for sym in _WS_SYMBOLS.values())
     )
 

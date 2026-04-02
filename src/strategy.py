@@ -470,11 +470,36 @@ _MIN_MOMENTUM_PCT = 0.0005
 def _detect_updown_market(question: str) -> str | None:
     """
     Returns the asset symbol if the question is an Up/Down short-interval
-    market (e.g. "XRP Up or Down - March 3, 12:00PM-12:05PM ET").
+    crypto market.  Handles all Polymarket question phrasings:
+      • "XRP Up or Down - March 3, 12:00PM-12:05PM ET"
+      • "Will BTC be higher or lower in 15 minutes?"
+      • "Bitcoin higher or lower in the next 5 min?"
+      • "BTC up/down 15m"
     Returns None otherwise.
     """
     q = question.lower()
-    if "up or down" not in q and "up/down" not in q:
+    # Must contain a directional phrase
+    direction_phrases = (
+        "up or down", "up/down", "higher or lower",
+        "higher in", "lower in", "go up", "go down",
+        "be up", "be down",
+    )
+    # Must also reference a short time interval to avoid false positives
+    # on long-term questions like "Will BTC be higher by end of year?"
+    time_phrases = (
+        "5 min", "5min", "15 min", "15min", "5-min", "15-min",
+        "5 minute", "15 minute", "next 5", "next 15",
+        "in 5", "in 15", ":00pm", ":05pm", ":10pm", ":15pm",
+        ":20pm", ":25pm", ":30pm", ":35pm", ":40pm", ":45pm",
+        ":50pm", ":55pm", ":00am", ":05am", ":10am", ":15am",
+    )
+    has_direction = any(p in q for p in direction_phrases)
+    has_time      = any(p in q for p in time_phrases)
+    # "up or down" alone is strong enough (e.g. "XRP Up or Down - 12:00PM-12:05PM")
+    if not has_direction:
+        return None
+    # For "higher or lower" we require a time phrase to avoid false positives
+    if "higher or lower" in q and not has_time:
         return None
     for kw, sym in _UPDOWN_ASSETS.items():
         if kw in q:

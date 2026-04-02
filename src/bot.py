@@ -586,7 +586,9 @@ class PolymarketBot:
                     n_liquidity += 1; continue
                 if m.volume < config.MIN_VOLUME_24H_USDC:
                     n_volume += 1; continue
-                if not (0.02 <= m.yes_price <= 0.98):
+                # Allow wider price range: cheap options (1¢) and near-settled (99¢)
+                # can still have edge for BTCLevel and NewsEvent strategies
+                if not (0.005 <= m.yes_price <= 0.995):
                     n_price += 1; continue
 
             hours_left = None
@@ -598,7 +600,9 @@ class PolymarketBot:
                     # Regular markets: use MIN_MINUTES_TO_RESOLUTION (default 5)
                     effective_min_secs = 60 if is_updown else min_minutes * 60
                     if secs_left < effective_min_secs:
-                        n_toosoon += 1; continue
+                        n_toosoon += 1
+                        logger.debug(f"too_soon: is_updown={is_updown} secs={secs_left:.0f} q={m.question[:70]}")
+                        continue
                     hours_left = secs_left / 3600
                     if is_btclevel:
                         day_cap = 35
