@@ -563,7 +563,10 @@ class PolymarketBot:
                 try:
                     end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
                     secs_left = (end - now).total_seconds()
-                    if secs_left < min_minutes * 60:
+                    # UpDown 5-min markets: allow entry as long as >1 min remains
+                    # Regular markets: use MIN_MINUTES_TO_RESOLUTION (default 5)
+                    effective_min_secs = 60 if is_updown else min_minutes * 60
+                    if secs_left < effective_min_secs:
                         n_toosoon += 1; continue
                     hours_left = secs_left / 3600
                     if is_btclevel:
