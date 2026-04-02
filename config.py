@@ -32,5 +32,11 @@ MIN_EDGE: float = float(os.getenv("MIN_EDGE", "0.03"))
 MIN_LIQUIDITY_USDC: float = float(os.getenv("MIN_LIQUIDITY_USDC", "1000"))
 MIN_VOLUME_24H_USDC: float = float(os.getenv("MIN_VOLUME_24H_USDC", "100"))
 
+# ── Trading costs ────────────────────────────────────────────────────────────
+# Polymarket CLOB maker/taker fee (currently 0 %, set > 0 if it changes)
+MAKER_FEE_PCT: float = float(os.getenv("MAKER_FEE_PCT", "0.0"))
+# Estimated Polygon gas cost per transaction (in USDC)
+GAS_COST_USDC: float = float(os.getenv("GAS_COST_USDC", "0.02"))
+
 # ── Loop ─────────────────────────────────────────────────────────────────────
 LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "60"))

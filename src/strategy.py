@@ -248,6 +248,8 @@ def _extract_btc_target(question: str) -> float | None:
     """
     Try to extract the dollar target from a market question like:
       "Will Bitcoin be above $70,000 on June 30?"
+      "Will Bitcoin hit $100k by year end?"
+      "Will Bitcoin reach $1m before GTA VI?"
     Returns the dollar figure or None.
     """
     q = question.lower()
@@ -255,13 +257,29 @@ def _extract_btc_target(question: str) -> float | None:
         return None
 
     import re
-    # Match $70,000 / $70000 / 70,000 / 70000
-    m = re.search(r"\$?([\d,]+(?:\.\d+)?)\s*(?:k|K)?", q)
+    # Match $70,000 / $70k / $1m / $1.5b with optional suffix k/m/b
+    m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)\s*([kmb])\b", q)
+    if m:
+        try:
+            val = float(m.group(1).replace(",", ""))
+            suffix = m.group(2)
+            if suffix == "k":
+                val *= 1_000
+            elif suffix == "m":
+                val *= 1_000_000
+            elif suffix == "b":
+                val *= 1_000_000_000
+            return val
+        except ValueError:
+            pass
+
+    # Fall back: plain number like $70,000 or $70000
+    m = re.search(r"\$([\d,]+(?:\.\d+)?)", q)
     if not m:
         return None
     try:
         val = float(m.group(1).replace(",", ""))
-        # Heuristic: if someone wrote "70k" the regex got "70"
+        # Numbers under 500 are probably written as "70" meaning 70k
         if val < 500:
             val *= 1000
         return val
@@ -288,6 +306,18 @@ class LatencyArbStrategy:
 
         live_price = _fetch_btc_price()
         if live_price is None:
+            return None
+
+        # Safety: skip markets where the live price is more than 30% away from
+        # the target — those are long-dated prediction markets (e.g. "Will BTC
+        # hit $1M?"), not genuine latency-arb opportunities.
+        distance_pct = abs(live_price - target) / target
+        if distance_pct > 0.30:
+            logger.debug(
+                f"[LATENCY-ARB] Skipping {market.question[:50]} — "
+                f"BTC ${live_price:,.0f} is {distance_pct:.0%} away from "
+                f"target ${target:,.0f} (threshold 30%)"
+            )
             return None
 
         # Implied probability: how likely is BTC to be above $target?

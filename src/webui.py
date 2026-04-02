@@ -76,6 +76,7 @@ def api_export():
             "total_trades": _state.total_trades if _state else 0,
             "wins":         _state.wins         if _state else 0,
             "total_pnl":    _state.total_pnl    if _state else 0,
+            "total_fees":   _state.total_fees   if _state else 0,
             "win_rate":     _state.win_rate      if _state else 0,
             "best_trade":   _state.best_trade    if _state else 0,
             "worst_trade":  _state.worst_trade   if _state else 0,
@@ -105,6 +106,8 @@ def _build(s: DashboardState) -> dict:
         "candidates":      s.candidates,
         "exposure":        s.exposure,
         "max_exposure":    config.MAX_TOTAL_EXPOSURE_USDC,
+        "gas_cost_usdc":   config.GAS_COST_USDC,
+        "maker_fee_pct":   config.MAKER_FEE_PCT,
         "daily_pnl":       s.daily_pnl,
         "balance":         s.balance,
         "seed":            s._seed,
@@ -140,6 +143,7 @@ def _build(s: DashboardState) -> dict:
         ],
         "performance": {
             "total_pnl":    s.total_pnl,
+            "total_fees":   s.total_fees,
             "win_rate":     s.win_rate,
             "total_trades": s.total_trades,
             "wins":         s.wins,
@@ -204,7 +208,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 
 /* ── STAT BLOCKS ── */
 #stats{
-  display:grid;grid-template-columns:repeat(4,1fr);
+  display:grid;grid-template-columns:repeat(5,1fr);
   border-bottom:1px solid var(--border);
 }
 .stat-block{padding:12px 20px;border-right:1px solid var(--border)}
@@ -318,6 +322,11 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div class="stat-val" id="s-winrate">0%</div>
     <div class="stat-sub" id="s-winsub">0W / 0T</div>
   </div>
+  <div class="stat-block">
+    <div class="stat-lbl">Fees Paid</div>
+    <div class="stat-val r" id="s-fees">$0.00</div>
+    <div class="stat-sub d">gas + maker fee</div>
+  </div>
 </div>
 
 <!-- INFO STRIP -->
@@ -333,6 +342,9 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
   <div>risk used <span id="i-risk">0%</span></div>
   <div class="sep">|</div>
   <div>positions <span id="i-pos">0</span></div>
+  <div class="sep">|</div>
+  <div>fees/trade <span id="i-fee-per" class="r">$0.04</span></div>
+  <div>total fees <span id="i-fees-total" class="r">$0.00</span></div>
 </div>
 
 <!-- MAIN -->
@@ -464,6 +476,7 @@ async function refresh() {
 
     // Stat blocks
     const pnl    = d.performance.total_pnl;
+    const fees   = d.performance.total_fees || 0;
     const pnlPct = d.seed > 0 ? pnl / d.seed * 100 : 0;
     setC('s-balance', '$' + d.balance.toFixed(2), 'stat-val b');
     setC('s-seed',    '$' + d.seed.toFixed(0));
@@ -473,6 +486,7 @@ async function refresh() {
     const wr = d.performance.win_rate;
     setC('s-winrate', (wr*100).toFixed(1)+'%', 'stat-val '+(d.performance.total_trades>5?(wr>=.5?'g':'r'):''));
     setC('s-winsub',  d.performance.wins+'W / '+d.performance.total_trades+'T');
+    setC('s-fees',    '-$' + fees.toFixed(4), 'stat-val r');
 
     // Info strip
     setC('i-btc',    d.btc_price > 0 ? '$'+d.btc_price.toLocaleString(undefined,{maximumFractionDigits:0}) : '—');
@@ -488,6 +502,12 @@ async function refresh() {
     const riskPct = d.max_exposure>0 ? (d.exposure/d.max_exposure*100).toFixed(0) : 0;
     setC('i-risk',  riskPct+'%', riskPct>=90?'r':riskPct>=60?'y':'g');
     setC('i-pos',   d.positions.length);
+
+    // Fees (2 gas txs per round-trip + maker fee on typical position size)
+    const typicalPos = d.max_exposure * 0.005;  // ~0.5% of exposure cap
+    const feePerTrade = 2 * (d.gas_cost_usdc||0.02) + typicalPos * (d.maker_fee_pct||0) * 2;
+    setC('i-fee-per',    '$' + feePerTrade.toFixed(3));
+    setC('i-fees-total', '-$' + fees.toFixed(4));
 
     // Equity curve
     if (d.equity_curve && d.equity_curve.length) {

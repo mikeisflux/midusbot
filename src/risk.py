@@ -109,6 +109,16 @@ class RiskManager:
     def daily_pnl(self) -> float:
         return self._daily_pnl
 
+    def trade_fee(self, entry_usdc: float, exit_usdc: float = 0.0) -> float:
+        """
+        Round-trip transaction cost: maker fee on entry + exit notional,
+        plus two Polygon gas transactions (~$0.02 each by default).
+        Polymarket CLOB currently charges 0% fees, so cost ≈ gas only.
+        """
+        fee = (entry_usdc + exit_usdc) * config.MAKER_FEE_PCT
+        gas = 2 * config.GAS_COST_USDC
+        return round(fee + gas, 4)
+
     def reset_daily(self) -> None:
         """Call at midnight to reset daily P&L tracking."""
         self._daily_pnl = 0.0

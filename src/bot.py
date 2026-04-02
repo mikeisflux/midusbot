@@ -243,11 +243,13 @@ class PolymarketBot:
             size=pos.shares,
         )
         if resp:
+            exit_usdc = sell_price * pos.shares
+            fee = self._risk.trade_fee(pos.cost_usdc, exit_usdc)
             pnl = self._learner.record_close(token_id, sell_price)
-            self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
-            self._dash_state.record_closed_trade(pnl)
+            self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl - fee)
+            self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
             del self._positions[token_id]
-            logger.info(f"Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}")
+            logger.info(f"Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
 
     # ------------------------------------------------------------------
     # Trade execution
@@ -356,19 +358,23 @@ class PolymarketBot:
             # Synthetic exit: fair_value ± small noise
             noise      = random.gauss(0, 0.018)
             exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
-            pnl        = round(sim["shares"] * (exit_price - sim["entry"]), 4)
+            gross_pnl  = round(sim["shares"] * (exit_price - sim["entry"]), 4)
+            entry_usdc = sim["shares"] * sim["entry"]
+            exit_usdc  = sim["shares"] * exit_price
+            fee        = self._risk.trade_fee(entry_usdc, exit_usdc)
+            net_pnl    = round(gross_pnl - fee, 4)
 
-            if pnl >= 0:
+            if net_pnl >= 0:
                 self._dash_state.add_exec_log("filled",
-                    f"FILLED +${pnl:.2f} // market converged  \"{sim['question'][:38]}\"")
+                    f"FILLED +${net_pnl:.2f} (fee ${fee:.3f}) // market converged  \"{sim['question'][:38]}\"")
             else:
                 self._dash_state.add_exec_log("slipped",
-                    f"SLIPPED ${pnl:.2f} // adverse fill  \"{sim['question'][:38]}\"")
+                    f"SLIPPED ${net_pnl:.2f} (fee ${fee:.3f}) // adverse fill  \"{sim['question'][:38]}\"")
 
             # Update learner + dashboard
             self._learner.record_close(sim["token_id"], exit_price)
-            self._risk.register_close(sim["shares"] * sim["entry"], pnl_usdc=pnl)
-            self._dash_state.record_closed_trade(pnl)
+            self._risk.register_close(entry_usdc, pnl_usdc=net_pnl)
+            self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
             # Remove from live positions if it was tracked
             self._positions.pop(sim["token_id"], None)

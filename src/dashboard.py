@@ -71,7 +71,8 @@ class DashboardState:
         # Lifetime performance numbers
         self.total_trades: int = 0
         self.wins: int = 0
-        self.total_pnl: float = 0.0
+        self.total_pnl: float = 0.0    # net P&L after fees
+        self.total_fees: float = 0.0   # cumulative fees + gas paid
         self.best_trade: float = 0.0
         self.worst_trade: float = 0.0
         self.pnl_history: list[float] = []
@@ -102,15 +103,17 @@ class DashboardState:
         self.recent_signals.insert(0, sig)
         self.recent_signals = self.recent_signals[:8]
 
-    def record_closed_trade(self, pnl_usdc: float) -> None:
+    def record_closed_trade(self, pnl_usdc: float, fee_usdc: float = 0.0) -> None:
+        net = pnl_usdc - fee_usdc
         self.total_trades += 1
-        self.total_pnl += pnl_usdc
-        self.daily_pnl += pnl_usdc
-        self.pnl_history.append(pnl_usdc)
-        if pnl_usdc > 0:
+        self.total_pnl += net
+        self.total_fees += fee_usdc
+        self.daily_pnl += net
+        self.pnl_history.append(net)
+        if net > 0:
             self.wins += 1
-        self.best_trade = max(self.best_trade, pnl_usdc)
-        self.worst_trade = min(self.worst_trade, pnl_usdc)
+        self.best_trade = max(self.best_trade, net)
+        self.worst_trade = min(self.worst_trade, net)
         self.add_equity_point()
 
     def add_equity_point(self) -> None:
