@@ -560,58 +560,63 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 
 <script>
 // ── CHART SETUP ──────────────────────────────────────────────────────────
-const ctx = document.getElementById('eq-chart').getContext('2d');
-const chart = new Chart(ctx, {
-  type: 'line',
-  data: {
-    datasets: [{
-      data: [],
-      borderColor: '#40c4ff',
-      borderWidth: 1.5,
-      backgroundColor: 'rgba(64,196,255,0.06)',
-      fill: true,
-      pointRadius: 0,
-      tension: 0.2,
-    }]
-  },
-  options: {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    interaction: { intersect: false, mode: 'index' },
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        callbacks: {
-          label: ctx => '$' + ctx.parsed.y.toFixed(2)
-        },
-        backgroundColor: '#0d1219',
-        borderColor: '#1c2a38',
-        borderWidth: 1,
-        titleColor: '#4a6070',
-        bodyColor: '#b0c8e0',
-      }
+var chart = null;
+try {
+  var ctx = document.getElementById('eq-chart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      datasets: [{
+        data: [],
+        borderColor: '#40c4ff',
+        borderWidth: 1.5,
+        backgroundColor: 'rgba(64,196,255,0.06)',
+        fill: true,
+        pointRadius: 0,
+        tension: 0.2,
+      }]
     },
-    scales: {
-      x: {
-        type: 'time',
-        time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } },
-        grid:  { color: '#0f1a24' },
-        ticks: { color: '#2a4060', maxTicksLimit: 6, font: { size: 10 } },
-        border:{ color: '#1c2a38' }
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { intersect: false, mode: 'index' },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: function(c) { return '$' + c.parsed.y.toFixed(2); }
+          },
+          backgroundColor: '#0d1219',
+          borderColor: '#1c2a38',
+          borderWidth: 1,
+          titleColor: '#4a6070',
+          bodyColor: '#b0c8e0',
+        }
       },
-      y: {
-        grid:  { color: '#0f1a24' },
-        ticks: {
-          color: '#2a4060',
-          font: { size: 10 },
-          callback: v => '$' + v.toFixed(0)
+      scales: {
+        x: {
+          type: 'time',
+          time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } },
+          grid:  { color: '#0f1a24' },
+          ticks: { color: '#2a4060', maxTicksLimit: 6, font: { size: 10 } },
+          border:{ color: '#1c2a38' }
         },
-        border:{ color: '#1c2a38' }
+        y: {
+          grid:  { color: '#0f1a24' },
+          ticks: {
+            color: '#2a4060',
+            font: { size: 10 },
+            callback: function(v) { return '$' + v.toFixed(0); }
+          },
+          border:{ color: '#1c2a38' }
+        }
       }
     }
-  }
-});
+  });
+} catch(chartErr) {
+  document.getElementById('chart-wrap').innerHTML = '<div style="color:#4a6070;padding:20px;font-size:11px">Chart unavailable</div>';
+}
 
 // ── HELPERS ──────────────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
@@ -701,7 +706,7 @@ async function refresh() {
     setC('i-fees-total', '-$' + fees.toFixed(4));
 
     // Equity curve
-    if (d.equity_curve && d.equity_curve.length) {
+    if (chart && d.equity_curve && d.equity_curve.length) {
       chart.data.datasets[0].data = d.equity_curve.map(p => ({ x: p.t, y: p.v }));
       chart.update('none');
       const last = d.equity_curve[d.equity_curve.length-1].v;
