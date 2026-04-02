@@ -371,6 +371,17 @@ class PolymarketBot:
         position_snapshots: list[tuple[OpenPosition, float]] = []
 
         for token_id, pos in list(self._positions.items()):
+            # Lazily enrich placeholder question from CLOB market API (fast, no retries)
+            if pos.market_id and (pos.question.startswith("[token:") or len(pos.question) <= 20):
+                try:
+                    mkt = self._client.get_clob_market(pos.market_id)
+                    if mkt:
+                        q = mkt.get("question", "")
+                        if q:
+                            pos.question = q
+                except Exception:
+                    pass
+
             ob = self._client.get_order_book(token_id)
 
             # When the order book is empty (no bids, no asks) the CLOB mid
@@ -926,23 +937,8 @@ class PolymarketBot:
             else:
                 side = "YES"  # fallback
 
-            # Use conditionId as display name if we have no question.
-            # Try the CLOB public /markets/{conditionId} endpoint (fast, no retries)
-            # to get the real question and neg_risk for the sell path.
-            if not question and market_id:
-                try:
-                    mkt = self._client.get_clob_market(market_id)
-                    if mkt:
-                        question = mkt.get("question", "") or market_id[:20]
-                        # Also fix side from tokens list if outcome is missing
-                        if not outcome:
-                            for tok in mkt.get("tokens", []):
-                                if tok.get("token_id") == token_id:
-                                    o = tok.get("outcome", "").lower()
-                                    side = "NO" if o in ("no", "down") else "YES"
-                                    break
-                except Exception:
-                    pass
+            # Use conditionId as placeholder — question gets filled in lazily
+            # by _manage_positions() on first loop (via get_clob_market).
             if not question:
                 question = market_id[:20] if market_id else f"[token:{token_id[:16]}]"
 

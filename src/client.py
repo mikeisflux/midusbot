@@ -619,11 +619,19 @@ class PolymarketClient:
         """
         Fetch a single market from the CLOB public API by condition ID.
         Returns the raw dict including: question, neg_risk, minimum_tick_size, tokens[].
-        This is a public endpoint — no auth required.
+        Uses a single attempt with a short timeout — never retries, never blocks.
         """
-        data = self._get(f"{config.CLOB_HOST}/markets/{condition_id}")
-        if isinstance(data, dict) and data.get("condition_id"):
-            return data
+        try:
+            resp = self._session.get(
+                f"{config.CLOB_HOST}/markets/{condition_id}",
+                timeout=5,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and data.get("condition_id"):
+                return data
+        except Exception as exc:
+            logger.debug(f"get_clob_market({condition_id[:16]}) failed: {exc}")
         return None
 
     def sell_via_swaps(
