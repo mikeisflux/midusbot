@@ -87,7 +87,11 @@ class RiskManager:
     def shares_from_usdc(self, usdc: float, price: float) -> float:
         if price <= 0:
             return 0.0
-        return round(usdc / price, 2)
+        shares = usdc / price
+        # Polymarket minimum is 5 shares — return 0 so the caller skips this trade
+        if shares < config.MIN_ORDER_SHARES:
+            return 0.0
+        return round(shares, 2)
 
     def register_open(self, usdc_cost: float) -> None:
         self._open_cost += usdc_cost

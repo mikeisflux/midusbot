@@ -271,7 +271,8 @@ class PolymarketBot:
         limit_price = max(0.01, min(0.99, limit_price))
         shares = self._risk.shares_from_usdc(usdc, limit_price)
 
-        if shares <= 0:
+        if shares < config.MIN_ORDER_SHARES:
+            logger.debug(f"Skipping — {shares:.2f} shares below Polymarket minimum ({config.MIN_ORDER_SHARES})")
             return False
 
         # Log the divergence/signal to exec log

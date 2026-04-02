@@ -29,6 +29,7 @@ KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
 
 # ── Strategy ─────────────────────────────────────────────────────────────────
 MIN_EDGE: float = float(os.getenv("MIN_EDGE", "0.03"))
+MIN_ORDER_SHARES: float = float(os.getenv("MIN_ORDER_SHARES", "5.0"))  # Polymarket CLOB minimum
 MIN_LIQUIDITY_USDC: float = float(os.getenv("MIN_LIQUIDITY_USDC", "1000"))
 MIN_VOLUME_24H_USDC: float = float(os.getenv("MIN_VOLUME_24H_USDC", "100"))
 
