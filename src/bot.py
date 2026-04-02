@@ -35,6 +35,7 @@ from src.strategy import (
     TradeSignal,
     _fetch_btc_price,
     _fetch_price,
+    _detect_updown_market,
 )
 import config
 import src.webui as webui
@@ -489,7 +490,9 @@ class PolymarketBot:
 
             # UpDown 5-min markets use relaxed thresholds — they were explicitly
             # fetched for momentum trading and have low liquidity by design.
-            is_updown = m.yes_token.outcome in ("Up", "Down") or m.no_token.outcome in ("Up", "Down")
+            # Use _detect_updown_market on the question — more reliable than
+            # trusting token outcome labels which get forced by get_updown_markets().
+            is_updown = _detect_updown_market(m.question) is not None
 
 
             if is_updown:

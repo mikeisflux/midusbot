@@ -253,7 +253,7 @@ class PolymarketClient:
         """
         import json as _json
         markets: list[Market] = []
-        for keyword in ("up-or-down", "up-down", "updown"):
+        for keyword in ("up-or-down", "updown-5m", "updown-15m"):
             data = self._get(
                 f"{config.GAMMA_HOST}/markets",
                 params={
