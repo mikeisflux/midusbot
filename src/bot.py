@@ -88,7 +88,7 @@ class PolymarketBot:
         self._updown       = UpDownMomentumStrategy()
         self._btclevel     = BTCLevelStrategy()
         self._news         = NewsEventStrategy()
-        self._risk         = RiskManager(params=self._learner.risk_params)
+        self._risk         = RiskManager(params=self._learner.risk_params, positions=self._positions)
         self._dashboard    = Dashboard(enabled=dashboard_enabled)
         self._dash_state   = DashboardState()
 
@@ -209,11 +209,6 @@ class PolymarketBot:
 
         # 0c. Process any pending simulated fills
         self._process_sim_queue()
-
-        # 0d. Resync exposure counter from actual positions — prevents drift
-        #     caused by positions removed without a matching register_close()
-        #     (bot killed mid-run, stale positions file, etc.)
-        self._risk.resync_exposure(self._positions)
 
         # 1. Manage existing positions
         self._manage_positions()
@@ -465,7 +460,7 @@ class PolymarketBot:
                         f"PRUNED: market resolved/closed — removing ghost position "
                         f"{pos.question[:55]}"
                     )
-                    self._risk.register_close(pos.cost_usdc)
+                    self._risk.record_close()
                     del self._positions[token_id]
                     self._save_positions()
                     continue
@@ -496,7 +491,7 @@ class PolymarketBot:
                     _close_learner = self._news_learner if token_id in self._news_token_ids else self._learner
                     pnl = _close_learner.record_close(token_id, current_price)
                     self._news_token_ids.discard(token_id)
-                    self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
+                    self._risk.record_close(pnl_usdc=pnl)
                     self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
                     del self._positions[token_id]
                     self._save_positions()
@@ -609,7 +604,7 @@ class PolymarketBot:
             _cl = self._news_learner if token_id in self._news_token_ids else self._learner
             pnl = _cl.record_close(token_id, exit_price)
             self._news_token_ids.discard(token_id)
-            self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl - fee)
+            self._risk.record_close(pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
             # Always remove from tracking — in DRY_RUN this is simulated, but
             # we still need to delete so stop-loss/take-profit don't re-fire
@@ -623,7 +618,7 @@ class PolymarketBot:
         # For manual clicks, force-remove from tracking — user explicitly wants it
         # gone. Polymarket auto-credits resolved YES winnings to the wallet.
         if manual:
-            self._risk.register_close(pos.cost_usdc)
+            self._risk.record_close()
             del self._positions[token_id]
             self._save_positions()
             logger.info(f"MANUAL-REMOVE: sell order unavailable (market closed?) — removed from tracking: {pos.question[:55]}")
@@ -742,7 +737,7 @@ class PolymarketBot:
                         actual_entry = making_f / taking_f   # real fill price
                 except (ValueError, TypeError):
                     pass
-            self._risk.register_open(actual_cost)
+            self._risk.record_open()
             self._dash_state.orders_placed += 1
 
             self._positions[sig.token_id] = OpenPosition(
@@ -863,7 +858,7 @@ class PolymarketBot:
             _sim_cl  = self._news_learner if _sim_tid in self._news_token_ids else self._learner
             _sim_cl.record_close(_sim_tid, exit_price)
             self._news_token_ids.discard(_sim_tid)
-            self._risk.register_close(entry_usdc, pnl_usdc=net_pnl)
+            self._risk.record_close(pnl_usdc=net_pnl)
             self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
             # Remove from live positions if it was tracked
@@ -1063,9 +1058,6 @@ class PolymarketBot:
                     count += 1
             if count:
                 logger.info(f"Restored {count} open position(s) from disk.")
-                # Rebuild risk exposure from restored positions
-                for pos in self._positions.values():
-                    self._risk.register_open(pos.cost_usdc)
         except Exception as exc:
             logger.warning(f"_load_positions failed: {exc}")
 
@@ -1149,7 +1141,6 @@ class PolymarketBot:
                 cost_usdc=cost_usdc,
                 is_external=True,  # never auto-sold, only manual SELL
             )
-            self._risk.register_open(cost_usdc)
             added += 1
             logger.info(
                 f"  Reconciled {side} {size:.2f}@{avg_price:.4f} "
