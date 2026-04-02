@@ -511,6 +511,7 @@ class PolymarketBot:
 
         # ── Path 2: direct CLOB limit order (fallback) ───────────────────────────
         if resp is None:
+            # Single-shot order book — no retries (already fast after recent fix)
             ob = self._client.get_order_book(token_id)
             book_best_bid = ob.best_bid if ob else 0.0
             if book_best_bid > 0.0:
@@ -527,11 +528,9 @@ class PolymarketBot:
             )
 
         if resp:
-            # Estimate exit price for P&L tracking
-            ob2 = self._client.get_order_book(token_id)
+            # Use current_price for P&L — skip second get_order_book() call
             exit_price = (
                 current_price or
-                (ob2.best_bid if ob2 and ob2.best_bid > 0 else None) or
                 pos.entry_price
             )
             exit_usdc = exit_price * pos.shares

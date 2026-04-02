@@ -132,7 +132,8 @@ tr:hover td{background:#0d1219}
 <tbody>''' + rows + '''</tbody></table>
 <script>
 async function sellPos(tokenId, btn) {
-  if (!confirm("Sell this position?\\n\\nA limit SELL order will be placed at the current best bid.")) return;
+  if (!confirm("Sell this position?")) return;
+  _selling = true;
   btn.disabled = true;
   btn.textContent = "SELLING...";
   try {
@@ -157,9 +158,14 @@ async function sellPos(tokenId, btn) {
     btn.disabled = false;
     btn.textContent = "SELL";
   }
+  _selling = false;
 }
-// Auto-refresh every 5 seconds
-setTimeout(function(){ location.reload(); }, 5000);
+// Auto-refresh every 30 seconds, but only if no sell is in progress
+var _selling = false;
+function scheduleReload() {
+  setTimeout(function(){ if (!_selling) location.reload(); else scheduleReload(); }, 30000);
+}
+scheduleReload();
 </script>
 </body></html>'''
 
