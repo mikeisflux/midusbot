@@ -189,10 +189,13 @@ class PolymarketBot:
         self._dash_state.candidates = len(candidates)
         updown_passing = [m for m in candidates if _detect_updown_market(m.question)]
         logger.info(f"{len(candidates)}/{len(all_markets)} markets pass filters — {len(updown_passing)} UpDown, {len(candidates)-len(updown_passing)} regular.")
-        if self._dash_state.loop_count == 1 and updown:
-            logger.info("First 5 UpDown markets fetched:")
-            for m in updown[:5]:
-                logger.info(f"  [{m.yes_token.outcome}/{m.no_token.outcome}] {m.question[:70]}  end={m.end_date}")
+        if self._dash_state.loop_count == 1:
+            if updown:
+                logger.info(f"First {min(5,len(updown))} UpDown markets:")
+                for m in updown[:5]:
+                    logger.info(f"  slug={m.slug[:50]}  q={m.question[:60]}  end={m.end_date}")
+            else:
+                logger.warning("UpDown: 0 markets returned — no active 5-min crypto slots right now")
 
         self._dash_state.add_exec_log("scan",
             f"Evaluating {len(candidates)} candidate markets on CLOB…")

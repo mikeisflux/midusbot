@@ -245,15 +245,24 @@ class PolymarketClient:
         logger.info(f"Fetched {len(markets)} active markets from Gamma API.")
         return markets
 
-    def get_updown_markets(self, limit: int = 100) -> list[Market]:
+    def get_updown_markets(self, limit: int = 20) -> list[Market]:
         """
-        Fetch short-interval Up/Down crypto markets (XRP, BTC, ETH, SOL, DOGE).
-        These 5-15 min markets are not always in the top-200 by volume so we
-        query for them explicitly using the slug_contains filter.
+        Fetch short-interval Up/Down crypto markets (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE).
+        Query each asset by name to avoid catching unrelated "up-or-down" markets
+        (e.g. "Russia-Ukraine vs GTA VI" slugs also contain "up-or-down").
+        Each asset query returns at most `limit` markets; we take the most-recent.
         """
         import json as _json
         markets: list[Market] = []
-        for keyword in ("up-or-down", "updown-5m", "updown-15m"):
+        # Query each asset specifically so we only get crypto price markets
+        asset_slugs = (
+            "btc-up-or-down", "eth-up-or-down", "sol-up-or-down",
+            "xrp-up-or-down", "doge-up-or-down", "bnb-up-or-down",
+            "bitcoin-up-or-down", "ethereum-up-or-down",
+            # Some markets use "higher-or-lower" phrasing
+            "btc-higher-or-lower", "eth-higher-or-lower",
+        )
+        for keyword in asset_slugs:
             data = self._get(
                 f"{config.GAMMA_HOST}/markets",
                 params={
@@ -304,7 +313,10 @@ class PolymarketClient:
                 except Exception as exc:
                     logger.debug(f"Skipping malformed up/down market: {exc}")
 
-        logger.info(f"Fetched {len(markets)} Up/Down crypto markets.")
+        if markets:
+            logger.info(f"Fetched {len(markets)} Up/Down crypto markets.")
+        else:
+            logger.warning("No Up/Down crypto markets found — Polymarket may not have an active slot yet")
         return markets
 
     def get_price_history(self, market_id: str, fidelity: int = 60) -> list[PricePoint]:
