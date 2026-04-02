@@ -489,6 +489,8 @@ class PolymarketBot:
                     if secs_left < min_minutes * 60:
                         continue
                     hours_left = secs_left / 3600
+                    if hours_left > cutoff * 24:
+                        continue
                 except Exception:
                     pass
             filtered.append((m, hours_left if hours_left is not None else cutoff * 24))
