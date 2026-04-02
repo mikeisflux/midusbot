@@ -207,39 +207,97 @@ class MomentumImbalanceStrategy:
 # Strategy 2: Latency Arbitrage
 # ═══════════════════════════════════════════════════════════════════════════
 
-# External price feeds (tried in order; first success wins)
-_BTC_FEEDS = [
-    ("CoinGecko",    "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"),
-    ("Binance",      "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
-]
+# ── Price feeds ──────────────────────────────────────────────────────────────
+# Binance is the fastest public feed; CoinGecko is fallback (rate-limited)
+_BINANCE_FEEDS: dict[str, str] = {
+    "BTC":  "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+    "ETH":  "https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT",
+    "XRP":  "https://api.binance.com/api/v3/ticker/price?symbol=XRPUSDT",
+    "SOL":  "https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT",
+    "DOGE": "https://api.binance.com/api/v3/ticker/price?symbol=DOGEUSDT",
+}
+_COINGECKO_IDS: dict[str, str] = {
+    "BTC":  "bitcoin",
+    "ETH":  "ethereum",
+    "XRP":  "ripple",
+    "SOL":  "solana",
+    "DOGE": "dogecoin",
+}
 
 _PRICE_CACHE: dict[str, tuple[float, float]] = {}   # symbol → (price, timestamp)
 _CACHE_TTL = 2.0   # seconds
 
+# Rolling 60-second price history for momentum: symbol → [(price, ts), ...]
+_PRICE_HISTORY: dict[str, list[tuple[float, float]]] = {}
+_HISTORY_WINDOW = 90  # keep 90 seconds of ticks
 
-def _fetch_btc_price() -> float | None:
-    """Best-effort BTC/USD price from public APIs (cached 2 s)."""
-    cached = _PRICE_CACHE.get("BTC")
+
+def _fetch_price(symbol: str) -> float | None:
+    """Fetch live price for any supported symbol (cached 2 s)."""
+    sym = symbol.upper()
+    cached = _PRICE_CACHE.get(sym)
     if cached and (time.time() - cached[1]) < _CACHE_TTL:
         return cached[0]
 
-    for name, url in _BTC_FEEDS:
-        try:
-            resp = requests.get(url, timeout=3)
-            resp.raise_for_status()
-            data = resp.json()
-            if "bitcoin" in data:
-                price = float(data["bitcoin"]["usd"])
-            elif "price" in data:
-                price = float(data["price"])
-            else:
-                continue
-            _PRICE_CACHE["BTC"] = (price, time.time())
-            return price
-        except Exception:
-            continue
+    price: float | None = None
 
-    return None
+    # Try Binance first (fastest, no rate limit for single ticker)
+    if sym in _BINANCE_FEEDS:
+        try:
+            r = requests.get(_BINANCE_FEEDS[sym], timeout=3)
+            r.raise_for_status()
+            price = float(r.json()["price"])
+        except Exception:
+            pass
+
+    # Fall back to CoinGecko
+    if price is None and sym in _COINGECKO_IDS:
+        try:
+            cg_id = _COINGECKO_IDS[sym]
+            r = requests.get(
+                f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd",
+                timeout=4,
+            )
+            r.raise_for_status()
+            price = float(r.json()[cg_id]["usd"])
+        except Exception:
+            pass
+
+    if price is not None:
+        _PRICE_CACHE[sym] = (price, time.time())
+        # Record in rolling history
+        hist = _PRICE_HISTORY.setdefault(sym, [])
+        now = time.time()
+        hist.append((price, now))
+        # Trim to window
+        cutoff = now - _HISTORY_WINDOW
+        _PRICE_HISTORY[sym] = [(p, t) for p, t in hist if t >= cutoff]
+
+    return price
+
+
+def _fetch_btc_price() -> float | None:
+    """Backward-compatible wrapper."""
+    return _fetch_price("BTC")
+
+
+def _price_momentum_60s(symbol: str) -> float | None:
+    """
+    Returns the % price change over the last ~60 seconds.
+    Positive = price rising, negative = price falling.
+    Returns None if insufficient history.
+    """
+    hist = _PRICE_HISTORY.get(symbol.upper(), [])
+    now = time.time()
+    # Find oldest tick within 60-90 s
+    window = [(p, t) for p, t in hist if now - t <= 75]
+    if len(window) < 2:
+        return None
+    oldest_price = window[0][0]
+    newest_price = window[-1][0]
+    if oldest_price <= 0:
+        return None
+    return (newest_price - oldest_price) / oldest_price
 
 
 # Keyword patterns that indicate BTC price-level contracts
@@ -380,4 +438,132 @@ class LatencyArbStrategy:
             imbalance_signal=0.0,
             is_latency_arb=True,
             lag_pct=lag_pct,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Strategy 3: Up/Down 5-Minute Momentum
+# ═══════════════════════════════════════════════════════════════════════════
+
+import re as _re
+
+# Maps keywords in the market question to the Binance symbol to fetch
+_UPDOWN_ASSETS = {
+    "xrp":      "XRP",
+    "ripple":   "XRP",
+    "btc":      "BTC",
+    "bitcoin":  "BTC",
+    "eth":      "ETH",
+    "ethereum": "ETH",
+    "sol":      "SOL",
+    "solana":   "SOL",
+    "doge":     "DOGE",
+    "dogecoin": "DOGE",
+}
+
+# Minimum absolute 60s momentum to act on (0.05% move in 60s)
+_MIN_MOMENTUM_PCT = 0.0005
+
+
+def _detect_updown_market(question: str) -> str | None:
+    """
+    Returns the asset symbol if the question is an Up/Down short-interval
+    market (e.g. "XRP Up or Down - March 3, 12:00PM-12:05PM ET").
+    Returns None otherwise.
+    """
+    q = question.lower()
+    if "up or down" not in q and "up/down" not in q:
+        return None
+    for kw, sym in _UPDOWN_ASSETS.items():
+        if kw in q:
+            return sym
+    return None
+
+
+class UpDownMomentumStrategy:
+    """
+    Trades Polymarket "XRP Up or Down - HH:MM-HH:MM" style markets.
+
+    Logic:
+      1. Detect the asset from the question.
+      2. Measure the 60-second live price momentum from Binance.
+      3. If momentum is strongly directional AND the market price for that
+         direction is below our fair-value estimate, enter.
+
+    Fair value model:
+      - A market priced at 50¢ implies a coin flip.
+      - If the asset is up +0.2% in the last 60s, we estimate the chance
+        of it being "Up" at resolution is ~65%+ (momentum tends to persist
+        over 5-min windows in liquid crypto markets).
+      - We enter if market_price < fair_value - MIN_EDGE.
+    """
+
+    def __init__(self, min_momentum_pct: float = _MIN_MOMENTUM_PCT) -> None:
+        self.min_momentum_pct = min_momentum_pct
+
+    def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
+        symbol = _detect_updown_market(market.question)
+        if symbol is None:
+            return None
+
+        # Warm up the price history on every call (lightweight, cached)
+        live_price = _fetch_price(symbol)
+        if live_price is None:
+            return None
+
+        mom = _price_momentum_60s(symbol)
+        if mom is None or abs(mom) < self.min_momentum_pct:
+            return None   # not enough momentum data yet
+
+        # Momentum → fair value
+        # Scale: 0.05% move → ~55% confidence; 0.5% move → ~75%; clamp at 90%
+        raw_confidence = 0.50 + min(abs(mom) / 0.005, 1.0) * 0.40
+        fair_prob = float(np.clip(raw_confidence, 0.51, 0.92))
+
+        # Determine which outcome to bet
+        if mom > 0:
+            # Price rising → bet UP (YES)
+            side = "YES"
+            token = market.yes_token
+            mkt_price = order_book.mid if order_book else market.yes_price
+            fair_value = fair_prob
+        else:
+            # Price falling → bet DOWN (NO)
+            side = "NO"
+            token = market.no_token
+            mkt_price = (1.0 - order_book.mid) if order_book else market.no_price
+            fair_value = fair_prob
+
+        fair_value = float(np.clip(fair_value, 0.01, 0.99))
+        edge = fair_value - mkt_price
+
+        if edge < config.MIN_EDGE:
+            return None
+
+        confidence = (
+            "HIGH"   if abs(mom) > 0.003 else
+            "MEDIUM" if abs(mom) > 0.001 else
+            "LOW"
+        )
+
+        direction = "UP" if mom > 0 else "DOWN"
+        logger.info(
+            f"[UPDOWN] {symbol} {direction} {mom:+.4%}/60s  "
+            f"fair={fair_value:.3f}  mkt={mkt_price:.3f}  edge={edge:+.3f}  "
+            f"→ {side} [{confidence}]  \"{market.question[:50]}\""
+        )
+
+        return TradeSignal(
+            market_id=market.id,
+            question=market.question,
+            side=side,
+            token_id=token.token_id,
+            market_price=mkt_price,
+            fair_value=fair_value,
+            edge=edge,
+            signal=abs(mom) * 100,   # signal = momentum % for learner
+            confidence=confidence,
+            momentum_signal=mom,
+            imbalance_signal=0.0,
+            is_latency_arb=False,
         )

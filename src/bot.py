@@ -31,8 +31,10 @@ from src.risk import RiskManager
 from src.strategy import (
     LatencyArbStrategy,
     MomentumImbalanceStrategy,
+    UpDownMomentumStrategy,
     TradeSignal,
     _fetch_btc_price,
+    _fetch_price,
 )
 import config
 import src.webui as webui
@@ -68,6 +70,7 @@ class PolymarketBot:
         self._client     = PolymarketClient()
         self._strategy   = MomentumImbalanceStrategy(params=self._learner.strategy_params)
         self._latency    = LatencyArbStrategy()
+        self._updown     = UpDownMomentumStrategy()
         self._risk       = RiskManager(params=self._learner.risk_params)
         self._dashboard  = Dashboard(enabled=dashboard_enabled)
         self._dash_state = DashboardState()
@@ -147,10 +150,12 @@ class PolymarketBot:
         # 1. Manage existing positions
         self._manage_positions()
 
-        # 2. Update live BTC price
+        # 2. Update live crypto prices (warms up momentum history)
         btc = _fetch_btc_price()
         if btc:
             self._dash_state.btc_price = btc
+        for sym in ("XRP", "ETH", "SOL", "DOGE"):
+            _fetch_price(sym)
 
         # 3. Scan markets
         self._dash_state.add_exec_log("scan",
@@ -186,9 +191,13 @@ class PolymarketBot:
                 except Exception:
                     pass
 
+            # ── Strategy 3: Up/Down 5-min Momentum (highest priority) ──
+            sig = self._updown.analyse(market, ob)
+
             # ── Strategy 1: Momentum + Imbalance ─────────────────────
-            price_hist = self._client.get_price_history(market.yes_token.token_id)
-            sig = self._strategy.analyse(market, ob, price_hist)
+            if sig is None:
+                price_hist = self._client.get_price_history(market.yes_token.token_id)
+                sig = self._strategy.analyse(market, ob, price_hist)
 
             # ── Strategy 2: Latency Arbitrage ─────────────────────────
             if sig is None:
