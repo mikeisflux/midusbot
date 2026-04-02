@@ -459,6 +459,8 @@ _UPDOWN_ASSETS = {
     "solana":   "SOL",
     "doge":     "DOGE",
     "dogecoin": "DOGE",
+    "bnb":      "BNB",
+    "hype":     "HYPE",
 }
 
 # Minimum absolute 60s momentum to act on (0.05% move in 60s)

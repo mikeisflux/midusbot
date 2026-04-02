@@ -161,7 +161,7 @@ class PolymarketBot:
         btc = _fetch_btc_price()
         if btc:
             self._dash_state.btc_price = btc
-        for sym in ("XRP", "ETH", "SOL", "DOGE"):
+        for sym in ("XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE"):
             _fetch_price(sym)
 
         # 3. Scan markets
