@@ -237,6 +237,11 @@ class PolymarketBot:
                 break
             if self._already_positioned(market):
                 continue  # both sides held — skip
+            # Skip markets where we already hold one side (avoids redundant log noise
+            # from SportsSpreadArb firing on every already-held position each loop)
+            if (market.yes_token.token_id in self._positions or
+                    market.no_token.token_id in self._positions):
+                continue
 
             ob = self._client.get_order_book(market.yes_token.token_id)
 

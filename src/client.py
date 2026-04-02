@@ -245,73 +245,82 @@ class PolymarketClient:
         logger.info(f"Fetched {len(markets)} active markets from Gamma API.")
         return markets
 
-    def get_updown_markets(self, limit: int = 20) -> list[Market]:
+    def get_updown_markets(self) -> list[Market]:
         """
-        Fetch short-interval Up/Down crypto markets (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE).
-        Query each asset by name to avoid catching unrelated "up-or-down" markets
-        (e.g. "Russia-Ukraine vs GTA VI" slugs also contain "up-or-down").
-        Each asset query returns at most `limit` markets; we take the most-recent.
+        Fetch short-interval Up/Down crypto markets by:
+        1. Fetching all active markets closing within the next 4 hours
+           (using end_date_min / end_date_max Gamma API params).
+        2. Filtering locally via _detect_updown_market so only real
+           BTC/ETH/SOL/XRP etc. Up-or-Down slots are returned.
+
+        The previous slug_contains approach was broken — the Gamma API
+        ignored the param entirely and returned unrelated markets.
         """
         import json as _json
-        markets: list[Market] = []
-        # Query each asset specifically so we only get crypto price markets
-        asset_slugs = (
-            "btc-up-or-down", "eth-up-or-down", "sol-up-or-down",
-            "xrp-up-or-down", "doge-up-or-down", "bnb-up-or-down",
-            "bitcoin-up-or-down", "ethereum-up-or-down",
-            # Some markets use "higher-or-lower" phrasing
-            "btc-higher-or-lower", "eth-higher-or-lower",
+        from datetime import datetime, timezone, timedelta
+        from src.strategy import _detect_updown_market
+
+        now = datetime.now(timezone.utc)
+        end_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_max = (now + timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        data = self._get(
+            f"{config.GAMMA_HOST}/markets",
+            params={
+                "active": "true",
+                "closed": "false",
+                "limit": 200,
+                "end_date_min": end_min,
+                "end_date_max": end_max,
+            },
         )
-        for keyword in asset_slugs:
-            data = self._get(
-                f"{config.GAMMA_HOST}/markets",
-                params={
-                    "active": "true",
-                    "closed": "false",
-                    "limit": limit,
-                    "slug_contains": keyword,
-                },
-            )
-            if not data:
-                continue
-            for raw in data:
-                try:
-                    def _parse(field, default="[]"):
-                        v = raw.get(field, default)
-                        if isinstance(v, str):
-                            return _json.loads(v)
-                        return v if v else []
+        if not data:
+            logger.warning("No Up/Down crypto markets found — Polymarket may not have an active slot yet")
+            return []
 
-                    outcomes  = _parse("outcomes")
-                    prices    = _parse("outcomePrices")
-                    token_ids = _parse("clobTokenIds")
+        markets: list[Market] = []
+        for raw in data:
+            try:
+                question = raw.get("question", "")
+                if not _detect_updown_market(question):
+                    continue  # only keep real Up/Down crypto markets
 
-                    if len(outcomes) < 2 or len(token_ids) < 2:
-                        continue
+                def _parse(field, default="[]"):
+                    v = raw.get(field, default)
+                    if isinstance(v, str):
+                        return _json.loads(v)
+                    return v if v else []
 
-                    yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("yes", "up")), 0)
-                    no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no",  "down")), 1)
+                outcomes  = _parse("outcomes")
+                prices    = _parse("outcomePrices")
+                token_ids = _parse("clobTokenIds")
 
-                    yes_price = float(prices[yes_idx]) if len(prices) > yes_idx else 0.5
-                    no_price  = float(prices[no_idx])  if len(prices) > no_idx  else 0.5
+                if len(outcomes) < 2 or len(token_ids) < 2:
+                    continue
 
-                    m = Market(
-                        id=str(raw.get("id", "")),
-                        question=raw.get("question", ""),
-                        condition_id=raw.get("conditionId", ""),
-                        slug=raw.get("slug", ""),
-                        end_date=raw.get("endDate", ""),
-                        active=bool(raw.get("active", False)),
-                        closed=bool(raw.get("closed", True)),
-                        volume=float(raw.get("volumeClob") or raw.get("volume") or 0),
-                        liquidity=float(raw.get("liquidityClob") or raw.get("liquidity") or 0),
-                        yes_token=Token(token_id=str(token_ids[yes_idx]), outcome="Up", price=yes_price),
-                        no_token=Token(token_id=str(token_ids[no_idx]),  outcome="Down", price=no_price),
-                    )
-                    if m.id not in {x.id for x in markets}:
-                        markets.append(m)
-                except Exception as exc:
-                    logger.debug(f"Skipping malformed up/down market: {exc}")
+                yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("yes", "up")), 0)
+                no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no",  "down")), 1)
+
+                yes_price = float(prices[yes_idx]) if len(prices) > yes_idx else 0.5
+                no_price  = float(prices[no_idx])  if len(prices) > no_idx  else 0.5
+
+                m = Market(
+                    id=str(raw.get("id", "")),
+                    question=question,
+                    condition_id=raw.get("conditionId", ""),
+                    slug=raw.get("slug", ""),
+                    end_date=raw.get("endDate", ""),
+                    active=bool(raw.get("active", False)),
+                    closed=bool(raw.get("closed", False)),
+                    volume=float(raw.get("volumeClob") or raw.get("volume") or 0),
+                    liquidity=float(raw.get("liquidityClob") or raw.get("liquidity") or 0),
+                    yes_token=Token(token_id=str(token_ids[yes_idx]), outcome="Up", price=yes_price),
+                    no_token=Token(token_id=str(token_ids[no_idx]),  outcome="Down", price=no_price),
+                )
+                if m.id not in {x.id for x in markets}:
+                    markets.append(m)
+            except Exception as exc:
+                logger.debug(f"Skipping malformed up/down market: {exc}")
 
         if markets:
             logger.info(f"Fetched {len(markets)} Up/Down crypto markets.")
