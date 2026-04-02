@@ -894,10 +894,18 @@ class PolymarketBot:
             count = 0
             for token_id, d in raw.items():
                 if token_id not in self._positions:
-                    self._positions[token_id] = OpenPosition(**{
+                    fields = {
                         k: v for k, v in d.items()
                         if k in OpenPosition.__dataclass_fields__
-                    })
+                    }
+                    # Positions saved before is_external was added default to True
+                    # (treat as external/protected) rather than False (bot-managed).
+                    # Positions the bot actively opened will have is_external=False
+                    # explicitly in the JSON; anything missing the field is safer
+                    # to protect from auto-sells until reconcile confirms otherwise.
+                    if "is_external" not in d:
+                        fields["is_external"] = True
+                    self._positions[token_id] = OpenPosition(**fields)
                     count += 1
             if count:
                 logger.info(f"Restored {count} open position(s) from disk.")
