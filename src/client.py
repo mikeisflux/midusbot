@@ -513,17 +513,29 @@ class PolymarketClient:
                 address = ""
 
         if address:
-            try:
-                data = self._get(
-                    "https://data-api.polymarket.com/positions",
-                    params={"user": address, "sizeThreshold": "0.01", "limit": "500"},
-                )
-                if isinstance(data, list):
-                    logger.info(f"get_positions: {len(data)} position(s) from data API for {address[:10]}…")
-                    return data
-                logger.warning(f"get_positions data API returned unexpected type: {type(data)}")
-            except Exception as exc:
-                logger.warning(f"get_positions data API failed: {exc}")
+            addr_lower = address.lower()
+            for endpoint in [
+                "https://data-api.polymarket.com/positions",
+                f"{config.GAMMA_HOST}/positions",
+            ]:
+                try:
+                    data = self._get(
+                        endpoint,
+                        params={"user": addr_lower, "sizeThreshold": "0", "limit": "500"},
+                    )
+                    logger.info(f"get_positions {endpoint}: raw type={type(data).__name__}  preview={str(data)[:200]}")
+                    # Response may be a list or a dict with a 'data'/'results' key
+                    if isinstance(data, list):
+                        logger.info(f"get_positions: {len(data)} position(s) from {endpoint}")
+                        return data
+                    if isinstance(data, dict):
+                        for key in ("data", "results", "positions"):
+                            if key in data and isinstance(data[key], list):
+                                logger.info(f"get_positions: {len(data[key])} position(s) from {endpoint}['{key}']")
+                                return data[key]
+                    logger.warning(f"get_positions {endpoint}: unrecognised response format")
+                except Exception as exc:
+                    logger.warning(f"get_positions {endpoint} failed: {exc}")
 
         # Fallback: py_clob_client
         if not self._clob_client:
