@@ -447,7 +447,24 @@ class PolymarketBot:
         )
 
         if resp:
-            self._risk.register_open(usdc)
+            # Use actual fill cost (makingAmount) when available — the CLOB
+            # often fills at a better price than our limit, so the real USDC
+            # spent can be much less than shares × limit_price.
+            actual_cost = usdc
+            actual_entry = limit_price
+            if isinstance(resp, dict):
+                making = resp.get("makingAmount", "")
+                taking = resp.get("takingAmount", "")
+                try:
+                    making_f = float(making) if making else 0.0
+                    taking_f = float(taking) if taking else 0.0
+                    if making_f > 0:
+                        actual_cost = making_f
+                    if making_f > 0 and taking_f > 0:
+                        actual_entry = making_f / taking_f   # real fill price
+                except (ValueError, TypeError):
+                    pass
+            self._risk.register_open(actual_cost)
             self._dash_state.orders_placed += 1
 
             self._positions[sig.token_id] = OpenPosition(
@@ -456,8 +473,8 @@ class PolymarketBot:
                 token_id=sig.token_id,
                 side=sig.side,
                 shares=shares,
-                entry_price=limit_price,
-                cost_usdc=usdc,
+                entry_price=actual_entry,
+                cost_usdc=actual_cost,
                 momentum_signal=sig.momentum_signal,
                 imbalance_signal=sig.imbalance_signal,
                 composite_signal=sig.signal,
@@ -470,9 +487,9 @@ class PolymarketBot:
                 token_id=sig.token_id,
                 side=sig.side,
                 question=sig.question,
-                entry_price=limit_price,
+                entry_price=actual_entry,
                 shares=shares,
-                cost_usdc=usdc,
+                cost_usdc=actual_cost,
                 momentum_signal=sig.momentum_signal,
                 imbalance_signal=sig.imbalance_signal,
                 composite_signal=sig.signal,
@@ -485,8 +502,8 @@ class PolymarketBot:
 
             tag = "[LATENCY-ARB] " if sig.is_latency_arb else ""
             logger.info(
-                f"  {tag}Opened {sig.side}: {shares:.2f}@{limit_price:.4f} "
-                f"= ${usdc:.2f}  [{sig.confidence}]"
+                f"  {tag}Opened {sig.side}: {shares:.2f}@{actual_entry:.4f} "
+                f"= ${actual_cost:.2f}  [{sig.confidence}]"
             )
             return True
 

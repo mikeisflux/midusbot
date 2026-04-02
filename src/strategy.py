@@ -1214,7 +1214,24 @@ class SportsSpreadArbStrategy:
 
     MIN_EDGE = config.MIN_EDGE   # use global config (default 3%)
 
+    # Championship / season-title keywords — these markets resolve over months
+    # and should NOT be compared against single-game Vegas moneylines.
+    _CHAMPIONSHIP_PHRASES = (
+        "stanley cup", "nba finals", "nba championship",
+        "super bowl", "world series", "nfl championship",
+        "champions league", "premier league winner",
+        "mls cup", "nhl champion",
+        "win the 2026", "win the 2025",   # catches most futures
+        "win the championship", "win the title",
+    )
+
     def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
+        # Skip championship/futures markets — they can't be compared to
+        # single-game Vegas moneylines (apples vs oranges).
+        q_lower = market.question.lower()
+        if any(phrase in q_lower for phrase in self._CHAMPIONSHIP_PHRASES):
+            return None
+
         games = _fetch_vegas_odds()
         if not games:
             return None
@@ -1223,7 +1240,12 @@ class SportsSpreadArbStrategy:
         if game is None:
             return None
 
-        mkt_yes = order_book.mid if order_book else market.yes_price
+        # Order book must show real liquidity — mid=0.5 on empty book is not
+        # a real market price and would generate fake edge vs Vegas.
+        if order_book is None or (order_book.best_bid == 0.0 and order_book.best_ask == 1.0):
+            return None   # no real quotes, skip
+
+        mkt_yes = order_book.mid
         mkt_no  = 1.0 - mkt_yes
 
         # Determine which team the YES outcome maps to
