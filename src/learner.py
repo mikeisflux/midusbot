@@ -189,6 +189,9 @@ class AdaptiveLearner:
             closed=False,
         )
         self._journal.append(rec)
+        # Prune in-memory journal to last 500 entries to prevent unbounded growth
+        if len(self._journal) > 500:
+            self._journal = self._journal[-500:]
         self._save_journal()
         logger.debug(f"[Learner] Recorded open: {side} {question[:40]}")
 
@@ -274,6 +277,12 @@ class AdaptiveLearner:
             self.strategy_params.imbalance_weight = (
                 (1 - alpha) * self.strategy_params.imbalance_weight + alpha * target_imb
             )
+            # Clamp each weight to [0.1, 0.9] then normalise so they always sum to 1.0
+            self.strategy_params.momentum_weight  = float(np.clip(self.strategy_params.momentum_weight,  0.1, 0.9))
+            self.strategy_params.imbalance_weight = float(np.clip(self.strategy_params.imbalance_weight, 0.1, 0.9))
+            total_w = self.strategy_params.momentum_weight + self.strategy_params.imbalance_weight
+            self.strategy_params.momentum_weight  /= total_w
+            self.strategy_params.imbalance_weight /= total_w
 
         # ── 2. Signal threshold ───────────────────────────────────────
         overall_wr = mean([1.0 if r.pnl_usdc > 0 else 0.0 for r in closed])

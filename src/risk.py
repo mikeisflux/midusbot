@@ -65,11 +65,10 @@ class RiskManager:
             )
             return 0.0
 
-        if signal.is_latency_arb:
-            # Fixed fractional risk for arb: 0.5 % of total exposure cap
-            usdc = config.MAX_TOTAL_EXPOSURE_USDC * 0.005
-        else:
-            usdc = self._kelly_size(signal)
+        # Use Kelly for all strategies — the is_latency_arb flag is display-only.
+        # The old fixed 0.5% budget ($0.50 on a $100 account) generated 1 share,
+        # below the 5-share CLOB minimum, silently dropping every arb signal.
+        usdc = self._kelly_size(signal)
 
         if usdc <= 0:
             return 0.0

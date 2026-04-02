@@ -165,11 +165,21 @@ class PolymarketBot:
         t0 = time.time()
         logger.info(f"── Loop #{self._dash_state.loop_count} ──")
 
-        # 0a. Refresh wallet balance every 10 loops (or every loop in live mode)
+        # 0a. Daily loss-cap reset at midnight (without this the cap hits and
+        #     trading stops permanently until the process is restarted)
+        today = datetime.now().date()
+        if not hasattr(self, "_today"):
+            self._today = today
+        if today != self._today:
+            self._today = today
+            self._risk.reset_daily()
+            logger.info("Daily risk reset — new trading day started.")
+
+        # 0b. Refresh wallet balance every 10 loops (or every loop in live mode)
         if not config.DRY_RUN or self._dash_state.loop_count % 10 == 0:
             self._sync_wallet_balance()
 
-        # 0b. Process any pending simulated fills
+        # 0c. Process any pending simulated fills
         self._process_sim_queue()
 
         # 1. Manage existing positions
@@ -320,7 +330,7 @@ class PolymarketBot:
         to_close: list[str] = []
         position_snapshots: list[tuple[OpenPosition, float]] = []
 
-        for token_id, pos in self._positions.items():
+        for token_id, pos in list(self._positions.items()):
             ob = self._client.get_order_book(token_id)
             current_price = ob.mid if ob else pos.entry_price
 

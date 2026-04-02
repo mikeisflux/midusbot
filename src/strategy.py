@@ -320,7 +320,7 @@ def _extract_btc_target(question: str) -> float | None:
 
     import re
     # Match $70,000 / $70k / $1m / $1.5b with optional suffix k/m/b
-    m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)\s*([kmb])\b", q)
+    m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)\s*([kmb])(?:\b|$)", q)
     if m:
         try:
             val = float(m.group(1).replace(",", ""))
@@ -409,7 +409,7 @@ class LatencyArbStrategy:
         fair_value = float(np.clip(implied_prob if side == "YES" else 1.0 - implied_prob, 0.01, 0.99))
         edge = fair_value - mkt_price
 
-        if edge < 0.002:  # ultra-thin arb still needs some edge
+        if edge < config.MIN_EDGE:
             return None
 
         confidence = (
@@ -976,7 +976,7 @@ class SportsLiveStrategy:
             edge=edge,
             signal=edge,
             confidence=confidence,
-            is_latency_arb=True,   # this IS a latency arb — oracle vs ESPN
+            is_latency_arb=False,  # use Kelly sizing, not fixed arb budget
         )
 
 
@@ -1163,7 +1163,7 @@ class SportsSpreadArbStrategy:
     MIN_EDGE: minimum divergence to trade (default 5¢ / 5%)
     """
 
-    MIN_EDGE = 0.05   # tighter than other strategies — Vegas lines are very efficient
+    MIN_EDGE = config.MIN_EDGE   # use global config (default 3%)
 
     def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
         games = _fetch_vegas_odds()
@@ -1226,7 +1226,7 @@ class SportsSpreadArbStrategy:
             edge=edge,
             signal=edge,
             confidence=confidence,
-            is_latency_arb=True,   # price-source arb
+            is_latency_arb=False,  # use Kelly sizing, not fixed arb budget
         )
 
 
@@ -1297,5 +1297,5 @@ class NewsEventStrategy:
             edge=edge,
             signal=move,
             confidence=confidence,
-            is_latency_arb=True,
+            is_latency_arb=False,  # use Kelly sizing
         )
