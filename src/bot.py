@@ -720,7 +720,20 @@ class PolymarketBot:
     # ------------------------------------------------------------------
 
     def _queue_sim(self, sig: TradeSignal, entry: float, shares: float) -> None:
-        """Queue a synthetic fill that will resolve in 5–30 s."""
+        """
+        Queue a simulated position to resolve at the actual market end time.
+        Using the real end time is critical: a 5-min UpDown market must be
+        held for 5 minutes before we can know the outcome — checking price
+        after 10 seconds is just noise and teaches the learner nothing useful.
+        """
+        now = time.time()
+        if sig.hours_to_close is not None and 0 < sig.hours_to_close <= 24:
+            # Close at market expiry (add 10s buffer for the market to settle)
+            close_after = now + sig.hours_to_close * 3600 + 10
+        else:
+            # Unknown end — default to 5-minute hold
+            close_after = now + 300
+
         self._sim_queue.append({
             "question":    sig.question,
             "token_id":    sig.token_id,
@@ -728,7 +741,7 @@ class PolymarketBot:
             "entry":       entry,
             "fair_value":  sig.fair_value,
             "shares":      shares,
-            "close_after": time.time() + random.uniform(5, 30),
+            "close_after": close_after,
         })
 
     def _process_sim_queue(self) -> None:

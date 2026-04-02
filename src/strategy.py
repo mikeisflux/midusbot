@@ -711,6 +711,9 @@ class UpDownMomentumStrategy:
             f"→ {side} [{confidence}]  \"{market.question[:45]}\""
         )
 
+        # Pass both signals to the learner so it can attribute wins correctly:
+        # momentum_signal = multi-TF consensus (price history driven)
+        # imbalance_signal = Binance exchange pressure (order book driven)
         return TradeSignal(
             market_id=market.id,
             question=market.question,
@@ -719,10 +722,10 @@ class UpDownMomentumStrategy:
             market_price=mkt_price,
             fair_value=fair_value,
             edge=edge,
-            signal=float(np.clip(abs(mom) * 200, 0.0, 1.0)),  # normalised [0-1] for Kelly
+            signal=float(np.clip(abs(consensus) * 200, 0.0, 1.0)),
             confidence=confidence,
-            momentum_signal=mom,
-            imbalance_signal=0.0,
+            momentum_signal=float(consensus),
+            imbalance_signal=float(pressure),
             is_latency_arb=False,
         )
 
