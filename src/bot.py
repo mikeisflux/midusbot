@@ -566,18 +566,21 @@ class PolymarketBot:
         if config.TRADING_PAUSED:
             return False
 
-        # One active UpDown bet per symbol at a time.
-        # Don't bet on "BTC Up 4AM-4:05AM" while "BTC Up 3AM-3:05AM" is
-        # still open — we don't know if we won the first bet yet.
-        from src.strategy import _detect_updown_market
+        # One active UpDown bet per (symbol, window-category) at a time.
+        # BTC 5-min and BTC hourly are different categories — both allowed.
+        # But don't bet on "BTC 5-min 4AM" while "BTC 5-min 3AM" is still
+        # open — we don't know if we won the first one yet.
+        from src.strategy import _detect_updown_market, _updown_window_mins
         sig_symbol = _detect_updown_market(sig.question)
-        if sig_symbol:
+        sig_window = _updown_window_mins(sig.question) if sig_symbol else None
+        if sig_symbol and sig_window:
             for pos in self._positions.values():
                 pos_symbol = _detect_updown_market(pos.question)
-                if pos_symbol == sig_symbol:
+                pos_window = _updown_window_mins(pos.question) if pos_symbol else None
+                if pos_symbol == sig_symbol and pos_window == sig_window:
                     logger.debug(
-                        f"Skipping {sig_symbol} UpDown — already have open position: "
-                        f"{pos.question[:55]}"
+                        f"Skipping {sig_symbol} {sig_window}min UpDown — "
+                        f"already open: {pos.question[:55]}"
                     )
                     return False
 

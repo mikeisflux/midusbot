@@ -609,6 +609,34 @@ def _detect_updown_market(question: str) -> str | None:
     return None
 
 
+def _updown_window_mins(question: str) -> int | None:
+    """
+    Extract the time-window duration in minutes from an UpDown market question.
+    "BTC Up or Down - 3:00AM-3:05AM ET" → 5
+    "BTC Up or Down - 3AM-4AM ET"        → 60
+    Returns None if the format isn't recognised.
+    """
+    import re as _re2
+    q = question.lower()
+    # "H:MMam-H:MMam" format (5-min, 15-min etc.)
+    m = _re2.search(r'(\d{1,2}):(\d{2})\s*[ap]m\s*[-–]\s*(\d{1,2}):(\d{2})\s*[ap]m', q)
+    if m:
+        h1, mn1, h2, mn2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        delta = (h2 * 60 + mn2) - (h1 * 60 + mn1)
+        if delta <= 0:
+            delta += 12 * 60  # AM/PM rollover
+        return delta
+    # "HAM-H+1AM" format (hourly)
+    m = _re2.search(r'(\d{1,2})\s*[ap]m\s*[-–]\s*(\d{1,2})\s*[ap]m', q)
+    if m:
+        h1, h2 = int(m.group(1)), int(m.group(2))
+        delta = (h2 - h1) * 60
+        if delta <= 0:
+            delta += 12 * 60
+        return delta
+    return None
+
+
 class UpDownMomentumStrategy:
     """
     Trades Polymarket "XRP Up or Down - HH:MM-HH:MM" style markets.
