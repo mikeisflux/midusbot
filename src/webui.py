@@ -41,7 +41,10 @@ _close_position_fn = None   # injected by bot: fn(token_id) -> bool
 
 @app.route("/")
 def index():
-    return HTML
+    resp = app.make_response(HTML)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 @app.route("/api/state")
 def api_state():
