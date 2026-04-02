@@ -41,5 +41,10 @@ MAKER_FEE_PCT: float = float(os.getenv("MAKER_FEE_PCT", "0.0"))
 # Estimated Polygon gas cost per transaction (in USDC)
 GAS_COST_USDC: float = float(os.getenv("GAS_COST_USDC", "0.02"))
 
+# ── External APIs ────────────────────────────────────────────────────────────
+# The Odds API — free tier: 500 req/month — https://the-odds-api.com
+# Used by SportsSpreadArbStrategy to compare Polymarket vs Vegas consensus lines
+ODDS_API_KEY: str = os.getenv("ODDS_API_KEY", "")
+
 # ── Loop ─────────────────────────────────────────────────────────────────────
 LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "15"))  # fast enough for 5-min markets

@@ -964,6 +964,247 @@ class SportsLiveStrategy:
 # We follow the move assuming it continues for at least 1-2 more loops.
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Strategy 7: Sports Spread Arbitrage vs. Vegas Consensus  (kch123 pattern)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# kch123's actual edge: Polymarket sports spread odds are frequently mispriced
+# vs. the consensus line from traditional sportsbooks (DraftKings, FanDuel…).
+#
+# He places 14,303 directional YES buys — zero sells — and holds to resolution.
+# $11.15M profit, 61% win rate, ~$1.8M on Super Bowl Seahawks spreads alone.
+#
+# This strategy:
+#   1. Polls The Odds API (free tier: 500 req/month) for live bookmaker lines
+#   2. Converts bookmaker odds → consensus probability
+#   3. Fuzzy-matches Polymarket market question → game
+#   4. Fires when Polymarket's implied prob diverges from Vegas by ≥ MIN_EDGE
+#
+# Set ODDS_API_KEY in .env to enable.  Without it, strategy silently skips.
+# Free key at: https://the-odds-api.com  (takes 30 seconds to register)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_ODDS_CACHE: dict[str, tuple[list, float]] = {}   # sport_key → (games, fetched_at)
+_ODDS_CACHE_TTL = 60.0   # seconds — conservative to preserve free-tier quota
+
+_ODDS_SPORTS = [
+    ("americanfootball_nfl",          "nfl"),
+    ("basketball_nba",                "nba"),
+    ("baseball_mlb",                  "mlb"),
+    ("icehockey_nhl",                 "nhl"),
+    ("soccer_epl",                    "epl"),
+    ("soccer_uefa_champs_league",     "ucl"),
+    ("soccer_usa_mls",                "mls"),
+]
+
+
+def _fetch_vegas_odds() -> list[dict]:
+    """
+    Fetch upcoming/live odds from The Odds API.
+    Returns list of normalised game dicts:
+      {sport, home_team, away_team, home_prob, away_prob, commence_time}
+    """
+    api_key = config.ODDS_API_KEY
+    if not api_key:
+        return []
+
+    all_games: list[dict] = []
+    now = time.time()
+
+    for sport_key, label in _ODDS_SPORTS:
+        cached = _ODDS_CACHE.get(sport_key)
+        if cached and (now - cached[1]) < _ODDS_CACHE_TTL:
+            all_games.extend(cached[0])
+            continue
+
+        try:
+            resp = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/",
+                params={
+                    "apiKey":      api_key,
+                    "regions":     "us",
+                    "markets":     "h2h",
+                    "oddsFormat":  "decimal",
+                    "dateFormat":  "iso",
+                },
+                timeout=8,
+            )
+            if resp.status_code == 401:
+                logger.warning("[ODDS-API] Invalid API key — sports spread arb disabled")
+                _ODDS_CACHE[sport_key] = ([], now)
+                continue
+            if resp.status_code == 422:
+                # Sport not currently in season
+                _ODDS_CACHE[sport_key] = ([], now)
+                continue
+            if resp.status_code != 200:
+                continue
+            events = resp.json()
+            sport_games: list[dict] = []
+            for ev in events:
+                home = ev.get("home_team", "")
+                away = ev.get("away_team", "")
+                bookmakers = ev.get("bookmakers", [])
+                if not bookmakers:
+                    continue
+
+                # Collect h2h prices from all bookmakers, average them
+                home_probs, away_probs = [], []
+                for bm in bookmakers:
+                    for mkt in bm.get("markets", []):
+                        if mkt.get("key") != "h2h":
+                            continue
+                        for outcome in mkt.get("outcomes", []):
+                            price = float(outcome.get("price", 0))
+                            if price <= 1:
+                                continue
+                            prob = 1.0 / price
+                            if outcome.get("name") == home:
+                                home_probs.append(prob)
+                            elif outcome.get("name") == away:
+                                away_probs.append(prob)
+
+                if not home_probs or not away_probs:
+                    continue
+
+                # Consensus probability (average, then normalise to sum=1)
+                raw_home = sum(home_probs) / len(home_probs)
+                raw_away = sum(away_probs) / len(away_probs)
+                total    = raw_home + raw_away
+                home_prob = raw_home / total
+                away_prob = raw_away / total
+
+                g = {
+                    "sport":          label,
+                    "home_team":      home,
+                    "away_team":      away,
+                    "home_prob":      home_prob,
+                    "away_prob":      away_prob,
+                    "commence_time":  ev.get("commence_time", ""),
+                }
+                sport_games.append(g)
+                all_games.append(g)
+
+            remaining = resp.headers.get("x-requests-remaining", "?")
+            logger.debug(f"[ODDS-API] {label}: {len(sport_games)} games  quota_remaining={remaining}")
+            _ODDS_CACHE[sport_key] = (sport_games, now)
+
+        except Exception as exc:
+            logger.debug(f"[ODDS-API] {sport_key} fetch failed: {exc}")
+
+    return all_games
+
+
+def _match_vegas_game(market_question: str, games: list[dict]) -> dict | None:
+    """
+    Fuzzy-match a Polymarket question to a Vegas game.
+    Returns the game dict if a confident match is found.
+    """
+    q = market_question.lower()
+    best: dict | None = None
+    best_score = 0
+
+    for game in games:
+        home_parts = game["home_team"].lower().split()
+        away_parts = game["away_team"].lower().split()
+
+        # Score = number of distinct team name words found in the question
+        score = 0
+        for word in home_parts + away_parts:
+            if len(word) >= 4 and word in q:
+                score += 1
+
+        # Require at least one word from each team
+        home_hit = any(len(w) >= 4 and w in q for w in home_parts)
+        away_hit = any(len(w) >= 4 and w in q for w in away_parts)
+        if home_hit and away_hit and score > best_score:
+            best_score = score
+            best = game
+
+    return best
+
+
+class SportsSpreadArbStrategy:
+    """
+    Compares Polymarket sports market implied probabilities against the
+    Vegas consensus line from The Odds API.
+
+    When Polymarket prices a team at 0.45 but Vegas consensus says 0.62,
+    the expected value of buying YES is enormous — this is the kch123 edge.
+
+    Requires ODDS_API_KEY in .env (free tier: 500 req/month).
+    Without a key this strategy is silently skipped.
+
+    MIN_EDGE: minimum divergence to trade (default 5¢ / 5%)
+    """
+
+    MIN_EDGE = 0.05   # tighter than other strategies — Vegas lines are very efficient
+
+    def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
+        games = _fetch_vegas_odds()
+        if not games:
+            return None
+
+        game = _match_vegas_game(market.question, games)
+        if game is None:
+            return None
+
+        mkt_yes = order_book.mid if order_book else market.yes_price
+        mkt_no  = 1.0 - mkt_yes
+
+        # Determine which team the YES outcome maps to
+        q = market.question.lower()
+        home_parts = game["home_team"].lower().split()
+        away_parts = game["away_team"].lower().split()
+
+        home_in_q = any(len(w) >= 4 and w in q for w in home_parts)
+        away_in_q = any(len(w) >= 4 and w in q for w in away_parts)
+
+        # Prefer the team whose name appears nearest "win" in the question
+        # Fallback: home team = YES if home is mentioned first
+        home_pos = min((q.find(w) for w in home_parts if len(w) >= 4 and w in q), default=9999)
+        away_pos = min((q.find(w) for w in away_parts if len(w) >= 4 and w in q), default=9999)
+
+        if home_in_q and (not away_in_q or home_pos <= away_pos):
+            fair_yes = game["home_prob"]
+            team_label = game["home_team"]
+        elif away_in_q:
+            fair_yes = game["away_prob"]
+            team_label = game["away_team"]
+        else:
+            return None
+
+        fair_no  = 1.0 - fair_yes
+        edge_yes = fair_yes - mkt_yes
+        edge_no  = fair_no  - mkt_no
+
+        if edge_yes >= edge_no and edge_yes >= self.MIN_EDGE:
+            side, token, mkt_p, fair_p, edge = "YES", market.yes_token, mkt_yes, fair_yes, edge_yes
+        elif edge_no >= self.MIN_EDGE:
+            side, token, mkt_p, fair_p, edge = "NO",  market.no_token,  mkt_no,  fair_no,  edge_no
+        else:
+            return None
+
+        confidence = "HIGH" if edge > 0.15 else "MEDIUM" if edge > 0.08 else "LOW"
+        logger.info(
+            f"[SPORTS-SPREAD-ARB] {game['away_team']} @ {game['home_team']}  "
+            f"Vegas={fair_yes:.3f}  Poly={mkt_yes:.3f}  edge={edge:+.3f}  "
+            f"→ {side} on {team_label} [{confidence}]  \"{market.question[:50]}\""
+        )
+        return TradeSignal(
+            market_id=market.id,
+            question=market.question,
+            side=side,
+            token_id=token.token_id,
+            market_price=mkt_p,
+            fair_value=fair_p,
+            edge=edge,
+            signal=edge,
+            confidence=confidence,
+            is_latency_arb=True,   # price-source arb
+        )
+
+
 _PREV_PRICES: dict[str, float] = {}   # market_id → last YES price
 
 

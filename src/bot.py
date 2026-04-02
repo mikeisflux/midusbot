@@ -34,6 +34,7 @@ from src.strategy import (
     UpDownMomentumStrategy,
     BTCLevelStrategy,
     SportsLiveStrategy,
+    SportsSpreadArbStrategy,
     NewsEventStrategy,
     TradeSignal,
     _fetch_btc_price,
@@ -79,6 +80,7 @@ class PolymarketBot:
         self._updown     = UpDownMomentumStrategy()
         self._btclevel   = BTCLevelStrategy()
         self._sports     = SportsLiveStrategy()
+        self._spread_arb = SportsSpreadArbStrategy()
         self._news       = NewsEventStrategy()
         self._risk       = RiskManager(params=self._learner.risk_params)
         self._dashboard  = Dashboard(enabled=dashboard_enabled)
@@ -227,11 +229,15 @@ class PolymarketBot:
             if sig is None:
                 sig = self._btclevel.analyse(market, ob)
 
-            # ── Strategy 5: Live Sports Settlement Lag (kch123 pattern) ──
+            # ── Strategy 5: Sports Spread Arb vs Vegas (kch123 pattern) ──
+            if sig is None:
+                sig = self._spread_arb.analyse(market, ob)
+
+            # ── Strategy 6: Live Sports Settlement Lag (ESPN in-game) ──
             if sig is None:
                 sig = self._sports.analyse(market, ob)
 
-            # ── Strategy 6: News/Event Sudden Price Move ──────────────
+            # ── Strategy 7: News/Event Sudden Price Move ───────────────
             if sig is None:
                 sig = self._news.analyse(market, ob)
 
