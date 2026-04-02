@@ -26,6 +26,7 @@ from loguru import logger
 
 from src.client import Market, PolymarketClient
 from src.dashboard import Dashboard, DashboardState
+from src.feeds import BinanceWSFeed, NewsFeed
 from src.learner import AdaptiveLearner
 from src.risk import RiskManager
 from src.strategy import (
@@ -89,6 +90,10 @@ class PolymarketBot:
         self._positions: dict[str, OpenPosition] = {}
         self._running = False
 
+        # Live data feeds
+        self._price_feed = BinanceWSFeed()
+        self._news_feed  = NewsFeed()
+
         # Simulation queue — pending dry-run trades waiting for synthetic fill
         self._sim_queue: list[dict] = []
 
@@ -111,6 +116,8 @@ class PolymarketBot:
 
         self._running = True
         self._dashboard.start()
+        self._price_feed.start()   # Binance WebSocket — real-time prices
+        self._news_feed.start()    # RSS headlines — news arb pre-signal
 
         # Cancel any stale open orders left from previous runs
         if not config.DRY_RUN:
@@ -168,12 +175,26 @@ class PolymarketBot:
         # 1. Manage existing positions
         self._manage_positions()
 
-        # 2. Update live crypto prices (warms up momentum history)
+        # 2. Update live crypto prices (WebSocket feed handles this in real-time;
+        #    REST fallback warms history for symbols not on Binance WS like HYPE)
         btc = _fetch_btc_price()
         if btc:
             self._dash_state.btc_price = btc
         for sym in ("XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE"):
             _fetch_price(sym)
+
+        # Drain new news headlines — collect market questions for scoring
+        new_headlines = self._news_feed.drain_new()
+        _news_flagged: set[str] = set()
+        if new_headlines:
+            mkt_questions = [m.question for m in (updown + [m for m in markets])]
+            for h in new_headlines:
+                for m in (updown + markets):
+                    score = self._news_feed.score_against_markets(h, [m.question])
+                    if score >= 0.3:
+                        _news_flagged.add(m.id)
+                        self._dash_state.add_exec_log("news",
+                            f"[NEWS] {h.source}: \"{h.title[:55]}\" → \"{m.question[:40]}\"")
 
         # 3. Scan markets
         self._dash_state.add_exec_log("scan",
@@ -224,6 +245,17 @@ class PolymarketBot:
             # Update price snapshot for news detection BEFORE running strategies
             current_yes = ob.mid if ob else market.yes_price
             update_price_snapshot(market.id, current_yes)
+
+            # News-flagged markets: force NewsEventStrategy to run first
+            if market.id in _news_flagged:
+                sig = self._news.analyse(market, ob)
+                if sig:
+                    sig.confidence = "HIGH"   # news-confirmed → high conviction
+                    signals_found += 1
+                    self._dash_state.push_signal(sig)
+                    if self._execute_signal(sig):
+                        trades_placed += 1
+                    continue
 
             # ── Strategy 3: Up/Down 5-min Momentum (highest priority) ──
             sig = self._updown.analyse(market, ob)
@@ -631,3 +663,5 @@ class PolymarketBot:
     def _shutdown(self, *_) -> None:
         logger.info("Shutdown signal received…")
         self._running = False
+        self._price_feed.stop()
+        self._news_feed.stop()
