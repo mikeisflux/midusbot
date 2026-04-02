@@ -367,23 +367,42 @@ class PolymarketBot:
         position_snapshots: list[tuple[OpenPosition, float]] = []
 
         for token_id, pos in list(self._positions.items()):
-            # Lazily enrich placeholder question from CLOB market API (fast, no retries)
-            if pos.market_id and (pos.question.startswith("[token:") or len(pos.question) <= 20):
+            ob = self._client.get_order_book(token_id)
+            book_is_empty = ob is None or (ob.best_bid == 0.0 and ob.best_ask == 1.0)
+
+            # When book is unavailable, fetch the CLOB market for two purposes:
+            # 1. Enrich placeholder question if still missing
+            # 2. Check if market resolved/closed (prune ghost positions)
+            # 3. Get current token price from tokens[] array
+            clob_mkt: dict | None = None
+            if book_is_empty and pos.market_id:
                 try:
-                    mkt = self._client.get_clob_market(pos.market_id)
-                    if mkt:
-                        q = mkt.get("question", "")
-                        if q:
-                            pos.question = q
+                    clob_mkt = self._client.get_clob_market(pos.market_id)
                 except Exception:
                     pass
 
-            ob = self._client.get_order_book(token_id)
+            # Lazily enrich placeholder question
+            if clob_mkt:
+                q = clob_mkt.get("question", "")
+                if q and (pos.question.startswith("[token:") or len(pos.question) <= 20):
+                    pos.question = q
 
-            # When the order book is empty (no bids, no asks) the CLOB mid
-            # returns 0.5 regardless of whether the market resolved YES or NO.
-            # In that case we must ask the Gamma API for the real outcome price.
-            book_is_empty = ob is None or (ob.best_bid == 0.0 and ob.best_ask == 1.0)
+            # Prune external (reconciled) positions whose market is confirmed closed.
+            # These are settled markets that resolved naturally — no sell trade was
+            # ever recorded, so trade-history reconstruction still shows them open.
+            if ob is None and pos.is_external and clob_mkt is not None:
+                market_active = clob_mkt.get("active", True)
+                market_closed = clob_mkt.get("closed", False)
+                if not market_active or market_closed:
+                    logger.info(
+                        f"PRUNED: market resolved/closed — removing ghost position "
+                        f"{pos.question[:55]}"
+                    )
+                    self._risk.register_close(pos.cost_usdc)
+                    del self._positions[token_id]
+                    self._save_positions()
+                    continue
+
             if book_is_empty:
                 current_price = self._gamma_position_price(pos)
             else:
