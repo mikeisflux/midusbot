@@ -642,9 +642,9 @@ async function refresh() {
     if (!_startTs) _startTs = Date.now();
 
     // Header
-    const badge = $('mode-badge');
-    badge.textContent = d.mode;
-    badge.className   = 'mode-badge ' + (d.mode==='LIVE' ? 'live' : 'dry');
+    const modeBadge = $('mode-badge');
+    modeBadge.textContent = d.mode;
+    modeBadge.className   = 'mode-badge ' + (d.mode==='LIVE' ? 'live' : 'dry');
     const toggleBtn = $('mode-toggle');
     if (toggleBtn) {
       toggleBtn.textContent = d.mode === 'LIVE' ? '⇄ SANDBOX' : '⇄ GO LIVE';
@@ -696,8 +696,8 @@ async function refresh() {
     setC('i-pos',   d.positions.length);
 
     // Positions badge
-    var badge = $('h-pos-badge');
-    if (badge) badge.textContent = (d.positions || []).length;
+    var posBadge = $('h-pos-badge');
+    if (posBadge) posBadge.textContent = (d.positions || []).length;
 
     // Fees (2 gas txs per round-trip + maker fee on typical position size)
     const typicalPos = d.max_exposure * 0.005;  // ~0.5% of exposure cap
