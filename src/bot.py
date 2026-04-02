@@ -133,6 +133,10 @@ class PolymarketBot:
         # Restore open positions from disk (before risk/exposure calculations)
         self._load_positions()
 
+        # Reconcile with live CLOB positions — catches positions opened before
+        # persistence was added, or opened directly on polymarket.com
+        self._reconcile_positions()
+
         # Restore performance stats + equity curve from persisted journal/file
         self._dash_state.restore_from_journal(self._learner.journal)
 
@@ -829,6 +833,84 @@ class PolymarketBot:
                     self._risk.register_open(pos.cost_usdc)
         except Exception as exc:
             logger.warning(f"_load_positions failed: {exc}")
+
+    def _reconcile_positions(self) -> None:
+        """
+        Fetch live positions from Polymarket CLOB API and add any not already
+        tracked in self._positions. Handles positions opened before persistence
+        was added, or in a different session / directly on polymarket.com.
+        """
+        if config.DRY_RUN:
+            return
+
+        try:
+            raw_positions = self._client.get_positions()
+        except Exception as exc:
+            logger.warning(f"_reconcile_positions: could not fetch CLOB positions: {exc}")
+            return
+
+        if not raw_positions:
+            logger.info("_reconcile_positions: no CLOB positions returned (wallet may be empty)")
+            return
+
+        logger.info(f"_reconcile_positions: {len(raw_positions)} CLOB position(s) returned — reconciling…")
+        added = 0
+        for raw in raw_positions:
+            # py_clob_client field names vary — handle all known variants
+            token_id = (
+                raw.get("asset_id") or raw.get("assetId") or
+                raw.get("token_id") or raw.get("tokenId") or
+                raw.get("market") or ""
+            )
+            try:
+                size = float(raw.get("size", 0) or 0)
+                avg_price = float(
+                    raw.get("avgPrice") or raw.get("avg_price") or
+                    raw.get("price") or 0.5
+                )
+            except (ValueError, TypeError):
+                continue
+
+            if not token_id or size <= 0:
+                continue
+
+            if token_id in self._positions:
+                logger.debug(f"  Already tracked: {token_id[:16]}…")
+                continue
+
+            # Look up market info from Gamma API
+            market = self._client.get_market_by_clob_token_id(token_id)
+            if market:
+                question  = market.question
+                market_id = market.id
+                side      = "NO" if market.no_token.token_id == token_id else "YES"
+            else:
+                question  = f"[token:{token_id[:16]}]"
+                market_id = ""
+                side      = "YES"   # best guess; will be corrected next reconcile
+
+            cost_usdc = avg_price * size
+            self._positions[token_id] = OpenPosition(
+                market_id=market_id,
+                question=question,
+                token_id=token_id,
+                side=side,
+                shares=size,
+                entry_price=avg_price,
+                cost_usdc=cost_usdc,
+            )
+            self._risk.register_open(cost_usdc)
+            added += 1
+            logger.info(
+                f"  Reconciled {side} {size:.2f}@{avg_price:.4f} "
+                f"= ${cost_usdc:.2f} — {question[:55]}"
+            )
+
+        if added:
+            logger.info(f"_reconcile_positions: added {added} previously-untracked position(s).")
+            self._save_positions()
+        else:
+            logger.info("_reconcile_positions: all CLOB positions are already tracked.")
 
     def _sync_wallet_balance(self) -> None:
         """Fetch live USDC balance and update the dashboard seed."""
