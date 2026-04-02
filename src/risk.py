@@ -88,7 +88,7 @@ class RiskManager:
 
         capped = min(usdc, pos_cap)
 
-        # Dynamic cap: 30% of wallet balance (or static MAX_TOTAL_EXPOSURE_USDC if wallet unknown)
+        # Dynamic cap: MAX_EXPOSURE_PCT of wallet balance (or static MAX_TOTAL_EXPOSURE_USDC if wallet unknown)
         if self._wallet_balance > 0:
             dynamic_cap = self._wallet_balance * config.MAX_EXPOSURE_PCT
         else:

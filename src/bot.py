@@ -475,13 +475,15 @@ class PolymarketBot:
             # External positions are only closed via the manual SELL button.
             if not config.DRY_RUN and not pos.is_external:
                 # Auto-claim: token resolved in our favour (worth $1.00).
+                # Use manual=True so if both sell paths fail (resolved market
+                # has no CLOB orderbook), position is force-removed.
+                # Polymarket auto-credits resolved YES winnings on-chain.
                 if current_price >= 0.97:
                     logger.info(
                         f"AUTO-CLAIM: resolved YES @ ${current_price:.3f} "
                         f"({pos.shares:.2f} shares)  {pos.question[:50]}"
                     )
-                    to_close.append((token_id, current_price))
-                    position_snapshots.append((pos, current_price))
+                    self._close_position(token_id, current_price=current_price, manual=True)
                     continue
 
                 # Auto-clear: token resolved against us (worth $0.00).
