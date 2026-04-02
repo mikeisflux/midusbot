@@ -123,6 +123,10 @@ class PolymarketBot:
         self._price_feed.start()   # Binance WebSocket — real-time prices
         self._news_feed.start()    # RSS headlines — news arb pre-signal
 
+        # Start web UI immediately so the browser is never refused while
+        # the slow startup tasks (reconcile, balance fetch) run below.
+        webui.start(self._dash_state, port=8080, learner=self._learner, close_position_fn=self._close_position)
+
         # Cancel any stale open orders left from previous runs
         if not config.DRY_RUN:
             stale = self._client.get_open_orders()
@@ -145,9 +149,6 @@ class PolymarketBot:
 
         # Add a restart marker to the equity curve so gaps are visible on the chart
         self._dash_state.add_equity_point()
-
-        # Start web UI (always, regardless of terminal dashboard)
-        webui.start(self._dash_state, port=8080, learner=self._learner, close_position_fn=self._close_position)
         self._dash_state.add_exec_log("info", "MIDUSBOT started — scanning Polymarket CLOB…")
         self._dash_state.add_exec_log("info",
             f"Config: MAX_POS=${config.MAX_POSITION_USDC}  "
@@ -880,12 +881,12 @@ class PolymarketBot:
                 logger.debug(f"  Already tracked: {token_id[:16]}…")
                 continue
 
-            # Data API gives us title and outcome directly
+            # Trade data gives us outcome ("Yes"/"No"/"Up"/"Down") and conditionId
             question  = raw.get("title") or raw.get("question") or ""
             outcome   = raw.get("outcome") or ""
             market_id = str(raw.get("conditionId") or raw.get("market_id") or "")
 
-            # Map outcome string to YES/NO
+            # Map outcome string to YES/NO side
             if outcome.lower() in ("yes", "up"):
                 side = "YES"
             elif outcome.lower() in ("no", "down"):
@@ -893,15 +894,10 @@ class PolymarketBot:
             else:
                 side = "YES"  # fallback
 
-            # If data API didn't give us the question, ask Gamma API
+            # Use conditionId as display name if we have no question —
+            # avoids slow/failing Gamma API lookup at startup
             if not question:
-                market = self._client.get_market_by_clob_token_id(token_id)
-                if market:
-                    question  = market.question
-                    market_id = market.id
-                    side      = "NO" if market.no_token.token_id == token_id else "YES"
-                else:
-                    question = f"[token:{token_id[:16]}]"
+                question = market_id[:20] if market_id else f"[token:{token_id[:16]}]"
 
             cost_usdc = avg_price * size
             self._positions[token_id] = OpenPosition(
