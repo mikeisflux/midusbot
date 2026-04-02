@@ -615,6 +615,67 @@ class PolymarketClient:
         logger.warning("get_positions: all methods exhausted — returning empty list")
         return []
 
+    def get_clob_market(self, condition_id: str) -> dict | None:
+        """
+        Fetch a single market from the CLOB public API by condition ID.
+        Returns the raw dict including: question, neg_risk, minimum_tick_size, tokens[].
+        This is a public endpoint — no auth required.
+        """
+        data = self._get(f"{config.CLOB_HOST}/markets/{condition_id}")
+        if isinstance(data, dict) and data.get("condition_id"):
+            return data
+        return None
+
+    def sell_via_swaps(
+        self,
+        token_id: str,
+        amount: float,
+        tick_size: str = "0.01",
+        neg_risk: bool = False,
+    ) -> dict | None:
+        """
+        Sell a position using the swaps.xyz Workflows API.
+        This handles order signing, negRisk routing, and tick-size compliance
+        automatically — much simpler than direct CLOB order management.
+        Returns the response dict on success, None on failure.
+        """
+        if not config.SWAPS_API_KEY:
+            return None
+        eoa = config.EVM_EOA
+        if not eoa:
+            logger.warning("sell_via_swaps: EVM_EOA not configured")
+            return None
+        if config.DRY_RUN:
+            logger.info(f"[DRY-RUN] Would sell {amount:.4f} shares of {token_id[:12]}… via swaps.xyz")
+            return {"dry_run": True, "orderResponse": {"success": True}}
+        try:
+            resp = self._session.post(
+                "https://api-v2.swaps.xyz/api/workflows/polymarket/sellPosition",
+                headers={
+                    "x-api-key": config.SWAPS_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "evmEoa":     eoa,
+                    "side":       "SELL",
+                    "tokenID":    token_id,
+                    "orderType":  "FAK",
+                    "tickSize":   tick_size,
+                    "negRisk":    neg_risk,
+                    "amount":     amount,
+                    "feeRateBps": 0,
+                    "slippage":   100,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            logger.info(f"swaps.xyz sell: {result}")
+            return result
+        except Exception as exc:
+            logger.error(f"sell_via_swaps failed: {exc}")
+            return None
+
     def get_open_orders(self) -> list[dict]:
         if not self._clob_client:
             return []

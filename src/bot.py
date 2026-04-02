@@ -447,29 +447,61 @@ class PolymarketBot:
             logger.warning(f"_close_position: token_id {token_id[:12]}… not found in open positions")
             return False
 
-        ob = self._client.get_order_book(token_id)
-        book_best_bid = ob.best_bid if ob else 0.0
+        resp = None
 
-        # For resolved markets the order book is empty (best_bid=0).
-        # Use the tracked current_price (from Gamma) so we sell at the
-        # real resolution price (e.g. 1.0) rather than $0.
-        if book_best_bid > 0.0:
-            sell_price = book_best_bid
-        elif current_price is not None and current_price > 0.05:
-            sell_price = current_price   # resolved price from Gamma
-        else:
-            sell_price = pos.entry_price
+        # ── Path 1: swaps.xyz (preferred — handles tickSize/negRisk automatically) ──
+        if config.SWAPS_API_KEY:
+            # Fetch market params for tick_size and neg_risk
+            tick_size = "0.01"
+            neg_risk  = False
+            if pos.market_id:
+                try:
+                    mkt = self._client.get_clob_market(pos.market_id)
+                    if mkt:
+                        tick_size = str(mkt.get("minimum_tick_size", "0.01"))
+                        neg_risk  = bool(mkt.get("neg_risk", False))
+                        # Also update the question if it's still a placeholder
+                        if pos.question.startswith("[token:") or len(pos.question) < 25:
+                            q = mkt.get("question", "")
+                            if q:
+                                pos.question = q
+                except Exception as exc:
+                    logger.debug(f"get_clob_market failed, using defaults: {exc}")
+            resp = self._client.sell_via_swaps(token_id, pos.shares, tick_size, neg_risk)
+            if resp and not resp.get("dry_run"):
+                ok = resp.get("orderResponse", {}).get("success", False)
+                if not ok:
+                    logger.warning(f"swaps.xyz sell failed: {resp} — falling back to CLOB")
+                    resp = None  # fall through to CLOB
 
-        resp = self._client.place_limit_order(
-            token_id=token_id,
-            side="SELL",
-            price=sell_price,
-            size=pos.shares,
-        )
+        # ── Path 2: direct CLOB limit order (fallback) ───────────────────────────
+        if resp is None:
+            ob = self._client.get_order_book(token_id)
+            book_best_bid = ob.best_bid if ob else 0.0
+            if book_best_bid > 0.0:
+                sell_price = book_best_bid
+            elif current_price is not None and current_price > 0.05:
+                sell_price = current_price
+            else:
+                sell_price = pos.entry_price
+            resp = self._client.place_limit_order(
+                token_id=token_id,
+                side="SELL",
+                price=sell_price,
+                size=pos.shares,
+            )
+
         if resp:
-            exit_usdc = sell_price * pos.shares
+            # Estimate exit price for P&L tracking
+            ob2 = self._client.get_order_book(token_id)
+            exit_price = (
+                current_price or
+                (ob2.best_bid if ob2 and ob2.best_bid > 0 else None) or
+                pos.entry_price
+            )
+            exit_usdc = exit_price * pos.shares
             fee = self._risk.trade_fee(pos.cost_usdc, exit_usdc)
-            pnl = self._learner.record_close(token_id, sell_price)
+            pnl = self._learner.record_close(token_id, exit_price)
             self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
             del self._positions[token_id]
@@ -894,8 +926,23 @@ class PolymarketBot:
             else:
                 side = "YES"  # fallback
 
-            # Use conditionId as display name if we have no question —
-            # avoids slow/failing Gamma API lookup at startup
+            # Use conditionId as display name if we have no question.
+            # Try the CLOB public /markets/{conditionId} endpoint (fast, no retries)
+            # to get the real question and neg_risk for the sell path.
+            if not question and market_id:
+                try:
+                    mkt = self._client.get_clob_market(market_id)
+                    if mkt:
+                        question = mkt.get("question", "") or market_id[:20]
+                        # Also fix side from tokens list if outcome is missing
+                        if not outcome:
+                            for tok in mkt.get("tokens", []):
+                                if tok.get("token_id") == token_id:
+                                    o = tok.get("outcome", "").lower()
+                                    side = "NO" if o in ("no", "down") else "YES"
+                                    break
+                except Exception:
+                    pass
             if not question:
                 question = market_id[:20] if market_id else f"[token:{token_id[:16]}]"
 

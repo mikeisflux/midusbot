@@ -46,5 +46,11 @@ GAS_COST_USDC: float = float(os.getenv("GAS_COST_USDC", "0.02"))
 # Used by SportsSpreadArbStrategy to compare Polymarket vs Vegas consensus lines
 ODDS_API_KEY: str = os.getenv("ODDS_API_KEY", "")
 
+# swaps.xyz Workflows API — used to sell positions without managing CLOB signing
+# Create an app at https://console.swaps.xyz to get a key
+SWAPS_API_KEY: str = os.getenv("SWAPS_API_KEY", "")
+# Your EVM EOA address (the raw wallet address, not the proxy)
+EVM_EOA: str = os.getenv("EVM_EOA", FUNDER_ADDRESS)
+
 # ── Loop ─────────────────────────────────────────────────────────────────────
 LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "15"))  # fast enough for 5-min markets
