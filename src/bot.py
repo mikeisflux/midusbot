@@ -193,6 +193,11 @@ class PolymarketBot:
         if not config.DRY_RUN or self._dash_state.loop_count % 10 == 0:
             self._sync_wallet_balance()
 
+        # 0c. Re-run position reconciliation every 20 loops so positions opened
+        #     via the UI (or missed at startup) are picked up automatically.
+        if self._dash_state.loop_count % 20 == 0:
+            self._reconcile_positions()
+
         # 0c. Process any pending simulated fills
         self._process_sim_queue()
 

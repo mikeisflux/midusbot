@@ -593,24 +593,34 @@ class PolymarketClient:
                     "conditionId": m.get("conditionId", ""),
                 })
             logger.info(f"get_positions: {len(positions)} net open position(s) from trade history")
-            return positions
+            # Only return here if we actually found positions. If all trades netted
+            # to 0 (e.g. all previously sold) or UI-placed positions aren't in the
+            # CLOB trade history, fall through to the data-api below.
+            if positions:
+                return positions
+            logger.info("get_positions: 0 net open from trade history — trying data-api")
 
-        # ── 3. Last resort: data-api.polymarket.com ──────────────────────────
+        # ── 3. data-api.polymarket.com — catches UI-placed positions and any
+        #        positions not in the CLOB trade history ─────────────────────
         if address:
-            try:
-                data = self._get(
-                    "https://data-api.polymarket.com/positions",
-                    params={"user": address, "sizeThreshold": "0", "limit": "500"},
-                )
-                logger.info(f"get_positions data-api: type={type(data).__name__} preview={str(data)[:200]}")
-                if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
-                    for key in ("data", "results", "positions"):
-                        if key in data and isinstance(data[key], list):
-                            return data[key]
-            except Exception as exc:
-                logger.warning(f"get_positions data-api failed: {exc}")
+            for addr_fmt in (address, address.lower(), address.upper()):
+                try:
+                    data = self._get(
+                        "https://data-api.polymarket.com/positions",
+                        params={"user": addr_fmt, "limit": "500"},
+                    )
+                    logger.info(
+                        f"get_positions data-api ({addr_fmt[:10]}…): "
+                        f"type={type(data).__name__} preview={str(data)[:300]}"
+                    )
+                    if isinstance(data, list) and data:
+                        return data
+                    if isinstance(data, dict):
+                        for key in ("data", "results", "positions"):
+                            if key in data and isinstance(data[key], list) and data[key]:
+                                return data[key]
+                except Exception as exc:
+                    logger.warning(f"get_positions data-api ({addr_fmt[:10]}…) failed: {exc}")
 
         logger.warning("get_positions: all methods exhausted — returning empty list")
         return []
