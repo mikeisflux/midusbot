@@ -883,9 +883,9 @@ class PolymarketBot:
         Fetch live positions from Polymarket CLOB API and add any not already
         tracked in self._positions. Handles positions opened before persistence
         was added, or in a different session / directly on polymarket.com.
+        Always runs regardless of DRY_RUN — existing real positions must be
+        visible and manageable even when the bot is in sandbox mode.
         """
-        if config.DRY_RUN:
-            return
 
         try:
             raw_positions = self._client.get_positions()
