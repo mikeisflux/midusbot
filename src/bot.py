@@ -15,14 +15,18 @@ Loop per iteration
 """
 from __future__ import annotations
 
+import json
 import random
 import signal
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from loguru import logger
+
+_POSITIONS_FILE = Path("data/positions.json")
 
 from src.client import Market, PolymarketClient
 from src.dashboard import Dashboard, DashboardState
@@ -125,6 +129,9 @@ class PolymarketBot:
             if stale:
                 logger.info(f"Cancelling {len(stale)} stale open order(s) from previous session…")
                 self._client.cancel_all_orders()
+
+        # Restore open positions from disk (before risk/exposure calculations)
+        self._load_positions()
 
         # Restore performance stats + equity curve from persisted journal/file
         self._dash_state.restore_from_journal(self._learner.journal)
@@ -386,6 +393,7 @@ class PolymarketBot:
                 self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
                 self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
                 del self._positions[token_id]
+                self._save_positions()
                 logger.info(f"AUTO-CLEAR: resolved NO — position removed  {pos.question[:50]}")
                 continue
 
@@ -460,6 +468,7 @@ class PolymarketBot:
             self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
             del self._positions[token_id]
+            self._save_positions()
             logger.info(f"Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
             return True
         return False
@@ -571,6 +580,7 @@ class PolymarketBot:
                 confidence=sig.confidence,
                 order_id=resp.get("id") if isinstance(resp, dict) else None,
             )
+            self._save_positions()
 
             self._learner.record_open(
                 market_id=sig.market_id,
@@ -783,6 +793,42 @@ class PolymarketBot:
             market.yes_token.token_id in self._positions
             and market.no_token.token_id in self._positions
         )
+
+    # ------------------------------------------------------------------
+    # Position persistence
+    # ------------------------------------------------------------------
+
+    def _save_positions(self) -> None:
+        """Write open positions to disk so they survive a restart."""
+        try:
+            _POSITIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(_POSITIONS_FILE, "w") as f:
+                json.dump({tid: asdict(pos) for tid, pos in self._positions.items()}, f, indent=2)
+        except Exception as exc:
+            logger.warning(f"_save_positions failed: {exc}")
+
+    def _load_positions(self) -> None:
+        """Reload open positions from disk on startup."""
+        if not _POSITIONS_FILE.exists():
+            return
+        try:
+            with open(_POSITIONS_FILE) as f:
+                raw = json.load(f)
+            count = 0
+            for token_id, d in raw.items():
+                if token_id not in self._positions:
+                    self._positions[token_id] = OpenPosition(**{
+                        k: v for k, v in d.items()
+                        if k in OpenPosition.__dataclass_fields__
+                    })
+                    count += 1
+            if count:
+                logger.info(f"Restored {count} open position(s) from disk.")
+                # Rebuild risk exposure from restored positions
+                for pos in self._positions.values():
+                    self._risk.register_open(pos.cost_usdc)
+        except Exception as exc:
+            logger.warning(f"_load_positions failed: {exc}")
 
     def _sync_wallet_balance(self) -> None:
         """Fetch live USDC balance and update the dashboard seed."""
