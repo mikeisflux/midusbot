@@ -176,6 +176,16 @@ class PolymarketBot:
 
             ob = self._client.get_order_book(market.yes_token.token_id)
 
+            # Hours until this market closes (used for urgency boost)
+            hours_to_close: float | None = None
+            if market.end_date:
+                try:
+                    from datetime import timezone as _tz
+                    end = datetime.fromisoformat(market.end_date.replace("Z", "+00:00"))
+                    hours_to_close = (end - datetime.now(_tz.utc)).total_seconds() / 3600
+                except Exception:
+                    pass
+
             # ── Strategy 1: Momentum + Imbalance ─────────────────────
             price_hist = self._client.get_price_history(market.yes_token.token_id)
             sig = self._strategy.analyse(market, ob, price_hist)
@@ -186,6 +196,8 @@ class PolymarketBot:
 
             if sig is None:
                 continue
+
+            sig.hours_to_close = hours_to_close
 
             signals_found += 1
             self._dash_state.push_signal(sig)
@@ -267,6 +279,13 @@ class PolymarketBot:
         if usdc <= 0:
             return False
 
+        # Urgency boost: markets closing within 48 h get up to 2× sizing
+        # (price must converge to 0 or 1 soon — edge is more reliable)
+        if sig.hours_to_close is not None and sig.hours_to_close <= 48:
+            boost = 1.0 + (1.0 - sig.hours_to_close / 48)   # 1.0× at 48h → 2.0× at 0h
+            usdc = min(usdc * boost, config.MAX_POSITION_USDC)
+            logger.debug(f"Urgency boost {boost:.2f}× — {sig.hours_to_close:.1f}h to close")
+
         limit_price = round(min(sig.fair_value, sig.market_price * 1.01), 4)
         limit_price = max(0.01, min(0.99, limit_price))
         shares = self._risk.shares_from_usdc(usdc, limit_price)
@@ -277,8 +296,14 @@ class PolymarketBot:
 
         # Log the divergence/signal to exec log
         kind = "arb" if sig.is_latency_arb else "divergence"
+        urgency_tag = ""
+        if sig.hours_to_close is not None:
+            if sig.hours_to_close <= 24:
+                urgency_tag = f" ⚡{sig.hours_to_close:.0f}h"
+            elif sig.hours_to_close <= 48:
+                urgency_tag = f" {sig.hours_to_close:.0f}h"
         self._dash_state.add_exec_log(kind,
-            f"+{sig.edge:.2%} divergence — \"{sig.question[:40]}\" "
+            f"+{sig.edge:.2%} divergence{urgency_tag} — \"{sig.question[:40]}\" "
             f"CLOB @ {sig.market_price:.2f} | fair {sig.fair_value:.2f} via {'ARB' if sig.is_latency_arb else 'MOM+OB'}")
 
         latency_ms = random.randint(5, 95)
@@ -405,6 +430,7 @@ class PolymarketBot:
         from datetime import datetime, timezone
         cutoff = config.MAX_DAYS_TO_RESOLUTION
 
+        now = datetime.now(timezone.utc)
         filtered = []
         for m in markets:
             if not m.active or m.closed:
@@ -415,18 +441,22 @@ class PolymarketBot:
                 continue
             if not (0.02 <= m.yes_price <= 0.98):
                 continue
-            # Skip markets that resolve too far in the future — capital would
-            # be locked up until resolution with no ability to exit easily
+            # Skip markets that resolve too far in the future
+            days_left = None
             if m.end_date:
                 try:
                     end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
-                    days_left = (end - datetime.now(timezone.utc)).days
+                    days_left = (end - now).total_seconds() / 86400
                     if days_left > cutoff:
                         continue
                 except Exception:
-                    pass  # unparseable date → allow through
-            filtered.append(m)
-        return filtered
+                    pass
+            filtered.append((m, days_left if days_left is not None else cutoff))
+
+        # Sort: markets closing in the next 48 h first, then by time ascending
+        # so the most time-sensitive opportunities are always processed first
+        filtered.sort(key=lambda x: x[1])
+        return [m for m, _ in filtered]
 
     def _already_positioned(self, market: Market) -> bool:
         return (

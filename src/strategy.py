@@ -65,6 +65,8 @@ class TradeSignal:
     # Latency arb fields
     is_latency_arb: bool = False
     lag_pct: float = 0.0
+    # Time urgency (hours until market closes; None = unknown)
+    hours_to_close: float | None = None
 
     def __str__(self) -> str:
         tag = "[LATENCY-ARB] " if self.is_latency_arb else ""
