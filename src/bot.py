@@ -565,6 +565,22 @@ class PolymarketBot:
     def _execute_signal(self, sig: TradeSignal) -> bool:
         if config.TRADING_PAUSED:
             return False
+
+        # One active UpDown bet per symbol at a time.
+        # Don't bet on "BTC Up 4AM-4:05AM" while "BTC Up 3AM-3:05AM" is
+        # still open — we don't know if we won the first bet yet.
+        from src.strategy import _detect_updown_market
+        sig_symbol = _detect_updown_market(sig.question)
+        if sig_symbol:
+            for pos in self._positions.values():
+                pos_symbol = _detect_updown_market(pos.question)
+                if pos_symbol == sig_symbol:
+                    logger.debug(
+                        f"Skipping {sig_symbol} UpDown — already have open position: "
+                        f"{pos.question[:55]}"
+                    )
+                    return False
+
         usdc = self._risk.position_size(sig)
         if usdc <= 0:
             return False

@@ -224,12 +224,13 @@ _COINGECKO_IDS: dict[str, str] = {
     "DOGE": "dogecoin",
 }
 
-_PRICE_CACHE: dict[str, tuple[float, float]] = {}   # symbol → (price, timestamp)
+_PRICE_CACHE: dict[str, tuple[float, float]] = {}     # symbol → (price, timestamp)
+_EXCHANGE_PRESSURE: dict[str, float] = {}            # symbol → bid/ask imbalance (-1..+1)
 _CACHE_TTL = 2.0   # seconds
 
 # Rolling 60-second price history for momentum: symbol → [(price, ts), ...]
 _PRICE_HISTORY: dict[str, list[tuple[float, float]]] = {}
-_HISTORY_WINDOW = 90  # keep 90 seconds of ticks
+_HISTORY_WINDOW = 600  # keep 10 minutes of ticks for multi-timeframe analysis
 
 
 def _fetch_price(symbol: str) -> float | None:
@@ -281,16 +282,14 @@ def _fetch_btc_price() -> float | None:
     return _fetch_price("BTC")
 
 
-def _price_momentum_60s(symbol: str) -> float | None:
+def _price_momentum(symbol: str, window_secs: int) -> float | None:
     """
-    Returns the % price change over the last ~60 seconds.
-    Positive = price rising, negative = price falling.
-    Returns None if insufficient history.
+    Returns the % price change over the last `window_secs` seconds.
+    Positive = rising, negative = falling. None if insufficient history.
     """
     hist = _PRICE_HISTORY.get(symbol.upper(), [])
     now = time.time()
-    # Find oldest tick within 60-90 s
-    window = [(p, t) for p, t in hist if now - t <= 75]
+    window = [(p, t) for p, t in hist if now - t <= window_secs * 1.25]
     if len(window) < 2:
         return None
     oldest_price = window[0][0]
@@ -298,6 +297,109 @@ def _price_momentum_60s(symbol: str) -> float | None:
     if oldest_price <= 0:
         return None
     return (newest_price - oldest_price) / oldest_price
+
+
+def _price_momentum_60s(symbol: str) -> float | None:
+    return _price_momentum(symbol, 60)
+
+
+def _price_momentum_30s(symbol: str) -> float | None:
+    return _price_momentum(symbol, 30)
+
+
+def _price_momentum_5m(symbol: str) -> float | None:
+    return _price_momentum(symbol, 300)
+
+
+def _price_acceleration(symbol: str) -> float | None:
+    """
+    Returns how much momentum is changing (2nd derivative of price).
+    Positive = trend is speeding up, negative = trend is slowing/reversing.
+    Computed as: mom_30s - mom_60s (scaled to same units).
+    Returns None if insufficient data.
+    """
+    m30 = _price_momentum_30s(symbol)
+    m60 = _price_momentum_60s(symbol)
+    if m30 is None or m60 is None:
+        return None
+    # Annualise to same time scale: m30 is over 30s, m60 over 60s
+    # Acceleration = recent 30s rate vs older 60s rate
+    m30_scaled = m30 * 2.0   # scale 30s → 60s equivalent
+    return m30_scaled - m60
+
+
+def _exchange_pressure(symbol: str) -> float:
+    """
+    Returns Binance bid/ask size imbalance for `symbol`.
+    Range: -1 (heavy ask pressure, likely falling) to +1 (heavy bid pressure, likely rising).
+    0.0 if no data available.
+    """
+    return _EXCHANGE_PRESSURE.get(symbol.upper(), 0.0)
+
+
+def _multitf_consensus(symbol: str) -> tuple[float, str]:
+    """
+    Combines 30s, 60s, 5m momentum + exchange pressure into a single
+    directional score and confidence.
+
+    Returns: (direction_score, confidence)
+      direction_score: positive = UP, negative = DOWN, magnitude = strength
+      confidence: "HIGH" | "MEDIUM" | "LOW" | None (insufficient data)
+    """
+    m30 = _price_momentum_30s(symbol)
+    m60 = _price_momentum_60s(symbol)
+    m5m = _price_momentum_5m(symbol)
+    pressure = _exchange_pressure(symbol)
+    accel = _price_acceleration(symbol)
+
+    available = sum(x is not None for x in [m30, m60, m5m])
+    if available < 2:
+        return 0.0, "NONE"
+
+    signals = []
+    if m30 is not None:
+        signals.append(m30 * 2.0)     # 30s scaled to 60s units, weight 1.0×
+    if m60 is not None:
+        signals.append(m60 * 1.0)     # 60s baseline, weight 1.0×
+    if m5m is not None:
+        signals.append(m5m * 0.2)     # 5m smoothed, weight 0.2× (directional only)
+    if pressure != 0.0:
+        signals.append(pressure * 0.003)  # convert to % units
+
+    consensus = sum(signals) / len(signals)
+
+    # Check cross-timeframe agreement — all pointing same direction = higher confidence
+    directions = []
+    if m30 is not None:
+        directions.append(1 if m30 > 0 else -1)
+    if m60 is not None:
+        directions.append(1 if m60 > 0 else -1)
+    if m5m is not None:
+        directions.append(1 if m5m > 0 else -1)
+    if pressure != 0.0:
+        directions.append(1 if pressure > 0.1 else (-1 if pressure < -0.1 else 0))
+
+    n_agree = sum(d == (1 if consensus > 0 else -1) for d in directions if d != 0)
+    n_total = sum(d != 0 for d in directions)
+    agreement_ratio = n_agree / n_total if n_total > 0 else 0.5
+
+    # Acceleration bonus: trend speeding up = more conviction
+    accel_bonus = 0.0
+    if accel is not None and (accel > 0) == (consensus > 0):
+        accel_bonus = min(abs(accel) * 0.3, 0.002)
+
+    strength = abs(consensus) + accel_bonus
+
+    if agreement_ratio >= 0.75 and strength >= 0.004:
+        conf = "HIGH"
+    elif agreement_ratio >= 0.60 and strength >= 0.002:
+        conf = "MEDIUM"
+    elif strength >= 0.001:
+        conf = "LOW"
+    else:
+        conf = "NONE"
+
+    return consensus, conf
 
 
 # Keyword patterns that indicate BTC price-level contracts
@@ -538,25 +640,24 @@ class UpDownMomentumStrategy:
         if live_price is None:
             return None
 
-        mom = _price_momentum_60s(symbol)
-        if mom is None or abs(mom) < self.min_momentum_pct:
-            return None   # not enough momentum data yet
+        # Multi-timeframe consensus: combines 30s + 60s + 5m + exchange pressure
+        consensus, conf_label = _multitf_consensus(symbol)
 
-        # Momentum → fair value
-        # Scale: 0.05% → ~55%; 0.2% → ~66%; 0.5% → ~80%; 1%+ → ~92%
-        # The stronger the 60s move the more certain the 5-min direction
-        raw_confidence = 0.50 + min(abs(mom) / 0.010, 1.0) * 0.42
-        fair_prob = float(np.clip(raw_confidence, 0.51, 0.92))
+        if conf_label == "NONE" or abs(consensus) < self.min_momentum_pct:
+            return None   # insufficient data or too weak
 
-        # Determine which outcome to bet
-        if mom > 0:
-            # Price rising → bet UP (YES)
+        # Map consensus strength → fair probability
+        # Stronger multi-TF agreement → higher fair_prob → larger edge
+        raw_confidence = 0.50 + min(abs(consensus) / 0.008, 1.0) * 0.44
+        fair_prob = float(np.clip(raw_confidence, 0.52, 0.94))
+
+        # Determine direction from consensus
+        if consensus > 0:
             side = "YES"
             token = market.yes_token
             mkt_price = order_book.mid if order_book else market.yes_price
             fair_value = fair_prob
         else:
-            # Price falling → bet DOWN (NO)
             side = "NO"
             token = market.no_token
             mkt_price = (1.0 - order_book.mid) if order_book else market.no_price
@@ -568,19 +669,18 @@ class UpDownMomentumStrategy:
         if edge < config.MIN_EDGE:
             return None
 
-        # HIGH confidence = strong momentum → Kelly sizes up aggressively
-        # mirrors the 200-share trades the reference trader places on strong moves
-        confidence = (
-            "HIGH"   if abs(mom) > 0.005 else   # >0.5%/60s — very strong
-            "MEDIUM" if abs(mom) > 0.002 else   # >0.2%/60s — clear trend
-            "LOW"                                # weak but above threshold
-        )
+        confidence = conf_label  # already set by _multitf_consensus
 
-        direction = "UP" if mom > 0 else "DOWN"
+        direction = "UP" if consensus > 0 else "DOWN"
+        m30 = _price_momentum_30s(symbol) or 0.0
+        m60 = _price_momentum_60s(symbol) or 0.0
+        m5m = _price_momentum_5m(symbol) or 0.0
+        pressure = _exchange_pressure(symbol)
         logger.info(
-            f"[UPDOWN] {symbol} {direction} {mom:+.4%}/60s  "
+            f"[UPDOWN] {symbol} {direction}  "
+            f"30s={m30:+.3%} 60s={m60:+.3%} 5m={m5m:+.3%} press={pressure:+.2f}  "
             f"fair={fair_value:.3f}  mkt={mkt_price:.3f}  edge={edge:+.3f}  "
-            f"→ {side} [{confidence}]  \"{market.question[:50]}\""
+            f"→ {side} [{confidence}]  \"{market.question[:45]}\""
         )
 
         return TradeSignal(

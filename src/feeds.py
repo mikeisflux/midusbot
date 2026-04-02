@@ -61,9 +61,13 @@ class BinanceWSFeed:
     """
 
     # Port 9443 is often blocked by VPS firewalls; port 443 is always open
+    # Subscribe to aggTrade (price ticks) AND bookTicker (best bid/ask pressure)
     _WS_URL = (
         "wss://stream.binance.com:443/stream?streams="
-        + "/".join(f"{sym}@aggTrade" for sym in _WS_SYMBOLS.values())
+        + "/".join(
+            f"{sym}@aggTrade/{sym}@bookTicker"
+            for sym in _WS_SYMBOLS.values()
+        )
     )
 
     def __init__(self) -> None:
@@ -130,22 +134,31 @@ class BinanceWSFeed:
         try:
             msg = json.loads(raw)
             data = msg.get("data", {})
-            stream = msg.get("stream", "")   # e.g. "btcusdt@aggTrade"
-            price_str = data.get("p")        # aggTrade price field
-            if not price_str:
-                return
+            stream = msg.get("stream", "")
 
-            price = float(price_str)
-
-            # Reverse-lookup: stream prefix → our symbol
             sym_lower = stream.split("@")[0].replace("usdt", "")
             symbol = sym_lower.upper()
             if symbol == "SOLUSD" or sym_lower == "sol":
                 symbol = "SOL"
 
-            # Update strategy price cache directly so strategies read real-time data
-            _update_strategy_cache(symbol, price)
-            self._last_prices[symbol] = price
+            stream_type = stream.split("@")[1] if "@" in stream else ""
+
+            if stream_type == "aggTrade":
+                price_str = data.get("p")
+                if not price_str:
+                    return
+                price = float(price_str)
+                _update_strategy_cache(symbol, price)
+                self._last_prices[symbol] = price
+
+            elif stream_type == "bookTicker":
+                # Best bid/ask — compute order book pressure imbalance
+                bid_qty = float(data.get("B", 0) or 0)
+                ask_qty = float(data.get("A", 0) or 0)
+                total = bid_qty + ask_qty
+                if total > 0:
+                    pressure = (bid_qty - ask_qty) / total  # -1 to +1
+                    _update_exchange_pressure(symbol, pressure)
 
         except Exception:
             pass
@@ -161,6 +174,15 @@ def _update_strategy_cache(symbol: str, price: float) -> None:
         hist.append((price, now))
         cutoff = now - _strat._HISTORY_WINDOW
         _strat._PRICE_HISTORY[symbol] = [(p, t) for p, t in hist if t >= cutoff]
+    except Exception:
+        pass
+
+
+def _update_exchange_pressure(symbol: str, pressure: float) -> None:
+    """Write Binance bid/ask imbalance into strategy._EXCHANGE_PRESSURE."""
+    try:
+        import src.strategy as _strat
+        _strat._EXCHANGE_PRESSURE[symbol] = pressure
     except Exception:
         pass
 
@@ -205,6 +227,25 @@ _MARKET_KEYWORDS = (
 )
 
 
+# Words that suggest the news is bullish for YES tokens
+_POSITIVE_WORDS = frozenset({
+    "approved", "approves", "launched", "launches", "gains", "gained", "rally",
+    "rallies", "bullish", "partnership", "upgrade", "upgraded", "record", "surges",
+    "surged", "soars", "soared", "wins", "won", "beats", "beat", "breakthrough",
+    "adoption", "legalized", "ceasefire", "deal", "agreement", "peace", "accord",
+    "passes", "passed", "signed", "ratified", "supports", "expands",
+})
+
+# Words that suggest the news is bearish for YES tokens (bullish for NO)
+_NEGATIVE_WORDS = frozenset({
+    "rejected", "rejects", "banned", "bans", "hack", "hacked", "crash", "crashed",
+    "bearish", "defaults", "defaulted", "arrested", "fails", "failed", "drops",
+    "dropped", "slumps", "slumped", "collapses", "collapsed", "seized", "suspended",
+    "cancelled", "war", "invasion", "invades", "tariff", "sanction", "sanctions",
+    "blocked", "halted", "delisted", "outage", "exploit", "lawsuit",
+})
+
+
 class Headline:
     __slots__ = ("title", "url", "source", "published_ts", "score")
 
@@ -217,6 +258,22 @@ class Headline:
 
     def __repr__(self) -> str:
         return f"[{self.source}] {self.title[:80]}"
+
+    @property
+    def sentiment(self) -> float:
+        """
+        Simple sentiment score in [-1, +1].
+        +1 = strongly bullish (good for YES tokens)
+        -1 = strongly bearish (good for NO tokens)
+         0 = neutral / unknown
+        """
+        words = set(re.findall(r"[a-z]+", self.title.lower()))
+        pos = len(words & _POSITIVE_WORDS)
+        neg = len(words & _NEGATIVE_WORDS)
+        total = pos + neg
+        if total == 0:
+            return 0.0
+        return round((pos - neg) / total, 3)
 
 
 class NewsFeed:
