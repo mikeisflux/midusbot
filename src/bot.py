@@ -538,11 +538,11 @@ class PolymarketBot:
             pnl = self._learner.record_close(token_id, exit_price)
             self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
-            # Manual sells (from UI) always remove from tracking so the user
-            # sees them disappear. Auto-sells in DRY_RUN only simulate.
-            if not config.DRY_RUN or manual:
-                del self._positions[token_id]
-                self._save_positions()
+            # Always remove from tracking — in DRY_RUN this is simulated, but
+            # we still need to delete so stop-loss/take-profit don't re-fire
+            # every loop on the same position.
+            del self._positions[token_id]
+            self._save_positions()
             logger.info(f"{'[SIM] ' if config.DRY_RUN else ''}Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
             return True
 
@@ -713,7 +713,7 @@ class PolymarketBot:
         })
 
     def _process_sim_queue(self) -> None:
-        """Resolve pending simulated trades and update equity curve."""
+        """Resolve pending simulated trades using real market prices for accuracy."""
         now = time.time()
         still_open = []
         for sim in self._sim_queue:
@@ -721,9 +721,18 @@ class PolymarketBot:
                 still_open.append(sim)
                 continue
 
-            # Synthetic exit: fair_value ± small noise
-            noise      = random.gauss(0, 0.018)
-            exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
+            # Use real current market price so learning reflects actual outcomes.
+            # Falls back to fair_value ± noise only if the order book is unavailable.
+            exit_price = None
+            try:
+                ob = self._client.get_order_book(sim["token_id"])
+                if ob and ob.mid > 0.01:
+                    exit_price = ob.mid
+            except Exception:
+                pass
+            if exit_price is None:
+                noise      = random.gauss(0, 0.018)
+                exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
             gross_pnl  = round(sim["shares"] * (exit_price - sim["entry"]), 4)
             entry_usdc = sim["shares"] * sim["entry"]
             exit_usdc  = sim["shares"] * exit_price
@@ -968,7 +977,12 @@ class PolymarketBot:
                 continue
 
             if token_id in self._positions:
-                logger.debug(f"  Already tracked: {token_id[:16]}…")
+                # Fix any positions loaded from old JSON without is_external=True
+                if not self._positions[token_id].is_external:
+                    self._positions[token_id].is_external = True
+                    logger.info(f"  Fixed is_external=True: {token_id[:16]}…")
+                else:
+                    logger.debug(f"  Already tracked: {token_id[:16]}…")
                 continue
 
             # Trade data gives us outcome ("Yes"/"No"/"Up"/"Down") and conditionId

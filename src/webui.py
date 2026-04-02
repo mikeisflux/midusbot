@@ -78,6 +78,21 @@ def api_toggle_mode():
     mode = "SANDBOX" if new_dry_run else "LIVE"
     if _state:
         _state.add_exec_log("info", f"Mode switched to {mode}")
+        # When switching to LIVE, reset the equity curve seed to the actual
+        # wallet balance so P&L is relative to real starting funds, not the
+        # DRY_RUN simulation baseline.
+        if not new_dry_run and _state.wallet_balance > 0:
+            _state._seed        = _state.wallet_balance
+            _state.total_pnl    = 0.0
+            _state.total_trades = 0
+            _state.wins         = 0
+            _state.total_fees   = 0.0
+            _state.daily_pnl    = 0.0
+            _state.pnl_history  = []
+            _state.equity_curve = []
+            _state.add_equity_point()
+            _state.add_exec_log("info",
+                f"P&L reset — baseline set to wallet: ${_state.wallet_balance:.2f} USDC")
     return jsonify({"ok": True, "dry_run": new_dry_run, "mode": mode})
 
 
