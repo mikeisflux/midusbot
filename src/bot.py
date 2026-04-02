@@ -545,6 +545,17 @@ class PolymarketBot:
                 self._save_positions()
             logger.info(f"{'[SIM] ' if config.DRY_RUN else ''}Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
             return True
+
+        # All sell paths failed (e.g. closed/resolved market with no order book).
+        # For manual clicks, force-remove from tracking — user explicitly wants it
+        # gone. Polymarket auto-credits resolved YES winnings to the wallet.
+        if manual:
+            self._risk.register_close(pos.cost_usdc)
+            del self._positions[token_id]
+            self._save_positions()
+            logger.info(f"MANUAL-REMOVE: sell order unavailable (market closed?) — removed from tracking: {pos.question[:55]}")
+            return True
+
         return False
 
     # ------------------------------------------------------------------
