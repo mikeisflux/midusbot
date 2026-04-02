@@ -101,6 +101,13 @@ class PolymarketBot:
         self._running = True
         self._dashboard.start()
 
+        # Cancel any stale open orders left from previous runs
+        if not config.DRY_RUN:
+            stale = self._client.get_open_orders()
+            if stale:
+                logger.info(f"Cancelling {len(stale)} stale open order(s) from previous session…")
+                self._client.cancel_all_orders()
+
         # Pull live wallet balance and use it as the portfolio seed
         self._sync_wallet_balance()
 
