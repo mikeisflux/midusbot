@@ -29,6 +29,9 @@ TRADING_PAUSED: bool = os.getenv("TRADING_PAUSED", "false").lower() == "true"
 MAX_POSITION_USDC: float = float(os.getenv("MAX_POSITION_USDC", "10"))
 MAX_TOTAL_EXPOSURE_USDC: float = float(os.getenv("MAX_TOTAL_EXPOSURE_USDC", "100"))
 KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
+# Max % of available wallet balance to deploy at once (0.30 = 30%).
+# Overrides MAX_TOTAL_EXPOSURE_USDC when wallet balance is known.
+MAX_EXPOSURE_PCT: float = float(os.getenv("MAX_EXPOSURE_PCT", "0.30"))
 
 # ── Strategy ─────────────────────────────────────────────────────────────────
 MIN_EDGE: float = float(os.getenv("MIN_EDGE", "0.03"))
