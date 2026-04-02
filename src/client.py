@@ -245,6 +245,56 @@ class PolymarketClient:
         logger.info(f"Fetched {len(markets)} active markets from Gamma API.")
         return markets
 
+    def get_market_by_id(self, market_id: str) -> Market | None:
+        """
+        Fetch a single market from the Gamma API by its numeric market ID.
+        Used to get the resolved outcome price when the CLOB order book is empty.
+        """
+        import json as _json
+        data = self._get(f"{config.GAMMA_HOST}/markets/{market_id}")
+        if not data:
+            return None
+        # Gamma returns the market object directly (not a list) for /markets/{id}
+        raw = data if isinstance(data, dict) else (data[0] if isinstance(data, list) and data else None)
+        if not raw:
+            return None
+        try:
+            def _parse(field, default="[]"):
+                v = raw.get(field, default)
+                if isinstance(v, str):
+                    return _json.loads(v)
+                return v if v else []
+
+            outcomes  = _parse("outcomes")
+            prices    = _parse("outcomePrices")
+            token_ids = _parse("clobTokenIds")
+
+            if len(outcomes) < 2 or len(token_ids) < 2:
+                return None
+
+            yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("yes", "up")), 0)
+            no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no", "down")), 1)
+
+            yes_price = float(prices[yes_idx]) if len(prices) > yes_idx else 0.5
+            no_price  = float(prices[no_idx])  if len(prices) > no_idx  else 0.5
+
+            return Market(
+                id=str(raw.get("id", market_id)),
+                question=raw.get("question", ""),
+                condition_id=raw.get("conditionId", ""),
+                slug=raw.get("slug", ""),
+                end_date=raw.get("endDate", ""),
+                active=bool(raw.get("active", False)),
+                closed=bool(raw.get("closed", False)),
+                volume=float(raw.get("volumeClob") or raw.get("volume") or 0),
+                liquidity=float(raw.get("liquidityClob") or raw.get("liquidity") or 0),
+                yes_token=Token(token_id=str(token_ids[yes_idx]), outcome="Yes", price=yes_price),
+                no_token=Token(token_id=str(token_ids[no_idx]),  outcome="No",  price=no_price),
+            )
+        except Exception as exc:
+            logger.warning(f"get_market_by_id({market_id}) parse error: {exc}")
+            return None
+
     def get_updown_markets(self) -> list[Market]:
         """
         Fetch short-interval Up/Down crypto markets by:

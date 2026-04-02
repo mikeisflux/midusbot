@@ -355,30 +355,38 @@ class PolymarketBot:
             self._dash_state.positions = []
             return
 
-        to_close: list[str] = []
+        to_close: list[tuple[str, float]] = []   # (token_id, current_price)
         position_snapshots: list[tuple[OpenPosition, float]] = []
 
         for token_id, pos in list(self._positions.items()):
             ob = self._client.get_order_book(token_id)
-            current_price = ob.mid if ob else pos.entry_price
 
-            # Auto-claim: if the token is priced at ≥$0.97 the market has
-            # resolved YES (our side won) — sell immediately to collect.
-            # Polymarket CLOB accepts SELL orders at resolved prices.
+            # When the order book is empty (no bids, no asks) the CLOB mid
+            # returns 0.5 regardless of whether the market resolved YES or NO.
+            # In that case we must ask the Gamma API for the real outcome price.
+            book_is_empty = ob is None or (ob.best_bid == 0.0 and ob.best_ask == 1.0)
+            if book_is_empty:
+                current_price = self._gamma_position_price(pos)
+            else:
+                current_price = ob.mid
+
+            # Auto-claim: token resolved in our favour (worth $1.00).
             if current_price >= 0.97:
-                logger.info(f"AUTO-CLAIM: market resolved YES — selling {pos.shares:.2f} shares @ ${current_price:.3f}  {pos.question[:50]}")
-                to_close.append(token_id)
+                logger.info(
+                    f"AUTO-CLAIM: resolved YES @ ${current_price:.3f} "
+                    f"({pos.shares:.2f} shares)  {pos.question[:50]}"
+                )
+                to_close.append((token_id, current_price))
                 position_snapshots.append((pos, current_price))
                 continue
 
-            # Auto-clear: if priced at ≤$0.03 the market resolved against us
-            # — clear it from tracking (no value to sell, just burns gas)
+            # Auto-clear: token resolved against us (worth $0.00).
             if current_price <= 0.03:
                 pnl = self._learner.record_close(token_id, current_price)
                 self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
                 self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
                 del self._positions[token_id]
-                logger.info(f"AUTO-CLEAR: market resolved NO — position removed  {pos.question[:50]}")
+                logger.info(f"AUTO-CLEAR: resolved NO — position removed  {pos.question[:50]}")
                 continue
 
             pnl_pct = (
@@ -390,24 +398,54 @@ class PolymarketBot:
 
             if self._risk.should_stop_loss(pnl_pct):
                 logger.warning(f"STOP-LOSS {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
-                to_close.append(token_id)
+                to_close.append((token_id, current_price))
             elif self._risk.should_take_profit(pnl_pct):
                 logger.info(f"TAKE-PROFIT {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
-                to_close.append(token_id)
+                to_close.append((token_id, current_price))
 
         self._dash_state.positions = position_snapshots
 
-        for token_id in to_close:
-            self._close_position(token_id)
+        for token_id, cur_price in to_close:
+            self._close_position(token_id, current_price=cur_price)
 
-    def _close_position(self, token_id: str) -> bool:
+    def _gamma_position_price(self, pos: OpenPosition) -> float:
+        """
+        When the CLOB order book is empty, fetch the current outcome price
+        from the Gamma API using the stored market_id.
+        Returns the price for the side we hold (YES or NO token).
+        Falls back to entry_price if the Gamma call fails.
+        """
+        try:
+            market = self._client.get_market_by_id(pos.market_id)
+            if market:
+                price = market.yes_price if pos.side == "YES" else market.no_price
+                logger.debug(
+                    f"[Gamma fallback] {pos.side} price={price:.3f}  "
+                    f"closed={market.closed}  {pos.question[:50]}"
+                )
+                return price
+        except Exception as exc:
+            logger.warning(f"_gamma_position_price failed for {pos.market_id}: {exc}")
+        return pos.entry_price
+
+    def _close_position(self, token_id: str, current_price: float | None = None) -> bool:
         pos = self._positions.get(token_id)
         if not pos:
             logger.warning(f"_close_position: token_id {token_id[:12]}… not found in open positions")
             return False
 
         ob = self._client.get_order_book(token_id)
-        sell_price = ob.best_bid if ob else pos.entry_price
+        book_best_bid = ob.best_bid if ob else 0.0
+
+        # For resolved markets the order book is empty (best_bid=0).
+        # Use the tracked current_price (from Gamma) so we sell at the
+        # real resolution price (e.g. 1.0) rather than $0.
+        if book_best_bid > 0.0:
+            sell_price = book_best_bid
+        elif current_price is not None and current_price > 0.05:
+            sell_price = current_price   # resolved price from Gamma
+        else:
+            sell_price = pos.entry_price
 
         resp = self._client.place_limit_order(
             token_id=token_id,
