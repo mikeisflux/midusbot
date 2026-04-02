@@ -221,6 +221,24 @@ class PolymarketBot:
         for sym in ("XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE"):
             _fetch_price(sym)
 
+        # Log price feed status every 4 loops so it's visible in the logs.
+        # Shows live prices + how many ticks are in history for each symbol.
+        if self._dash_state.loop_count % 4 == 1:
+            from src.strategy import _PRICE_CACHE, _PRICE_HISTORY
+            import time as _time
+            _now = _time.time()
+            parts = []
+            for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"):
+                cached = _PRICE_CACHE.get(sym)
+                hist = _PRICE_HISTORY.get(sym, [])
+                age = int(_now - cached[1]) if cached else 9999
+                ticks = len(hist)
+                span = int(hist[-1][1] - hist[0][1]) if len(hist) >= 2 else 0
+                price_str = f"${cached[0]:,.2f}" if cached else "–"
+                status = f"✓{ticks}t/{span}s" if ticks >= 5 and span >= 90 else f"⏳{ticks}t/{span}s"
+                parts.append(f"{sym}={price_str}({status})")
+            logger.info("Feed: " + "  ".join(parts))
+
         # 3. Scan markets
         self._dash_state.add_exec_log("scan",
             f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '…'} markets")
