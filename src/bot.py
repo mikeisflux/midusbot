@@ -593,6 +593,22 @@ class PolymarketBot:
                 size=pos.shares,
             )
 
+        # ── Path 3: on-chain redemption (resolved market — no orderbook) ─────────
+        # When a market resolves the CLOB orderbook disappears. Call redeemPositions
+        # on the CTF Exchange directly to convert winning tokens → USDC.
+        # pos.market_id IS the condition_id on Polymarket.
+        if resp is None and pos.market_id and current_price is not None and current_price >= 0.97:
+            neg_risk = False
+            try:
+                mkt = self._client.get_clob_market(pos.market_id)
+                if mkt:
+                    neg_risk = bool(mkt.get("neg_risk", False))
+            except Exception:
+                pass
+            redeemed = self._client.redeem_position(pos.market_id, neg_risk=neg_risk)
+            if redeemed:
+                resp = {"redeemed": True}
+
         if resp:
             # Use current_price for P&L — skip second get_order_book() call
             exit_price = (

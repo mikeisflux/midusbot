@@ -728,6 +728,36 @@ class PolymarketClient:
             logger.debug(f"get_clob_market({condition_id[:16]}) failed: {exc}")
         return None
 
+    def redeem_position(self, condition_id: str, neg_risk: bool = False) -> bool:
+        """
+        Redeem winning tokens for USDC after a market resolves.
+
+        Calls the CTF Exchange's redeemPositions function via py_clob_client.
+        Pass index_sets=[1,2] — the contract only pays out for whichever
+        outcome actually won; the other contributes $0.
+
+        For negRisk markets the contract is different but the py_clob_client
+        handles routing internally.
+        """
+        if config.DRY_RUN:
+            logger.info(f"[DRY-RUN] Would redeem condition {condition_id[:16]}…")
+            return True
+        if not self._clob_client:
+            logger.warning("redeem_position: no CLOB client — cannot redeem")
+            return False
+        try:
+            # Polymarket uses bridged USDC on Polygon as collateral
+            USDC    = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            ZERO32  = "0x" + "0" * 64
+            result  = self._clob_client.redeem_positions(
+                USDC, ZERO32, condition_id, [1, 2]
+            )
+            logger.info(f"Redeemed position — condition {condition_id[:16]}…  result={result}")
+            return True
+        except Exception as exc:
+            logger.warning(f"redeem_position failed: {exc}")
+            return False
+
     def sell_via_swaps(
         self,
         token_id: str,
