@@ -516,8 +516,9 @@ class UpDownMomentumStrategy:
             return None   # not enough momentum data yet
 
         # Momentum → fair value
-        # Scale: 0.05% move → ~55% confidence; 0.5% move → ~75%; clamp at 90%
-        raw_confidence = 0.50 + min(abs(mom) / 0.005, 1.0) * 0.40
+        # Scale: 0.05% → ~55%; 0.2% → ~66%; 0.5% → ~80%; 1%+ → ~92%
+        # The stronger the 60s move the more certain the 5-min direction
+        raw_confidence = 0.50 + min(abs(mom) / 0.010, 1.0) * 0.42
         fair_prob = float(np.clip(raw_confidence, 0.51, 0.92))
 
         # Determine which outcome to bet
@@ -540,10 +541,12 @@ class UpDownMomentumStrategy:
         if edge < config.MIN_EDGE:
             return None
 
+        # HIGH confidence = strong momentum → Kelly sizes up aggressively
+        # mirrors the 200-share trades the reference trader places on strong moves
         confidence = (
-            "HIGH"   if abs(mom) > 0.003 else
-            "MEDIUM" if abs(mom) > 0.001 else
-            "LOW"
+            "HIGH"   if abs(mom) > 0.005 else   # >0.5%/60s — very strong
+            "MEDIUM" if abs(mom) > 0.002 else   # >0.2%/60s — clear trend
+            "LOW"                                # weak but above threshold
         )
 
         direction = "UP" if mom > 0 else "DOWN"
@@ -561,7 +564,7 @@ class UpDownMomentumStrategy:
             market_price=mkt_price,
             fair_value=fair_value,
             edge=edge,
-            signal=abs(mom) * 100,   # signal = momentum % for learner
+            signal=float(np.clip(abs(mom) * 200, 0.0, 1.0)),  # normalised [0-1] for Kelly
             confidence=confidence,
             momentum_signal=mom,
             imbalance_signal=0.0,

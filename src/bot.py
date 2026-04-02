@@ -177,7 +177,7 @@ class PolymarketBot:
             if not self._running:
                 break
             if self._already_positioned(market):
-                continue
+                continue  # both sides held — skip
 
             ob = self._client.get_order_book(market.yes_token.token_id)
 
@@ -204,6 +204,10 @@ class PolymarketBot:
                 sig = self._latency.analyse(market, ob)
 
             if sig is None:
+                continue
+
+            # Skip if we already hold this exact token
+            if self._already_positioned(market, token_id=sig.token_id):
                 continue
 
             sig.hours_to_close = hours_to_close
@@ -492,10 +496,18 @@ class PolymarketBot:
         filtered.sort(key=lambda x: x[1])
         return [m for m, _ in filtered]
 
-    def _already_positioned(self, market: Market) -> bool:
+    def _already_positioned(self, market: Market, token_id: str | None = None) -> bool:
+        """
+        Block re-entry on the SAME token only (not the whole market).
+        This allows holding both Up and Down sides simultaneously —
+        the trader we modelled does this for hedging when signals flip.
+        If token_id is given, only check that specific token.
+        """
+        if token_id:
+            return token_id in self._positions
         return (
             market.yes_token.token_id in self._positions
-            or market.no_token.token_id in self._positions
+            and market.no_token.token_id in self._positions
         )
 
     def _sync_wallet_balance(self) -> None:

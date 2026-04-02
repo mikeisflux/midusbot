@@ -74,7 +74,19 @@ class RiskManager:
         if usdc <= 0:
             return 0.0
 
-        capped = min(usdc, config.MAX_POSITION_USDC)
+        # UpDown HIGH-confidence signals mirror the reference trader's large
+        # positions (200+ shares). Allow up to 3× MAX_POSITION_USDC when
+        # momentum is very strong and fair_value is well above market price.
+        from src.strategy import _detect_updown_market
+        is_updown = _detect_updown_market(signal.question) is not None
+        if is_updown and signal.confidence == "HIGH":
+            pos_cap = config.MAX_POSITION_USDC * 3.0
+        elif is_updown and signal.confidence == "MEDIUM":
+            pos_cap = config.MAX_POSITION_USDC * 1.5
+        else:
+            pos_cap = config.MAX_POSITION_USDC
+
+        capped = min(usdc, pos_cap)
 
         headroom = config.MAX_TOTAL_EXPOSURE_USDC - self._open_cost
         if headroom <= 0:
