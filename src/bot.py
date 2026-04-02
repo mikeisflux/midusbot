@@ -198,6 +198,8 @@ class PolymarketBot:
                 continue
 
             sig.hours_to_close = hours_to_close
+            if ob:
+                sig.best_ask = ob.best_ask
 
             signals_found += 1
             self._dash_state.push_signal(sig)
@@ -279,14 +281,33 @@ class PolymarketBot:
         if usdc <= 0:
             return False
 
-        # Urgency boost: markets closing within 48 h get up to 2× sizing
-        # (price must converge to 0 or 1 soon — edge is more reliable)
-        if sig.hours_to_close is not None and sig.hours_to_close <= 48:
-            boost = 1.0 + (1.0 - sig.hours_to_close / 48)   # 1.0× at 48h → 2.0× at 0h
-            usdc = min(usdc * boost, config.MAX_POSITION_USDC)
-            logger.debug(f"Urgency boost {boost:.2f}× — {sig.hours_to_close:.1f}h to close")
+        # Urgency boost: the closer to expiry, the more aggressive the sizing.
+        #   >48h  → 1.0× (no boost)
+        #   48h   → 1.25×
+        #   24h   → 1.5×
+        #   1h    → 2.0×
+        #   5min  → 2.5× (5-min markets — price MUST resolve, highest conviction)
+        if sig.hours_to_close is not None:
+            h = sig.hours_to_close
+            if h <= 1:
+                boost = 2.5 - (h / 1) * 0.5      # 2.5× at 0h → 2.0× at 1h
+            elif h <= 24:
+                boost = 2.0 - ((h - 1) / 23) * 0.5   # 2.0× at 1h → 1.5× at 24h
+            elif h <= 48:
+                boost = 1.5 - ((h - 24) / 24) * 0.25  # 1.5× at 24h → 1.25× at 48h
+            else:
+                boost = 1.0
+            if boost > 1.0:
+                usdc = min(usdc * boost, config.MAX_POSITION_USDC)
+                logger.debug(f"Urgency boost {boost:.2f}× — {h:.1f}h to close")
 
-        limit_price = round(min(sig.fair_value, sig.market_price * 1.01), 4)
+        # For markets closing within 1 hour, cross the spread to guarantee fill.
+        # For others, stay passive (limit at fair value) to avoid slippage.
+        if sig.hours_to_close is not None and sig.hours_to_close <= 1:
+            ask = sig.best_ask if sig.best_ask else sig.market_price * 1.02
+            limit_price = round(ask, 4)
+        else:
+            limit_price = round(min(sig.fair_value, sig.market_price * 1.01), 4)
         limit_price = max(0.01, min(0.99, limit_price))
         shares = self._risk.shares_from_usdc(usdc, limit_price)
 
@@ -431,6 +452,7 @@ class PolymarketBot:
         cutoff = config.MAX_DAYS_TO_RESOLUTION
 
         now = datetime.now(timezone.utc)
+        min_minutes = config.MIN_MINUTES_TO_RESOLUTION
         filtered = []
         for m in markets:
             if not m.active or m.closed:
@@ -441,20 +463,23 @@ class PolymarketBot:
                 continue
             if not (0.02 <= m.yes_price <= 0.98):
                 continue
-            # Skip markets that resolve too far in the future
-            days_left = None
+            hours_left = None
             if m.end_date:
                 try:
                     end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
-                    days_left = (end - now).total_seconds() / 86400
-                    if days_left > cutoff:
+                    secs_left = (end - now).total_seconds()
+                    # Too close to expiry — order won't fill in time
+                    if secs_left < min_minutes * 60:
+                        continue
+                    hours_left = secs_left / 3600
+                    # Too far in the future
+                    if hours_left > cutoff * 24:
                         continue
                 except Exception:
                     pass
-            filtered.append((m, days_left if days_left is not None else cutoff))
+            filtered.append((m, hours_left if hours_left is not None else cutoff * 24))
 
-        # Sort: markets closing in the next 48 h first, then by time ascending
-        # so the most time-sensitive opportunities are always processed first
+        # Soonest-closing first — 5-min markets bubble to the top
         filtered.sort(key=lambda x: x[1])
         return [m for m, _ in filtered]
 

@@ -29,10 +29,11 @@ KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
 
 # ── Strategy ─────────────────────────────────────────────────────────────────
 MIN_EDGE: float = float(os.getenv("MIN_EDGE", "0.03"))
-MIN_ORDER_SHARES: float = float(os.getenv("MIN_ORDER_SHARES", "5.0"))  # Polymarket CLOB minimum
-MAX_DAYS_TO_RESOLUTION: int = int(os.getenv("MAX_DAYS_TO_RESOLUTION", "7"))  # skip long-dated markets
-MIN_LIQUIDITY_USDC: float = float(os.getenv("MIN_LIQUIDITY_USDC", "1000"))
-MIN_VOLUME_24H_USDC: float = float(os.getenv("MIN_VOLUME_24H_USDC", "100"))
+MIN_ORDER_SHARES: float = float(os.getenv("MIN_ORDER_SHARES", "5.0"))    # Polymarket CLOB minimum
+MAX_DAYS_TO_RESOLUTION: int = int(os.getenv("MAX_DAYS_TO_RESOLUTION", "7"))    # skip long-dated markets
+MIN_MINUTES_TO_RESOLUTION: int = int(os.getenv("MIN_MINUTES_TO_RESOLUTION", "5"))  # don't enter near-expired
+MIN_LIQUIDITY_USDC: float = float(os.getenv("MIN_LIQUIDITY_USDC", "500"))   # lower for 5-min markets
+MIN_VOLUME_24H_USDC: float = float(os.getenv("MIN_VOLUME_24H_USDC", "50"))  # lower for 5-min markets
 
 # ── Trading costs ────────────────────────────────────────────────────────────
 # Polymarket CLOB maker/taker fee (currently 0 %, set > 0 if it changes)
@@ -41,4 +42,4 @@ MAKER_FEE_PCT: float = float(os.getenv("MAKER_FEE_PCT", "0.0"))
 GAS_COST_USDC: float = float(os.getenv("GAS_COST_USDC", "0.02"))
 
 # ── Loop ─────────────────────────────────────────────────────────────────────
-LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "60"))
+LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "15"))  # fast enough for 5-min markets

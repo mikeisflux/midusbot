@@ -67,6 +67,8 @@ class TradeSignal:
     lag_pct: float = 0.0
     # Time urgency (hours until market closes; None = unknown)
     hours_to_close: float | None = None
+    # Best ask at signal time — used for aggressive fills on ultra-short markets
+    best_ask: float | None = None
 
     def __str__(self) -> str:
         tag = "[LATENCY-ARB] " if self.is_latency_arb else ""
