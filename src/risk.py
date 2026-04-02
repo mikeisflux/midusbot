@@ -116,6 +116,15 @@ class RiskManager:
         """Update known wallet balance for dynamic exposure cap calculation."""
         self._wallet_balance = max(0.0, balance)
 
+    def resync_exposure(self, positions: dict) -> None:
+        """Recompute _open_cost directly from the live positions dict.
+
+        Calling this once per loop prevents the counter drifting out of sync
+        when positions are removed without a matching register_close() (e.g.
+        bot killed mid-run, stale positions file, or external removals).
+        """
+        self._open_cost = sum(p.cost_usdc for p in positions.values())
+
     def register_open(self, usdc_cost: float) -> None:
         self._open_cost += usdc_cost
         self._trades_today += 1

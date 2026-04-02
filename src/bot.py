@@ -210,6 +210,11 @@ class PolymarketBot:
         # 0c. Process any pending simulated fills
         self._process_sim_queue()
 
+        # 0d. Resync exposure counter from actual positions — prevents drift
+        #     caused by positions removed without a matching register_close()
+        #     (bot killed mid-run, stale positions file, etc.)
+        self._risk.resync_exposure(self._positions)
+
         # 1. Manage existing positions
         self._manage_positions()
 
