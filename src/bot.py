@@ -176,7 +176,12 @@ class PolymarketBot:
         candidates = self._filter_markets(all_markets)
         self._dash_state.markets_scanned = len(all_markets)
         self._dash_state.candidates = len(candidates)
-        logger.info(f"{len(candidates)}/{len(markets)} markets pass filters.")
+        updown_passing = [m for m in candidates if m.yes_token.outcome in ("Up", "Down") or m.no_token.outcome in ("Up", "Down")]
+        logger.info(f"{len(candidates)}/{len(markets)} markets pass filters — {len(updown_passing)} UpDown.")
+        if self._dash_state.loop_count == 1 and updown:
+            logger.info("First 5 UpDown markets fetched:")
+            for m in updown[:5]:
+                logger.info(f"  [{m.yes_token.outcome}/{m.no_token.outcome}] {m.question[:70]}  end={m.end_date}")
 
         self._dash_state.add_exec_log("scan",
             f"Evaluating {len(candidates)} candidate markets on CLOB…")
