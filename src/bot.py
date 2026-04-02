@@ -471,23 +471,6 @@ class PolymarketBot:
     # Helpers
     # ------------------------------------------------------------------
 
-    # Sports/long-running event keywords — never trade these regardless of end_date
-    _BLOCKED_KEYWORDS = {
-        "nhl", "nba", "nfl", "mlb", "nascar", "mls",
-        "stanley cup", "super bowl", "world series", "world cup",
-        "premier league", "champions league", "uefa", "fifa",
-        "olympic", "wimbledon", "nba finals", "nfl playoffs",
-        "pennant", "playoff", "championship", "tournament",
-        "oilers", "penguins", "maple leafs", "bruins", "rangers",
-        "lakers", "celtics", "warriors", "knicks",
-        "patriots", "chiefs", "eagles", "cowboys",
-        "yankees", "dodgers", "red sox",
-    }
-
-    def _is_blocked(self, question: str) -> bool:
-        q = question.lower()
-        return any(kw in q for kw in self._BLOCKED_KEYWORDS)
-
     def _filter_markets(self, markets: list[Market]) -> list[Market]:
         from datetime import datetime, timezone
         cutoff = config.MAX_DAYS_TO_RESOLUTION
@@ -503,9 +486,6 @@ class PolymarketBot:
             # fetched for momentum trading and have low liquidity by design.
             is_updown = m.yes_token.outcome in ("Up", "Down") or m.no_token.outcome in ("Up", "Down")
 
-            # Hard block: never trade sports/entertainment markets
-            if not is_updown and self._is_blocked(m.question):
-                continue
 
             if is_updown:
                 # Skip only if both sides are stuck at the extremes
