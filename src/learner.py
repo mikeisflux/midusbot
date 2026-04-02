@@ -52,8 +52,6 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 
 DATA_DIR       = Path("data")
-JOURNAL_FILE   = DATA_DIR / "trade_journal.json"
-PARAMS_FILE    = DATA_DIR / "learned_params.json"
 ADAPT_EVERY_N  = 10          # run adaptation after this many new closed trades
 LOOKBACK       = 50          # only look at the most recent N trades
 
@@ -121,8 +119,22 @@ class AdaptiveLearner:
     strategy and risk parameters.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = "main") -> None:
+        """
+        name — used to namespace separate journal/params files per strategy type.
+          "main" → data/trade_journal.json  (backward-compatible)
+          "news" → data/news_journal.json + data/news_params.json
+          any other string → data/{name}_journal.json etc.
+        """
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self._name = name
+        # Backward-compatible paths for the main learner
+        if name == "main":
+            self._journal_file = DATA_DIR / "trade_journal.json"
+            self._params_file  = DATA_DIR / "learned_params.json"
+        else:
+            self._journal_file = DATA_DIR / f"{name}_journal.json"
+            self._params_file  = DATA_DIR / f"{name}_params.json"
 
         self.strategy_params = StrategyParams()
         self.risk_params     = RiskParams()
@@ -136,11 +148,11 @@ class AdaptiveLearner:
     def reset(self) -> None:
         """Wipe journal + learned params files and restore factory defaults."""
         try:
-            JOURNAL_FILE.unlink(missing_ok=True)
+            self._journal_file.unlink(missing_ok=True)
         except Exception:
             pass
         try:
-            PARAMS_FILE.unlink(missing_ok=True)
+            self._params_file.unlink(missing_ok=True)
         except Exception:
             pass
         self.strategy_params      = StrategyParams()
@@ -339,7 +351,7 @@ class AdaptiveLearner:
 
     def _save_journal(self) -> None:
         try:
-            with open(JOURNAL_FILE, "w") as f:
+            with open(self._journal_file, "w") as f:
                 json.dump([r.to_dict() for r in self._journal], f, indent=2)
         except Exception as exc:
             logger.error(f"[Learner] Failed to save journal: {exc}")
@@ -352,16 +364,16 @@ class AdaptiveLearner:
                 "adaptation_count": self._adaptation_count,
                 "saved_at": datetime.utcnow().isoformat(),
             }
-            with open(PARAMS_FILE, "w") as f:
+            with open(self._params_file, "w") as f:
                 json.dump(payload, f, indent=2)
         except Exception as exc:
             logger.error(f"[Learner] Failed to save params: {exc}")
 
     def _load(self) -> None:
         # Journal
-        if JOURNAL_FILE.exists():
+        if self._journal_file.exists():
             try:
-                with open(JOURNAL_FILE) as f:
+                with open(self._journal_file) as f:
                     raw = json.load(f)
                 self._journal = [TradeRecord.from_dict(r) for r in raw]
                 logger.info(f"[Learner] Loaded {len(self._journal)} journal entries.")
@@ -369,9 +381,9 @@ class AdaptiveLearner:
                 logger.warning(f"[Learner] Could not load journal: {exc}")
 
         # Params
-        if PARAMS_FILE.exists():
+        if self._params_file.exists():
             try:
-                with open(PARAMS_FILE) as f:
+                with open(self._params_file) as f:
                     d = json.load(f)
                 for k in StrategyParams.__dataclass_fields__:
                     if k in d:
@@ -389,6 +401,10 @@ class AdaptiveLearner:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def has_open(self, token_id: str) -> bool:
+        """Return True if there is an open record for this token_id."""
+        return self._find_open(token_id) is not None
 
     def _find_open(self, token_id: str) -> TradeRecord | None:
         for rec in reversed(self._journal):

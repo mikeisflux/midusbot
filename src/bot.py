@@ -36,6 +36,7 @@ from src.risk import RiskManager
 from src.strategy import (
     LatencyArbStrategy,
     MomentumImbalanceStrategy,
+    NewsArbitrageStrategy,
     UpDownMomentumStrategy,
     BTCLevelStrategy,
     NewsEventStrategy,
@@ -79,23 +80,30 @@ class OpenPosition:
 
 class PolymarketBot:
     def __init__(self, *, dashboard_enabled: bool = True) -> None:
-        self._learner    = AdaptiveLearner()
-        self._client     = PolymarketClient()
-        self._strategy   = MomentumImbalanceStrategy(params=self._learner.strategy_params)
-        self._latency    = LatencyArbStrategy()
-        self._updown     = UpDownMomentumStrategy()
-        self._btclevel   = BTCLevelStrategy()
-        self._news       = NewsEventStrategy()
-        self._risk       = RiskManager(params=self._learner.risk_params)
-        self._dashboard  = Dashboard(enabled=dashboard_enabled)
-        self._dash_state = DashboardState()
+        self._learner      = AdaptiveLearner(name="main")
+        self._news_learner = AdaptiveLearner(name="news")
+        self._client       = PolymarketClient()
+        self._strategy     = MomentumImbalanceStrategy(params=self._learner.strategy_params)
+        self._latency      = LatencyArbStrategy()
+        self._updown       = UpDownMomentumStrategy()
+        self._btclevel     = BTCLevelStrategy()
+        self._news         = NewsEventStrategy()
+        self._risk         = RiskManager(params=self._learner.risk_params)
+        self._dashboard    = Dashboard(enabled=dashboard_enabled)
+        self._dash_state   = DashboardState()
 
         self._positions: dict[str, OpenPosition] = {}
+        # Tokens opened via NewsArbitrageStrategy — routed to _news_learner
+        self._news_token_ids: set[str] = set()
+        self._news_trades_today: int = 0
         self._running = False
 
         # Live data feeds
         self._price_feed = BinanceWSFeed()
         self._news_feed  = NewsFeed()
+
+        # News arbitrage strategy (wired to the live news feed)
+        self._news_arb = NewsArbitrageStrategy(news_feed=self._news_feed)
 
         # Simulation queue — pending dry-run trades waiting for synthetic fill
         self._sim_queue: list[dict] = []
@@ -187,6 +195,7 @@ class PolymarketBot:
         if today != self._today:
             self._today = today
             self._risk.reset_daily()
+            self._news_trades_today = 0
             logger.info("Daily risk reset — new trading day started.")
 
         # 0b. Refresh wallet balance every 10 loops (or every loop in live mode)
@@ -317,6 +326,11 @@ class PolymarketBot:
             if sig is None:
                 sig = self._news.analyse(market, ob)
 
+            # ── Strategy 8: News Arbitrage (headline sentiment) ────────
+            # Limited to MAX_NEWS_TRADES_PER_DAY total per calendar day.
+            if sig is None and self._news_trades_today < config.MAX_NEWS_TRADES_PER_DAY:
+                sig = self._news_arb.analyse(market, ob)
+
             # ── Strategy 1: Momentum + Imbalance ─────────────────────
             if sig is None:
                 price_hist = self._client.get_price_history(market.yes_token.token_id)
@@ -424,7 +438,9 @@ class PolymarketBot:
 
                 # Auto-clear: token resolved against us (worth $0.00).
                 if current_price <= 0.03:
-                    pnl = self._learner.record_close(token_id, current_price)
+                    _close_learner = self._news_learner if token_id in self._news_token_ids else self._learner
+                    pnl = _close_learner.record_close(token_id, current_price)
+                    self._news_token_ids.discard(token_id)
                     self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl)
                     self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
                     del self._positions[token_id]
@@ -535,7 +551,9 @@ class PolymarketBot:
             )
             exit_usdc = exit_price * pos.shares
             fee = self._risk.trade_fee(pos.cost_usdc, exit_usdc)
-            pnl = self._learner.record_close(token_id, exit_price)
+            _cl = self._news_learner if token_id in self._news_token_ids else self._learner
+            pnl = _cl.record_close(token_id, exit_price)
+            self._news_token_ids.discard(token_id)
             self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
             # Always remove from tracking — in DRY_RUN this is simulated, but
@@ -688,7 +706,9 @@ class PolymarketBot:
             )
             self._save_positions()
 
-            self._learner.record_open(
+            # Route to the correct learner based on signal type
+            active_learner = self._news_learner if sig.is_news_arb else self._learner
+            active_learner.record_open(
                 market_id=sig.market_id,
                 token_id=sig.token_id,
                 side=sig.side,
@@ -701,6 +721,10 @@ class PolymarketBot:
                 composite_signal=sig.signal,
                 confidence=sig.confidence,
             )
+            if sig.is_news_arb:
+                self._news_token_ids.add(sig.token_id)
+                self._news_trades_today += 1
+                logger.info(f"[NEWS-ARB] Trade #{self._news_trades_today}/{config.MAX_NEWS_TRADES_PER_DAY} today")
 
             # Queue a simulated fill for dry-run mode so the UI shows activity
             if config.DRY_RUN:
@@ -778,8 +802,11 @@ class PolymarketBot:
                 self._dash_state.add_exec_log("slipped",
                     f"SLIPPED ${net_pnl:.2f} (fee ${fee:.3f}) // adverse fill  \"{sim['question'][:38]}\"")
 
-            # Update learner + dashboard
-            self._learner.record_close(sim["token_id"], exit_price)
+            # Update learner + dashboard (route to news learner if applicable)
+            _sim_tid = sim["token_id"]
+            _sim_cl  = self._news_learner if _sim_tid in self._news_token_ids else self._learner
+            _sim_cl.record_close(_sim_tid, exit_price)
+            self._news_token_ids.discard(_sim_tid)
             self._risk.register_close(entry_usdc, pnl_usdc=net_pnl)
             self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
@@ -793,7 +820,13 @@ class PolymarketBot:
     # ------------------------------------------------------------------
 
     def _refresh_dashboard(self) -> None:
-        self._dash_state.learned = self._learner.get_dashboard_dict()
+        self._dash_state.learned = {
+            **self._learner.get_dashboard_dict(),
+            "news_trades_today":    self._news_trades_today,
+            "news_trades_cap":      config.MAX_NEWS_TRADES_PER_DAY,
+            "news_journal_size":    self._news_learner.get_dashboard_dict()["journal_size"],
+            "news_adaptation_count": self._news_learner.get_dashboard_dict()["adaptation_count"],
+        }
         self._dashboard.refresh(self._dash_state)
 
     # ------------------------------------------------------------------

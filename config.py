@@ -58,5 +58,10 @@ SWAPS_API_KEY: str = os.getenv("SWAPS_API_KEY", "")
 # Your EVM EOA address (the raw wallet address, not the proxy)
 EVM_EOA: str = os.getenv("EVM_EOA", FUNDER_ADDRESS)
 
+# ── News trading ─────────────────────────────────────────────────────────────
+# Max number of news-arb trades per calendar day (to limit exposure to
+# headline-driven bets while still capturing the best opportunities).
+MAX_NEWS_TRADES_PER_DAY: int = int(os.getenv("MAX_NEWS_TRADES_PER_DAY", "3"))
+
 # ── Loop ─────────────────────────────────────────────────────────────────────
 LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "15"))  # fast enough for 5-min markets
