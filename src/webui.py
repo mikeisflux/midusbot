@@ -184,7 +184,7 @@ def api_close_position():
     if not token_id:
         return jsonify({"ok": False, "error": "token_id required"})
     try:
-        ok = _close_position_fn(token_id)
+        ok = _close_position_fn(token_id, manual=True)
         return jsonify({"ok": bool(ok)})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)})

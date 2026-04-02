@@ -476,7 +476,7 @@ class PolymarketBot:
                 logger.debug(f"_gamma_position_price CLOB fallback failed: {exc}")
         return pos.entry_price
 
-    def _close_position(self, token_id: str, current_price: float | None = None) -> bool:
+    def _close_position(self, token_id: str, current_price: float | None = None, manual: bool = False) -> bool:
         pos = self._positions.get(token_id)
         if not pos:
             logger.warning(f"_close_position: token_id {token_id[:12]}… not found in open positions")
@@ -538,9 +538,9 @@ class PolymarketBot:
             pnl = self._learner.record_close(token_id, exit_price)
             self._risk.register_close(pos.cost_usdc, pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
-            # In DRY_RUN: simulate the close but keep position in tracking
-            # so it remains visible. Real deletion only happens in live mode.
-            if not config.DRY_RUN:
+            # Manual sells (from UI) always remove from tracking so the user
+            # sees them disappear. Auto-sells in DRY_RUN only simulate.
+            if not config.DRY_RUN or manual:
                 del self._positions[token_id]
                 self._save_positions()
             logger.info(f"{'[SIM] ' if config.DRY_RUN else ''}Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")

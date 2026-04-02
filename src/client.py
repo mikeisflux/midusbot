@@ -187,6 +187,18 @@ class PolymarketClient:
         """Return active, non-closed markets with sufficient liquidity."""
         import json as _json
 
+        # Keywords that identify sports/team betting markets — never trade these
+        _SPORTS_KEYWORDS = (
+            " nhl ", " nba ", " nfl ", " mlb ", " nhl\n", " nba\n",
+            "stanley cup", "nba finals", "nfl season", "super bowl",
+            "world series", "march madness", "champions league",
+            "premier league", "la liga", "serie a", "bundesliga",
+            "win the 2025 nhl", "win the 2026 nhl",
+            "win the 2025 nba", "win the 2026 nba",
+            "win the 2025 nfl", "win the 2026 nfl",
+            "win the super bowl", "win the world series",
+        )
+
         data = self._get(
             f"{config.GAMMA_HOST}/markets",
             params={"active": "true", "closed": "false", "limit": limit},
@@ -195,8 +207,13 @@ class PolymarketClient:
             return []
 
         markets: list[Market] = []
+        sports_skipped = 0
         for raw in data:
             try:
+                question_lower = (raw.get("question") or "").lower()
+                if any(kw in question_lower for kw in _SPORTS_KEYWORDS):
+                    sports_skipped += 1
+                    continue
                 # Gamma API returns outcomes/prices/tokenIds as JSON strings
                 def _parse(field, default="[]"):
                     v = raw.get(field, default)
@@ -242,6 +259,8 @@ class PolymarketClient:
             except (KeyError, ValueError, TypeError, IndexError) as exc:
                 logger.debug(f"Skipping malformed market: {exc}")
 
+        if sports_skipped:
+            logger.debug(f"Skipped {sports_skipped} sports/team markets.")
         logger.info(f"Fetched {len(markets)} active markets from Gamma API.")
         return markets
 
