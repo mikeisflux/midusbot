@@ -88,11 +88,11 @@ class PolymarketBot:
         self._updown       = UpDownMomentumStrategy()
         self._btclevel     = BTCLevelStrategy()
         self._news         = NewsEventStrategy()
+        self._positions: dict[str, OpenPosition] = {}
         self._risk         = RiskManager(params=self._learner.risk_params, positions=self._positions)
         self._dashboard    = Dashboard(enabled=dashboard_enabled)
         self._dash_state   = DashboardState()
 
-        self._positions: dict[str, OpenPosition] = {}
         # Tokens opened via NewsArbitrageStrategy — routed to _news_learner
         self._news_token_ids: set[str] = set()
         self._news_trades_today: int = 0
