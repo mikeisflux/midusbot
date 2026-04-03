@@ -55,7 +55,7 @@ _READABLE_SOURCES = [
 
 DEFAULT_PARAMS: dict = {
     # ── Trading parameters (applied immediately to the strategy) ──────────
-    "signal_threshold":    0.0002,   # min |window_return| to trade
+    "signal_threshold":    0.0001,   # min |window_return| to trade
     "min_trend_score":     0.0,      # min consecutive-window trend score
     "skip_assets":         [],       # assets to stop trading
     "prefer_assets":       [],       # assets to prioritise
@@ -63,7 +63,7 @@ DEFAULT_PARAMS: dict = {
     "kelly_override":      None,     # override kelly fraction (None = use config)
     "time_of_day_skip":    [],       # UTC hours (0-23) to not trade
     "asset_thresholds":    {},       # per-asset threshold overrides e.g. {"HYPE": 0.002}
-    "min_price_history_s": 120,      # require N seconds of price history before trading
+    "min_price_history_s": 60,       # require N seconds of price history before trading
 
     # ── Self-improvement state ─────────────────────────────────────────────
     "analysis_strategy":   "",       # LLM's own evolving analytical method
