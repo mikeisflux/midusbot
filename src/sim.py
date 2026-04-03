@@ -17,7 +17,7 @@ from loguru import logger
 
 DATA_DIR = Path("data")
 SIM_FILE  = DATA_DIR / "journal_sim.json"
-STARTING_BALANCE = 500.0
+STARTING_BALANCE = 49.48
 
 
 @dataclass
