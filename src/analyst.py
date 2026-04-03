@@ -55,7 +55,7 @@ _READABLE_SOURCES = [
 
 DEFAULT_PARAMS: dict = {
     # ── Trading parameters (applied immediately to the strategy) ──────────
-    "signal_threshold":    0.0008,   # min |window_return| to trade
+    "signal_threshold":    0.0002,   # min |window_return| to trade
     "min_trend_score":     0.0,      # min consecutive-window trend score
     "skip_assets":         [],       # assets to stop trading
     "prefer_assets":       [],       # assets to prioritise
