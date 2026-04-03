@@ -46,6 +46,7 @@ from typing import Any
 
 import numpy as np
 from loguru import logger
+from src.utils import atomic_json_write
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -375,8 +376,7 @@ class AdaptiveLearner:
 
     def _save_journal(self) -> None:
         try:
-            with open(self._journal_file, "w") as f:
-                json.dump([r.to_dict() for r in self._journal], f, indent=2)
+            atomic_json_write(self._journal_file, [r.to_dict() for r in self._journal])
         except Exception as exc:
             logger.error(f"[Learner] Failed to save journal: {exc}")
 
@@ -388,8 +388,7 @@ class AdaptiveLearner:
                 "adaptation_count": self._adaptation_count,
                 "saved_at": datetime.utcnow().isoformat(),
             }
-            with open(self._params_file, "w") as f:
-                json.dump(payload, f, indent=2)
+            atomic_json_write(self._params_file, payload)
         except Exception as exc:
             logger.error(f"[Learner] Failed to save params: {exc}")
 

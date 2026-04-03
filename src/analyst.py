@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 import requests
 from loguru import logger
+from src.utils import atomic_json_write
 
 if TYPE_CHECKING:
     from src.learner import AdaptiveLearner
@@ -102,7 +103,7 @@ def load_params() -> dict:
 
 def save_params(params: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _PARAMS_FILE.write_text(json.dumps(params, indent=2))
+    atomic_json_write(_PARAMS_FILE, params)
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ def _append_memory(entry: dict) -> None:
     mem = _load_memory()
     mem.append(entry)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _MEMORY_FILE.write_text(json.dumps(mem, indent=2))
+    atomic_json_write(_MEMORY_FILE, mem)
 
 
 def _memory_context(n_recent: int = 20) -> str:
@@ -146,7 +147,7 @@ def _append_history(entry: dict) -> None:
         except Exception:
             pass
     history.append(entry)
-    _HISTORY_FILE.write_text(json.dumps(history, indent=2))   # unlimited
+    atomic_json_write(_HISTORY_FILE, history)
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +359,26 @@ def _apply_patch(patch_code: str) -> bool:
                     shutil.copy2(bak, path)
             return False
         logger.warning(f"[ANALYST] Patch applied:\n{result.stdout[:500]}")
+
+        # Smoke-test: import all patched source files to catch subtle syntax/import errors
+        smoke_errors = []
+        for path in _READABLE_SOURCES:
+            if not path.endswith(".py"):
+                continue
+            check = subprocess.run(
+                [sys.executable, "-c", f"import py_compile; py_compile.compile('{path}', doraise=True)"],
+                capture_output=True, text=True, timeout=10,
+                cwd=Path(__file__).parent.parent,
+            )
+            if check.returncode != 0:
+                smoke_errors.append(f"{path}: {check.stderr[:200]}")
+        if smoke_errors:
+            logger.warning(f"[ANALYST] Smoke test failed — restoring backups:\n" + "\n".join(smoke_errors))
+            for path in _READABLE_SOURCES:
+                bak = _PATCH_BACKUP / f"{Path(path).name}.{ts}.bak"
+                if bak.exists():
+                    shutil.copy2(bak, path)
+            return False
 
         # Git-commit the change so there's a human-readable history
         try:

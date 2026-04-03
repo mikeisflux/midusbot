@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from loguru import logger
+from src.utils import atomic_json_write
 
 DATA_DIR = Path("data")
 SIM_FILE  = DATA_DIR / "journal_sim.json"
@@ -203,8 +204,7 @@ class SimPortfolio:
                 "open":    [asdict(t) for t in self._open.values()],
                 "closed":  [asdict(t) for t in self._closed[-500:]],
             }
-            with open(SIM_FILE, "w") as f:
-                json.dump(payload, f, indent=2)
+            atomic_json_write(SIM_FILE, payload)
         except Exception as exc:
             logger.warning(f"[SIM] Save failed: {exc}")
 

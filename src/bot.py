@@ -42,6 +42,7 @@ from src.strategy import (
 )
 from src.trend import TrendTracker
 from src.sim import SimPortfolio
+from src.utils import alerter
 import config
 import src.webui as webui
 
@@ -202,14 +203,17 @@ class PolymarketBot:
                     self._loop_once()
                 except Exception as exc:
                     logger.exception(f"Unhandled error: {exc}")
+                    alerter.send(f"Unhandled error in loop: `{exc}`", level="warning")
 
                 self._refresh_dashboard()
                 self._check_performance_guard()
+                self._check_daily_loss_alert()
 
                 if self._running:
                     self._smart_sleep()
         finally:
             self._dashboard.stop()
+            alerter.send("Bot stopped.", level="warning")
 
         logger.info("Bot stopped.")
 
@@ -255,6 +259,11 @@ class PolymarketBot:
         msg = f"[AUTO-SWITCH] → {mode}  reason: {reason}"
         logger.warning(msg)
         self._dash_state.add_exec_log("info", msg)
+        alerter.send(
+            f"Mode switched to *{mode}*\nReason: {reason}\n"
+            f"Balance: ${self._dash_state.wallet_balance:.2f} USDC",
+            level="warning" if dry_run else "info",
+        )
 
     def _check_performance_guard(self) -> None:
         """Auto-switch live ↔ dry-run based on recent win rate."""
@@ -1347,6 +1356,26 @@ class PolymarketBot:
             self._risk.set_wallet_balance(balance)
         else:
             logger.debug("Wallet balance unavailable (no auth or dry-run)")
+
+    _DAILY_LOSS_ALERT_PCT = 0.10   # alert if daily P&L drops below -10% of wallet
+    _daily_loss_alerted   = False
+
+    def _check_daily_loss_alert(self) -> None:
+        """Send one alert per day if daily P&L exceeds the loss threshold."""
+        wallet = self._dash_state.wallet_balance or self._dash_state._seed
+        if wallet <= 0:
+            return
+        daily_pnl = self._dash_state.daily_pnl
+        loss_pct   = daily_pnl / wallet
+        if loss_pct < -self._DAILY_LOSS_ALERT_PCT and not self._daily_loss_alerted:
+            self._daily_loss_alerted = True
+            alerter.send(
+                f"Daily loss alert: P&L ${daily_pnl:.2f} ({loss_pct:.1%}) "
+                f"on ${wallet:.2f} wallet",
+                level="critical",
+            )
+        elif loss_pct >= 0:
+            self._daily_loss_alerted = False   # reset for next day
 
     @staticmethod
     def _secs_until_next_window(window_mins: int = 5) -> float:

@@ -174,11 +174,12 @@ def _update_strategy_cache(symbol: str, price: float) -> None:
     try:
         import src.strategy as _strat
         now = time.time()
-        _strat._PRICE_CACHE[symbol] = (price, now)
-        hist = _strat._PRICE_HISTORY.setdefault(symbol, [])
-        hist.append((price, now))
-        cutoff = now - _strat._HISTORY_WINDOW
-        _strat._PRICE_HISTORY[symbol] = [(p, t) for p, t in hist if t >= cutoff]
+        with _strat._PRICE_LOCK:
+            _strat._PRICE_CACHE[symbol] = (price, now)
+            hist = _strat._PRICE_HISTORY.setdefault(symbol, [])
+            hist.append((price, now))
+            cutoff = now - _strat._HISTORY_WINDOW
+            _strat._PRICE_HISTORY[symbol] = [(p, t) for p, t in hist if t >= cutoff]
     except Exception:
         pass
 
@@ -187,7 +188,8 @@ def _update_exchange_pressure(symbol: str, pressure: float) -> None:
     """Write Binance bid/ask imbalance into strategy._EXCHANGE_PRESSURE."""
     try:
         import src.strategy as _strat
-        _strat._EXCHANGE_PRESSURE[symbol] = pressure
+        with _strat._PRICE_LOCK:
+            _strat._EXCHANGE_PRESSURE[symbol] = pressure
     except Exception:
         pass
 

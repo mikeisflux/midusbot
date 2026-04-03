@@ -12,6 +12,7 @@ import requests
 from loguru import logger
 
 import config
+from src.utils import CircuitBreaker
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -110,6 +111,10 @@ class PolymarketClient:
 
     _RETRY_DELAYS = (2, 4, 8)  # seconds
 
+    # Circuit breakers — open after 5 consecutive failures, reset after 60s
+    _cb_gamma = CircuitBreaker("Gamma API", failure_threshold=5, reset_secs=60)
+    _cb_clob  = CircuitBreaker("CLOB API",  failure_threshold=5, reset_secs=60)
+
     def __init__(self) -> None:
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
@@ -167,13 +172,18 @@ class PolymarketClient:
     # ------------------------------------------------------------------
 
     def _get(self, url: str, params: dict | None = None) -> Any:
+        cb = self._cb_clob if "clob.polymarket" in url else self._cb_gamma
+        if not cb.allow():
+            return None
         for attempt, delay in enumerate((*self._RETRY_DELAYS, None), 1):
             try:
                 resp = self._session.get(url, params=params, timeout=15)
                 resp.raise_for_status()
+                cb.success()
                 return resp.json()
             except Exception as exc:
                 if delay is None:
+                    cb.failure()
                     logger.error(f"GET {url} failed after all retries: {exc}")
                     return None
                 logger.warning(f"GET {url} attempt {attempt} failed: {exc} — retrying in {delay}s")

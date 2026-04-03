@@ -104,6 +104,10 @@ _CACHE_TTL = 2.0   # seconds
 _PRICE_HISTORY: dict[str, list[tuple[float, float]]] = {}
 _HISTORY_WINDOW = 5400  # keep 90 minutes of ticks — supports 12+ completed 5-min windows
 
+# Lock protecting all price globals — written by BinanceWSFeed thread, read by main loop
+import threading as _threading
+_PRICE_LOCK = _threading.RLock()
+
 
 def _fetch_price(symbol: str) -> float | None:
     """Fetch live price for any supported symbol (cached 2 s)."""
@@ -159,7 +163,8 @@ def _price_momentum(symbol: str, window_secs: int) -> float | None:
     Returns the % price change over the last `window_secs` seconds.
     Positive = rising, negative = falling. None if insufficient history.
     """
-    hist = _PRICE_HISTORY.get(symbol.upper(), [])
+    with _PRICE_LOCK:
+        hist = list(_PRICE_HISTORY.get(symbol.upper(), []))
     now = time.time()
     window = [(p, t) for p, t in hist if now - t <= window_secs * 1.25]
     if len(window) < 2:
@@ -194,7 +199,8 @@ def _window_return(symbol: str, secs_in: int) -> float | None:
     Returns None if no tick within 25 seconds of the target time.
     """
     sym = symbol.upper()
-    hist = _PRICE_HISTORY.get(sym, [])
+    with _PRICE_LOCK:
+        hist = list(_PRICE_HISTORY.get(sym, []))
     if len(hist) < 2:
         return None
     now = time.time()
@@ -221,7 +227,8 @@ def _consecutive_window_trend(symbol: str, n_windows: int = 12) -> float | None:
     Uses price history ticks. Requires at least 2 valid window samples.
     """
     sym = symbol.upper()
-    hist = _PRICE_HISTORY.get(sym, [])
+    with _PRICE_LOCK:
+        hist = list(_PRICE_HISTORY.get(sym, []))
     if len(hist) < 10:
         return None
     now = time.time()
