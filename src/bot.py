@@ -207,7 +207,7 @@ class PolymarketBot:
                 self._check_performance_guard()
 
                 if self._running:
-                    time.sleep(config.LOOP_INTERVAL_SECONDS)
+                    self._smart_sleep()
         finally:
             self._dashboard.stop()
 
@@ -874,9 +874,12 @@ class PolymarketBot:
                 self._queue_sim(sig, limit_price, shares)
 
             tag = "[LATENCY-ARB] " if sig.is_latency_arb else ""
+            # Seconds since the last 5-min boundary = how late into the window we entered
+            secs_since_open = time.time() % 300
             logger.info(
                 f"  {tag}Opened {sig.side}: {shares:.2f}@{actual_entry:.4f} "
-                f"= ${actual_cost:.2f}  [{sig.confidence}]"
+                f"= ${actual_cost:.2f}  [{sig.confidence}]  "
+                f"[t+{secs_since_open:.1f}s into window]"
             )
             return True
 
@@ -1342,6 +1345,58 @@ class PolymarketBot:
             self._risk.set_wallet_balance(balance)
         else:
             logger.debug("Wallet balance unavailable (no auth or dry-run)")
+
+    @staticmethod
+    def _secs_until_next_window(window_mins: int = 5) -> float:
+        """
+        Returns seconds until the next N-minute boundary (e.g. :00, :05, :10…).
+        Used to time burst-entry loops so we hit the market the instant it opens.
+        """
+        now = time.time()
+        window_secs = window_mins * 60
+        return window_secs - (now % window_secs)
+
+    def _smart_sleep(self) -> None:
+        """
+        Adaptive sleep between bot loops.
+
+        Normal cadence  : sleep LOOP_INTERVAL_SECONDS (default 15s).
+        Window-open burst: when a 5-min boundary is ≤ BURST_LEAD_SECS away,
+                           sleep only until that boundary fires, then run
+                           BURST_LOOPS rapid loops spaced BURST_INTERVAL_SECS
+                           apart so we catch the new market within ~1 second.
+
+        This ensures at least one loop runs within 1-2s of each new window
+        opening — capturing the maximum oracle-lag edge before market makers
+        reprice.
+        """
+        BURST_LEAD_SECS     = 6    # start burst mode this many secs before boundary
+        BURST_LOOPS         = 4    # rapid loops after boundary
+        BURST_INTERVAL_SECS = 1.5  # gap between burst loops
+
+        secs_to_boundary = self._secs_until_next_window(5)
+
+        if secs_to_boundary <= BURST_LEAD_SECS:
+            # Sleep right up to the boundary
+            wait = max(0.05, secs_to_boundary - 0.1)  # 100ms early to account for lag
+            logger.debug(
+                f"[BURST] Window opens in {secs_to_boundary:.1f}s — "
+                f"sleeping {wait:.1f}s then firing {BURST_LOOPS} rapid loops"
+            )
+            time.sleep(wait)
+            # Fire BURST_LOOPS fast loops
+            for i in range(BURST_LOOPS):
+                if not self._running:
+                    break
+                try:
+                    self._loop_once()
+                except Exception as exc:
+                    logger.exception(f"Unhandled error in burst loop {i}: {exc}")
+                self._refresh_dashboard()
+                if i < BURST_LOOPS - 1:
+                    time.sleep(BURST_INTERVAL_SECS)
+        else:
+            time.sleep(config.LOOP_INTERVAL_SECONDS)
 
     def _shutdown(self, *_) -> None:
         logger.info("Shutdown signal received…")
