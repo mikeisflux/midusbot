@@ -418,6 +418,7 @@ class PolymarketBot:
             sig.hours_to_close = hours_to_close
             if ob:
                 sig.best_ask = ob.best_ask
+                sig.best_bid = ob.best_bid
 
             signals_found += 1
             self._dash_state.push_signal(sig)
@@ -831,10 +832,11 @@ class PolymarketBot:
 
             # Record to sim portfolio (real-price paper trading)
             # Entry price: real ask for YES, implied NO ask (1-best_bid) for NO
+            # sig.best_ask is set from ob before _execute_signal is called
             if sig.side == "YES":
-                sim_entry = ob.best_ask if ob and ob.best_ask > 0.01 else limit_price
+                sim_entry = sig.best_ask if sig.best_ask and sig.best_ask > 0.01 else limit_price
             else:
-                sim_entry = (1.0 - ob.best_bid) if ob and ob.best_bid > 0 else limit_price
+                sim_entry = (1.0 - sig.best_bid) if sig.best_bid and sig.best_bid > 0 else limit_price
             sim_entry = round(max(0.01, min(0.99, sim_entry)), 4)
             sim_shares = round(actual_cost / sim_entry, 4) if sim_entry > 0 else shares
             self._sim.open_position(
