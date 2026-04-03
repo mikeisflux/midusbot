@@ -53,7 +53,12 @@ _READABLE_SOURCES = [
     "src/feeds.py",
     "src/learner.py",
     "src/analyst.py",
+    "src/client.py",
+    "src/trend.py",
+    "src/dashboard.py",
+    "src/webui.py",
     "config.py",
+    "main.py",
 ]
 
 # ---------------------------------------------------------------------------
@@ -452,9 +457,10 @@ CODE PATCH (use whenever parameters alone can't make real difference):
   take effect immediately. Use this for any structural improvement —
   new signals, better filters, bug fixes, algorithm changes.
   The script runs from the project root with full filesystem access.
-  Source files you can read and rewrite:
+  Source files you can read and rewrite (ALL project files):
     src/strategy.py, src/bot.py, src/risk.py, src/sim.py,
-    src/feeds.py, src/learner.py, src/analyst.py, config.py
+    src/feeds.py, src/learner.py, src/analyst.py, src/client.py,
+    src/trend.py, src/dashboard.py, src/webui.py, config.py, main.py
   HOW TO PATCH: read the file, modify the string, write it back:
     with open('src/strategy.py') as f: code = f.read()
     code = code.replace('OLD_LINE', 'NEW_LINE')
