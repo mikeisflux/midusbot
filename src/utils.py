@@ -161,16 +161,24 @@ class Alerter:
             if self._discord:
                 channels.append("Discord")
             logger.info(f"[Alerter] Active on: {', '.join(channels)}")
+            # Send a startup ping so we know alerts are working
+            self.send("Bot started ✓", level="info", blocking=True)
 
-    def send(self, text: str, level: str = "info") -> None:
-        """Non-blocking alert. level: 'info' | 'warning' | 'critical'"""
+    def send(self, text: str, level: str = "info", blocking: bool = False) -> None:
+        """
+        Send an alert. blocking=True waits for delivery (use for shutdown/startup).
+        Non-blocking by default so alerts never delay the trading loop.
+        """
         if not self._enabled:
             return
         prefix = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(level, "ℹ️")
         msg = f"{prefix} *MIDUSBOT* — {text}"
-        threading.Thread(
-            target=self._send_sync, args=(msg,), daemon=True, name="alerter"
-        ).start()
+        if blocking:
+            self._send_sync(msg)
+        else:
+            threading.Thread(
+                target=self._send_sync, args=(msg,), daemon=True, name="alerter"
+            ).start()
 
     def _send_sync(self, msg: str) -> None:
         import requests as _req

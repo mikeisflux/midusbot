@@ -213,7 +213,7 @@ class PolymarketBot:
                     self._smart_sleep()
         finally:
             self._dashboard.stop()
-            alerter.send("Bot stopped.", level="warning")
+            alerter.send("Bot stopped.", level="warning", blocking=True)
 
         logger.info("Bot stopped.")
 
