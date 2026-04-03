@@ -34,6 +34,7 @@ app      = Flask(__name__)
 _state:   DashboardState | None = None
 _learner: AdaptiveLearner | None = None
 _close_position_fn = None   # injected by bot: fn(token_id) -> bool
+_sim: "SimPortfolio | None" = None
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -396,17 +397,19 @@ def _build(s: DashboardState) -> dict:
         },
         "learned": s.learned,
         "learning_progress": _learning_progress(),
+        "sim": s.sim_stats if s.sim_stats else {},
     }
 
 # ---------------------------------------------------------------------------
 # Start helper
 # ---------------------------------------------------------------------------
 
-def start(state: DashboardState, port: int = 8080, learner: AdaptiveLearner | None = None, close_position_fn=None) -> None:
-    global _state, _learner, _close_position_fn
+def start(state: DashboardState, port: int = 8080, learner: AdaptiveLearner | None = None, close_position_fn=None, sim=None) -> None:
+    global _state, _learner, _close_position_fn, _sim
     _state              = state
     _learner            = learner
     _close_position_fn  = close_position_fn
+    _sim                = sim
     t = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False),
         daemon=True,
@@ -524,6 +527,37 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 .k-scan      {color:#2a4060;     border-left-color:transparent!important}
 .k-info      {color:var(--dim);  border-left-color:transparent!important}
 .k-arb       {color:var(--purple);border-left-color:var(--purple)!important}
+
+/* ── SIMULATION PANEL ── */
+#sim-panel{
+  border-top:1px solid var(--border);background:var(--bg2);
+  padding:10px 20px 14px;
+}
+#sim-header{
+  display:flex;align-items:center;justify-content:space-between;
+  font-size:10px;color:var(--blue);letter-spacing:.08em;font-weight:600;
+  text-transform:uppercase;padding-bottom:8px;
+}
+#sim-stats-row{display:flex;gap:20px;font-size:10px;color:var(--dim)}
+.sim-val{color:var(--fg);font-weight:600}
+#sim-body{display:grid;grid-template-columns:1fr 1fr;gap:12px;min-height:130px}
+#sim-chart-wrap{position:relative;height:130px}
+#sim-trades-list{
+  font-size:10px;font-family:monospace;overflow-y:auto;max-height:130px;
+  display:flex;flex-direction:column;gap:3px;
+}
+.sim-row{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:3px 6px;border-radius:2px;background:var(--bg);
+  border-left:2px solid var(--border);
+}
+.sim-row.win{border-left-color:var(--green)}
+.sim-row.loss{border-left-color:var(--red)}
+.sim-row .sim-q{color:var(--dim);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:260px}
+.sim-row .sim-side{font-weight:700;margin:0 6px;min-width:24px}
+.sim-row .sim-p{font-weight:700;min-width:52px;text-align:right}
+.sim-row.win .sim-p{color:var(--green)}
+.sim-row.loss .sim-p{color:var(--red)}
 
 /* ── FOOTER ── */
 #footer{
@@ -657,6 +691,26 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 
 </div>
 
+<!-- SIMULATION PORTFOLIO PANEL -->
+<div id="sim-panel">
+  <div id="sim-header">
+    <span>SIMULATION PORTFOLIO <span class="d">// virtual $100 • real prices</span></span>
+    <div id="sim-stats-row">
+      <span>balance: <span id="sim-wallet" class="sim-val">$100.00</span></span>
+      <span>p&amp;l: <span id="sim-pnl" class="sim-val">$0.00</span></span>
+      <span>trades: <span id="sim-trades" class="sim-val">0</span></span>
+      <span>win rate: <span id="sim-wr" class="sim-val">0.0%</span></span>
+      <span>open: <span id="sim-open" class="sim-val">0</span></span>
+    </div>
+  </div>
+  <div id="sim-body">
+    <div id="sim-chart-wrap">
+      <canvas id="sim-chart"></canvas>
+    </div>
+    <div id="sim-trades-list"></div>
+  </div>
+</div>
+
 <!-- FOOTER -->
 <div id="footer">
   <div id="f-refresh">last update: <span id="f-time">—</span></div>
@@ -726,6 +780,50 @@ try {
 } catch(chartErr) {
   document.getElementById('chart-wrap').innerHTML = '<div style="color:#4a6070;padding:20px;font-size:11px">Chart unavailable</div>';
 }
+
+// ── SIM CHART ──────────────────────────────────────────────────────────────
+var simChart = null;
+try {
+  var sctx = document.getElementById('sim-chart').getContext('2d');
+  simChart = new Chart(sctx, {
+    type: 'line',
+    data: {
+      datasets: [{
+        data: [],
+        borderColor: '#00e676',
+        borderWidth: 1.5,
+        backgroundColor: 'rgba(0,230,118,0.06)',
+        fill: true,
+        pointRadius: 0,
+        tension: 0.2,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      scales: {
+        x: {
+          type: 'time',
+          time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } },
+          grid: { color: '#0f1a24' },
+          ticks: { color: '#2a4060', maxTicksLimit: 4, font: { size: 9 } },
+          border: { color: '#1c2a38' }
+        },
+        y: {
+          grid: { color: '#0f1a24' },
+          ticks: {
+            color: '#2a4060',
+            font: { size: 9 },
+            callback: function(v) { return '$' + v.toFixed(0); }
+          },
+          border: { color: '#1c2a38' }
+        }
+      }
+    }
+  });
+} catch(e) {}
 
 // ── HELPERS ──────────────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
@@ -854,6 +952,31 @@ async function refresh() {
       else           { badge.style.display = 'none';   $('lb-ready-val').style.display = 'inline'; }
     } else if (learnWrap) {
       learnWrap.classList.remove('visible');
+    }
+
+    // Sim portfolio panel
+    if (d.sim && Object.keys(d.sim).length) {
+      const sim = d.sim;
+      const simPnl = sim.total_pnl || 0;
+      setC('sim-wallet', '$' + (sim.wallet || 100).toFixed(2), 'sim-val b');
+      setC('sim-pnl',    (simPnl >= 0 ? '+' : '') + '$' + Math.abs(simPnl).toFixed(2), 'sim-val ' + cc(simPnl));
+      setC('sim-trades', sim.total_trades || 0);
+      setC('sim-wr',     ((sim.win_rate || 0) * 100).toFixed(1) + '%', 'sim-val ' + ((sim.total_trades || 0) > 3 ? ((sim.win_rate||0) >= 0.5 ? 'g' : 'r') : 'd'));
+      setC('sim-open',   sim.open_positions || 0);
+      const tradesList = $('sim-trades-list');
+      if (tradesList && sim.recent_trades && sim.recent_trades.length) {
+        tradesList.innerHTML = sim.recent_trades.slice(0, 5).map(t =>
+          `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid var(--border);font-size:10px">` +
+          `<span class="d" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(t.question)}</span>` +
+          `<span style="margin:0 6px;color:${t.side==='YES'?'var(--green)':'var(--red)'}">${t.side}</span>` +
+          `<span class="${t.win ? 'g' : 'r'}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</span>` +
+          `</div>`
+        ).join('');
+      }
+      if (simChart && sim.equity_curve && sim.equity_curve.length) {
+        simChart.data.datasets[0].data = sim.equity_curve.map(p => ({ x: p.t, y: p.v }));
+        simChart.update('none');
+      }
     }
 
     // Footer

@@ -39,6 +39,7 @@ from src.strategy import (
     _detect_updown_market,
 )
 from src.trend import TrendTracker
+from src.sim import SimPortfolio
 import config
 import src.webui as webui
 
@@ -89,6 +90,7 @@ class PolymarketBot:
 
         # Live data feeds
         self._price_feed = BinanceWSFeed()
+        self._sim = SimPortfolio()
 
         # Simulation queue — pending dry-run trades waiting for synthetic fill
         self._sim_queue: list[dict] = []
@@ -116,7 +118,7 @@ class PolymarketBot:
 
         # Start web UI immediately so the browser is never refused while
         # the slow startup tasks (reconcile, balance fetch) run below.
-        webui.start(self._dash_state, port=8080, learner=self._learner, close_position_fn=self._close_position)
+        webui.start(self._dash_state, port=8080, learner=self._learner, close_position_fn=self._close_position, sim=self._sim)
 
         # Cancel any stale open orders left from previous runs
         if not config.DRY_RUN:
@@ -840,6 +842,23 @@ class PolymarketBot:
                 dry_run=config.DRY_RUN,
             )
 
+            # Record to sim portfolio (real-price paper trading)
+            # Entry price: real ask for YES, implied NO ask (1-best_bid) for NO
+            if sig.side == "YES":
+                sim_entry = ob.best_ask if ob and ob.best_ask > 0.01 else limit_price
+            else:
+                sim_entry = (1.0 - ob.best_bid) if ob and ob.best_bid > 0 else limit_price
+            sim_entry = round(max(0.01, min(0.99, sim_entry)), 4)
+            sim_shares = round(actual_cost / sim_entry, 4) if sim_entry > 0 else shares
+            self._sim.open_position(
+                token_id=sig.token_id,
+                market_id=sig.market_id,
+                question=sig.question,
+                side=sig.side,
+                entry_price=sim_entry,
+                shares=sim_shares,
+            )
+
             # Queue a simulated fill for dry-run mode so the UI shows activity
             if config.DRY_RUN:
                 self._queue_sim(sig, limit_price, shares)
@@ -923,6 +942,9 @@ class PolymarketBot:
                 # Last resort: Gaussian noise around fair value (rarely reached)
                 noise      = random.gauss(0, 0.018)
                 exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
+            # Close the corresponding sim portfolio position
+            self._sim.close_position(sim["token_id"], exit_price)
+
             gross_pnl  = round(sim["shares"] * (exit_price - sim["entry"]), 4)
             entry_usdc = sim["shares"] * sim["entry"]
             exit_usdc  = sim["shares"] * exit_price
@@ -952,7 +974,8 @@ class PolymarketBot:
     # ------------------------------------------------------------------
 
     def _refresh_dashboard(self) -> None:
-        self._dash_state.learned = self._learner.get_dashboard_dict()
+        self._dash_state.learned   = self._learner.get_dashboard_dict()
+        self._dash_state.sim_stats = self._sim.get_stats()
         self._dashboard.refresh(self._dash_state)
 
     # ------------------------------------------------------------------

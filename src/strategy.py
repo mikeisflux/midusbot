@@ -161,6 +161,29 @@ def _price_momentum_15s(symbol: str) -> float | None:
     return _price_momentum(symbol, 15)
 
 
+def _window_return(symbol: str, secs_in: int) -> float | None:
+    """
+    Price change from exactly secs_in seconds ago (≈ window open) to now.
+    Uses nearest-tick lookup so we don't accidentally grab pre-window prices.
+    Returns None if no tick within 25 seconds of the target time.
+    """
+    sym = symbol.upper()
+    hist = _PRICE_HISTORY.get(sym, [])
+    if len(hist) < 2:
+        return None
+    now = time.time()
+    target = now - secs_in
+    # Find the tick whose timestamp is closest to the window-start reference
+    best = min(hist, key=lambda x: abs(x[1] - target))
+    if abs(best[1] - target) > 25:   # reject if off by more than 25s
+        return None
+    ref_price = best[0]
+    cur_price = hist[-1][0]
+    if ref_price <= 0:
+        return None
+    return (cur_price - ref_price) / ref_price
+
+
 # Assets that BTC leads (moves before them in correlated markets)
 _BTC_LED_ALTS = frozenset({"ETH", "SOL", "XRP", "DOGE", "BNB"})
 
@@ -453,7 +476,10 @@ class UpDownMomentumStrategy:
         # After 75s the market makers have already repriced to fair value.
         # If end_date is unparseable, skip entirely — don't trade blind.
         secs_in = _market_seconds_into_window(market)
-        if secs_in is None or secs_in < 15 or secs_in > 75:
+        # Allow entry from 5s (enough data) to 240s (4 min into 5-min window).
+        # The entry-price guard (mid > 0.62) handles "too late" cases — if the
+        # market has already repriced, the price cap kills the signal.
+        if secs_in is None or secs_in < 5 or secs_in > 240:
             return None
 
         # Warm up price history
@@ -472,11 +498,11 @@ class UpDownMomentumStrategy:
         # This is EXACTLY what the oracle measures. If it's positive → YES is
         # already ahead; negative → NO is already ahead. The Polymarket price
         # is still 0.50 (oracle lag) → we have edge.
-        window_return = _price_momentum(symbol, int(secs_in))
+        window_return = _window_return(symbol, int(secs_in))
         if window_return is None or abs(window_return) < _MIN_WINDOW_RETURN_PCT:
             logger.debug(
-                f"[UPDOWN SKIP] {symbol} window_return={window_return} "
-                f"< min {_MIN_WINDOW_RETURN_PCT:.4%}  t={secs_in:.0f}s"
+                f"[UPDOWN SKIP] {symbol} win_ret={window_return}  "
+                f"min={_MIN_WINDOW_RETURN_PCT:.4%}  t={secs_in:.0f}s"
             )
             return None
 
@@ -583,7 +609,7 @@ class TrendFollowStrategy:
 
         # Strict timing: same window as UpDownMomentumStrategy
         secs_in = _market_seconds_into_window(market)
-        if secs_in is None or secs_in < 15 or secs_in > 75:
+        if secs_in is None or secs_in < 5 or secs_in > 240:
             return None
 
         streak = self._tracker.get_streak(symbol)
@@ -605,7 +631,7 @@ class TrendFollowStrategy:
         # Window-relative confirmation: the current price must agree with trend
         # direction. If trend says UP but window return is DOWN (price is below
         # window-start reference), the trend is working against us — sit out.
-        window_return = _price_momentum(symbol, int(secs_in))
+        window_return = _window_return(symbol, int(secs_in))
         if window_return is None:
             return None
         window_dir = "UP" if window_return > 0 else "DOWN"

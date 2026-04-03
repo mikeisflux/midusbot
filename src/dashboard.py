@@ -85,6 +85,9 @@ class DashboardState:
         # Learned params (dict from learner)
         self.learned: dict = {}
 
+        # Simulation portfolio stats (from SimPortfolio.get_stats())
+        self.sim_stats: dict = {}
+
         # Web UI extras
         self.equity_curve: list[dict] = []   # [{"t": ms, "v": portfolio_value}, ...]
         self.exec_log: list[dict] = []        # [{"ts": "HH:MM:SS", "kind": str, "text": str}, ...]
