@@ -61,10 +61,11 @@ class RiskManager:
 
     def position_size(self, signal: TradeSignal) -> float:
         """Returns the USDC to spend. 0.0 = skip trade."""
-        # Daily loss breaker — use actual bank for denominator; use loose cap
-        # in dry-run so the bot can keep learning from losses.
-        bank = self._wallet_balance if self._wallet_balance > 0 else config.MAX_TOTAL_EXPOSURE_USDC
-        daily_pnl_pct = self._daily_pnl / bank if bank else 0
+        # Daily loss breaker — always use MAX_TOTAL_EXPOSURE_USDC as the
+        # reference so the cap stays stable as sim equity fluctuates.
+        # A shrinking sim wallet would cause increasingly sensitive caps.
+        ref = config.MAX_TOTAL_EXPOSURE_USDC
+        daily_pnl_pct = self._daily_pnl / ref if ref else 0
         cap = DEFAULT_DAILY_LOSS_CAP_DRYRUN if config.DRY_RUN else DEFAULT_DAILY_LOSS_CAP_LIVE
         if daily_pnl_pct <= cap:
             logger.warning(f"Daily loss cap hit ({daily_pnl_pct:.1%}) — no new trades until reset.")

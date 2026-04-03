@@ -1003,10 +1003,11 @@ class PolymarketBot:
         self._sim_queue = still_open
         self._save_sim_queue()
 
-        # After settling, update the risk manager's bank to total sim equity
-        # (cash + remaining open exposure) so sizing reflects actual P&L.
+        # After settling, update the risk manager's bank using sim's own open
+        # positions so it correctly reflects current sim equity.
         if config.DRY_RUN:
-            sim_equity = self._sim._wallet + self._risk.total_exposure()
+            sim_open_cost = sum(t.cost_usdc for t in self._sim._open.values())
+            sim_equity = self._sim._wallet + sim_open_cost
             if sim_equity > 0:
                 self._risk.set_wallet_balance(sim_equity)
 
@@ -1300,12 +1301,13 @@ class PolymarketBot:
             self._dash_state.add_exec_log("info", f"Wallet: ${balance:.2f} USDC")
             self._sim.sync_starting_balance(balance)
 
-        # In dry-run, size based on total sim equity = cash + value of open
-        # positions. Using just sim._wallet would double-penalize capital
-        # (wallet is already depleted by open position costs).
+        # In dry-run, size based on total sim equity = cash + open position costs.
+        # Use sim._open (not self._positions) so we correctly account for
+        # positions loaded from a previous session's sim_queue.
         # In live mode, use the real wallet balance.
         if config.DRY_RUN:
-            sim_equity = self._sim._wallet + self._risk.total_exposure()
+            sim_open_cost = sum(t.cost_usdc for t in self._sim._open.values())
+            sim_equity = self._sim._wallet + sim_open_cost
             if sim_equity > 0:
                 self._risk.set_wallet_balance(sim_equity)
         elif balance is not None and balance > 0:
