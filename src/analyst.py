@@ -26,8 +26,8 @@ if TYPE_CHECKING:
     from src.learner import AdaptiveLearner
 
 OLLAMA_URL  = "http://localhost:11434"
-MODEL       = "qwen2.5-coder:1.5b"
-_OLD_MODELS = ["qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5-coder:3b"]  # delete these if present
+MODEL       = "qwen2.5-coder:3b"
+_OLD_MODELS = ["qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5-coder:1.5b"]  # delete these if present
 TIMEOUT_SEC = 90          # longer — bigger prompt + more output
 DATA_DIR    = Path("data")
 
