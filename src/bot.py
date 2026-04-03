@@ -399,7 +399,7 @@ class PolymarketBot:
             if sig is None:
                 logger.debug(
                     f"NO-SIGNAL \"{market.question[:55]}\"  "
-                    f"price={ob.mid:.3f if ob else 0:.3f}  ob={'yes' if ob else 'no'}"
+                    f"price={ob.mid if ob else 0:.3f}  ob={'yes' if ob else 'no'}"
                 )
                 continue
 
@@ -746,14 +746,13 @@ class PolymarketBot:
                 usdc = min(usdc * boost, config.MAX_POSITION_USDC)
                 logger.debug(f"Urgency boost {boost:.2f}× — {h:.1f}h to close")
 
-        # For markets closing within 1 hour, cross the spread to guarantee fill.
-        # For others, stay passive (limit at fair value) to avoid slippage.
-        if sig.hours_to_close is not None and sig.hours_to_close <= 1:
-            ask = sig.best_ask if sig.best_ask else sig.market_price * 1.02
-            limit_price = round(ask, 4)
-        else:
-            limit_price = round(min(sig.fair_value, sig.market_price * 1.01), 4)
-        limit_price = max(0.01, min(0.99, limit_price))
+        # Always limit to fair value — never cross the spread for UpDown binary
+        # markets.  The urgency-boost "use best_ask" path is dangerous: for NO
+        # trades it uses the YES order book's best_ask (wrong side), and for a
+        # thin CLOB that best_ask can be 1.0 → entry clamped to 0.99.
+        # Fair value is capped at 0.68 by the strategy so this is always safe.
+        limit_price = round(min(sig.fair_value, sig.market_price * 1.02), 4)
+        limit_price = max(0.01, min(0.68, limit_price))
         shares = self._risk.shares_from_usdc(usdc, limit_price)
 
         if shares < config.MIN_ORDER_SHARES:
@@ -875,6 +874,7 @@ class PolymarketBot:
 
         self._sim_queue.append({
             "question":    sig.question,
+            "market_id":   sig.market_id,
             "token_id":    sig.token_id,
             "side":        sig.side,
             "entry":       entry,
@@ -892,16 +892,35 @@ class PolymarketBot:
                 still_open.append(sim)
                 continue
 
-            # Use real current market price so learning reflects actual outcomes.
-            # Falls back to fair_value ± noise only if the order book is unavailable.
+            # Resolve the simulated trade using the real market outcome.
+            # Priority:
+            #   1. CLOB order book mid (fast, works while market is active)
+            #   2. CLOB market tokens endpoint (works AFTER resolution — gives 0.00 or 1.00)
+            #   3. Gaussian noise fallback (should rarely be needed)
             exit_price = None
             try:
                 ob = self._client.get_order_book(sim["token_id"])
-                if ob and ob.mid > 0.01:
+                if ob and 0.02 < ob.mid < 0.98:
                     exit_price = ob.mid
             except Exception:
                 pass
+
+            # For resolved markets the CLOB book disappears — use tokens endpoint
+            if exit_price is None and sim.get("market_id"):
+                try:
+                    mkt = self._client.get_clob_market(sim["market_id"])
+                    if mkt:
+                        for tok in mkt.get("tokens") or []:
+                            if str(tok.get("token_id", "")) == sim["token_id"]:
+                                p = float(tok.get("price") or 0)
+                                if p > 0:
+                                    exit_price = p
+                                    break
+                except Exception:
+                    pass
+
             if exit_price is None:
+                # Last resort: Gaussian noise around fair value (rarely reached)
                 noise      = random.gauss(0, 0.018)
                 exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
             gross_pnl  = round(sim["shares"] * (exit_price - sim["entry"]), 4)
