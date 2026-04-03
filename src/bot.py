@@ -515,14 +515,12 @@ class PolymarketBot:
             else:
                 current_price = ob.mid
 
-            # Auto-claim / auto-clear / stop-loss — LIVE mode only, and NEVER
-            # for externally-reconciled positions (is_external=True).
-            # External positions are only closed via the manual SELL button.
-            if not config.DRY_RUN and not pos.is_external:
+            # Auto-claim won positions and clear lost positions — runs for ALL
+            # positions (including reconciled/external). Only stop-loss and
+            # take-profit are skipped for external positions.
+            if not config.DRY_RUN:
                 # Auto-claim: token resolved in our favour (worth $1.00).
-                # Use manual=True so if both sell paths fail (resolved market
-                # has no CLOB orderbook), position is force-removed.
-                # Polymarket auto-credits resolved YES winnings on-chain.
+                # Calls on-chain redeemPositions if CLOB orderbook is gone.
                 if current_price >= 0.97:
                     logger.info(
                         f"AUTO-CLAIM: resolved YES @ ${current_price:.3f} "
@@ -534,9 +532,9 @@ class PolymarketBot:
                 # Auto-clear: token resolved against us (worth $0.00).
                 if current_price <= 0.03:
                     pnl = self._learner.record_close(token_id, current_price)
-                    self._risk.record_close(pnl_usdc=pnl, cost_usdc=pos.cost_usdc)
+                    cost = pos.cost_usdc if not pos.is_external else 0.0
+                    self._risk.record_close(pnl_usdc=pnl, cost_usdc=cost)
                     self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
-                    # Trend: our token went to 0 — we lost
                     symbol = _detect_updown_market(pos.question)
                     if symbol:
                         direction_bet = "UP" if pos.side == "YES" else "DOWN"
