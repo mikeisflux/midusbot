@@ -199,7 +199,7 @@ def _ensure_model() -> bool:
 # Journal helpers
 # ---------------------------------------------------------------------------
 
-def _format_journal(learner: "AdaptiveLearner", n: int = 40) -> list[dict]:
+def _format_journal(learner: "AdaptiveLearner", n: int = 20) -> list[dict]:
     journal = getattr(learner, "_journal", [])
     closed  = [r for r in journal if r.closed][-n:]
     rows = []
@@ -542,7 +542,7 @@ def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> s
     p.append(f"Last {total} trades: {wins}W / {total-wins}L ({wr:.1%})")
     p.append(f"\nAsset stats:\n{json.dumps(asset_stats, indent=2)}")
     p.append(f"\nWin rate by hour (UTC):\n{json.dumps(hour_stats, indent=2)}")
-    p.append(f"\nLast 20 trades:\n{json.dumps(rows[-20:], indent=2)}")
+    p.append(f"\nLast 10 trades:\n{json.dumps(rows[-10:], indent=2)}")
     p.append(f"\nCurrent parameters:\n{json.dumps({k: v for k, v in params.items() if not k.startswith('_') and k not in ('analysis_strategy','ww_mrd_action','trades_at_last_run','wins_at_last_run')}, indent=2)}")
     p.append("")
     p.append("Now apply WW_MRD: what ONE THING will make real difference? Do it.")
@@ -572,7 +572,7 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
     stats      = _asset_stats(rows)
     hours      = _hour_stats(rows)
     delta      = _perf_delta(rows, params)
-    memory_ctx = _memory_context(n_recent=30)   # last 30 memory entries
+    memory_ctx = _memory_context(n_recent=10)   # last 10 memory entries (keep prompt small)
     prompt     = _build_prompt(rows, stats, hours, params, delta, memory_ctx)
 
     try:
@@ -586,7 +586,7 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
                 "stream":  False,
                 "options": {
                     "temperature":  0.3,
-                    "num_predict":  768,   # more output for richer self-notes
+                    "num_predict":  400,   # keep under 180s timeout on 3B model
                 },
             },
             timeout=TIMEOUT_SEC,
