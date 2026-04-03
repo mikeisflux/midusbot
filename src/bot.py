@@ -156,6 +156,14 @@ class PolymarketBot:
         if not config.DRY_RUN:
             self._reconcile_positions()
 
+        # Purge orphaned sim portfolio positions (open in journal_sim.json but
+        # not in sim_queue — happens when sim_queue.json is cleared on reset).
+        for token_id in list(self._sim._open.keys()):
+            if not any(s["token_id"] == token_id for s in self._sim_queue):
+                logger.info(f"[SIM] Dropping orphaned open position {token_id[:16]}…")
+                self._sim._open.pop(token_id, None)
+        self._sim._save()
+
         # Purge stale "open" journal entries whose token is no longer tracked.
         # These accumulate when markets are abandoned mid-session (bot killed,
         # sell failed, etc.) and skew the learner with phantom open positions.
@@ -931,7 +939,7 @@ class PolymarketBot:
                         for tok in mkt.get("tokens") or []:
                             if str(tok.get("token_id", "")) == sim["token_id"]:
                                 p = float(tok.get("price") or 0)
-                                if p < 0.05 or p > 0.95:  # settled
+                                if p > 0.95 or (0.0 < p < 0.05):  # settled, not empty
                                     exit_price = p
                                 break
                 except Exception:
@@ -944,8 +952,9 @@ class PolymarketBot:
                         # Use best_bid: settled tokens have best_bid ~0.99 (win) or ~0.01 (loss).
                         # mid = (0.01+1.00)/2 = 0.505 for a settled market — do NOT use mid.
                         if ob.best_bid > 0.95:
-                            exit_price = ob.best_bid   # winner → ~0.99
-                        elif ob.best_bid < 0.05:
+                            exit_price = ob.best_bid        # winner → ~0.99
+                        elif 0.0 < ob.best_bid < 0.05:
+                            exit_price = ob.best_bid        # loser  → ~0.01 (NOT 0.0 = empty book)
                             exit_price = ob.best_bid   # loser  → ~0.01
                 except Exception:
                     pass
