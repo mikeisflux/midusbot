@@ -402,6 +402,8 @@ def _build(s: DashboardState) -> dict:
         "learned": s.learned,
         "learning_progress": _learning_progress(),
         "sim": s.sim_stats if s.sim_stats else {},
+        "entry_latencies": s.entry_latencies,
+        "next_window_secs": round(300 - (time.time() % 300), 1),
     }
 
 # ---------------------------------------------------------------------------
@@ -635,6 +637,11 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div class="stat-val r" id="s-fees">$0.00</div>
     <div class="stat-sub d">gas + maker fee</div>
   </div>
+  <div class="stat-block">
+    <div class="stat-lbl">Edge Interval</div>
+    <div class="stat-val" id="s-edge-avg">—</div>
+    <div class="stat-sub">avg t+<span id="s-edge-sub">—</span>s into window</div>
+  </div>
 </div>
 
 <!-- LEARNING PROGRESS BAR (dry-run only) -->
@@ -652,6 +659,8 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 <!-- INFO STRIP -->
 <div id="info">
   <div>BTC/USD <span id="i-btc" class="b">—</span></div>
+  <div class="sep">|</div>
+  <div>next window <span id="i-next-win" class="b">—</span></div>
   <div class="sep">|</div>
   <div>CLOB mid <span id="i-mid">—</span></div>
   <div>fair <span id="i-fair" class="g">—</span></div>
@@ -891,7 +900,22 @@ async function refresh() {
     setC('s-winsub',  d.performance.wins+'W / '+d.performance.total_trades+'T');
     setC('s-fees',    '-$' + fees.toFixed(4), 'stat-val r');
 
+    // Edge interval stat block
+    if (d.entry_latencies && d.entry_latencies.length > 0) {
+      const avg = d.entry_latencies.reduce((a,b)=>a+b,0) / d.entry_latencies.length;
+      const best = Math.min(...d.entry_latencies);
+      const cls = avg < 10 ? 'g' : avg < 20 ? '' : 'r';
+      setC('s-edge-avg', avg.toFixed(1)+'s', 'stat-val '+cls);
+      $('s-edge-sub').textContent = avg.toFixed(1);
+      $('s-edge-sub').title = 'best: '+best.toFixed(1)+'s  last '+d.entry_latencies.length+' trades';
+    }
+
     // Info strip
+    if (d.next_window_secs !== undefined) {
+      const nw = d.next_window_secs;
+      const cls = nw < 8 ? 'r b' : nw < 20 ? 'stat-val' : 'd';
+      setC('i-next-win', nw.toFixed(1)+'s', cls);
+    }
     setC('i-btc',    d.btc_price > 0 ? '$'+d.btc_price.toLocaleString(undefined,{maximumFractionDigits:0}) : '—');
     if (d.signals && d.signals.length) {
       const s = d.signals[0];

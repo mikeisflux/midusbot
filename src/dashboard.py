@@ -95,6 +95,7 @@ class DashboardState:
         self.orders_placed: int = 0
         self.btc_price: float = 0.0
         self.daily_pnl: float = 0.0
+        self.entry_latencies: list[float] = []  # secs-into-window for recent entries
         self._seed: float = config.MAX_TOTAL_EXPOSURE_USDC  # starting portfolio value
         self.wallet_balance: float = 0.0      # live wallet USDC (updated each loop in live mode)
 

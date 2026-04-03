@@ -876,6 +876,8 @@ class PolymarketBot:
             tag = "[LATENCY-ARB] " if sig.is_latency_arb else ""
             # Seconds since the last 5-min boundary = how late into the window we entered
             secs_since_open = time.time() % 300
+            self._dash_state.entry_latencies.append(round(secs_since_open, 1))
+            self._dash_state.entry_latencies = self._dash_state.entry_latencies[-20:]
             logger.info(
                 f"  {tag}Opened {sig.side}: {shares:.2f}@{actual_entry:.4f} "
                 f"= ${actual_cost:.2f}  [{sig.confidence}]  "
