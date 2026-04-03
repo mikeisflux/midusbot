@@ -1292,6 +1292,7 @@ class PolymarketBot:
                 self._dash_state._seed = balance
             logger.info(f"Wallet balance: ${balance:.2f} USDC")
             self._dash_state.add_exec_log("info", f"Wallet: ${balance:.2f} USDC")
+            self._sim.sync_starting_balance(balance)
         else:
             logger.debug("Wallet balance unavailable (no auth or dry-run)")
 

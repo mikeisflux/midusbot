@@ -54,6 +54,25 @@ class SimPortfolio:
     # Public API
     # ------------------------------------------------------------------
 
+    def sync_starting_balance(self, real_balance: float) -> None:
+        """
+        Align the sim wallet to the real wallet balance — only when the
+        journal is fresh (no closed trades and wallet == STARTING_BALANCE).
+        This lets the sim mirror exactly what the live wallet has today
+        without resetting mid-session.
+        """
+        if real_balance <= 0:
+            return
+        if self._closed:
+            return  # session already in progress — don't touch it
+        if abs(self._wallet - STARTING_BALANCE) > 0.01:
+            return  # journal was loaded with a different seed — leave it
+        if abs(self._wallet - real_balance) < 0.01:
+            return  # already in sync
+        self._wallet = round(real_balance, 6)
+        self._save()
+        logger.info(f"[SIM] Wallet synced to real balance: ${self._wallet:.2f}")
+
     def open_position(
         self, *,
         token_id:    str,
