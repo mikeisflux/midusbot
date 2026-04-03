@@ -1,12 +1,19 @@
 """
-LLM-based trade analyst — uses a local Ollama model to reason over the
-trade journal and suggest parameter improvements.
+LLM-based trade analyst with self-improvement.
 
-Requires Ollama running locally with a small model:
+The analyst runs after every adaptation cycle. It:
+  1. Reads recent trade outcomes
+  2. Reads its own previous decisions and self-notes
+  3. Evaluates whether its last suggestions helped or hurt
+  4. Adjusts trading parameters
+  5. Updates its own self-notes and analysis strategy for the next run
+
+This creates a feedback loop: the model refines BOTH trading parameters
+AND its own reasoning approach over time.
+
+Requires Ollama:
   curl -fsSL https://ollama.com/install.sh | sh
   ollama pull qwen2.5:1.5b
-
-If Ollama is not available, analysis is silently skipped.
 """
 from __future__ import annotations
 
@@ -23,32 +30,42 @@ if TYPE_CHECKING:
 
 OLLAMA_URL  = "http://localhost:11434"
 MODEL       = "qwen2.5:1.5b"
-TIMEOUT_SEC = 45
+TIMEOUT_SEC = 60
 DATA_DIR    = Path("data")
 
-
 # ---------------------------------------------------------------------------
-# Parameter schema the LLM can tune
+# Parameter schema
 # ---------------------------------------------------------------------------
 
 DEFAULT_PARAMS: dict = {
-    "signal_threshold":   0.0008,   # minimum |window_return| to trade
-    "min_trend_score":    0.0,      # minimum |consecutive_window_trend| to trade (0 = off)
-    "skip_assets":        [],       # asset symbols to avoid (e.g. ["HYPE"])
-    "prefer_assets":      [],       # assets to prefer when signal is close
-    "max_secs_in":        240,      # timing window upper bound
+    # Trading parameters (applied immediately to strategy)
+    "signal_threshold": 0.0008,
+    "min_trend_score":  0.0,
+    "skip_assets":      [],
+    "prefer_assets":    [],
+    "max_secs_in":      240,
+
+    # Self-improvement state (written by the LLM, read by the LLM)
+    "self_notes":          "",     # running observations about market behaviour
+    "analysis_strategy":   "",     # how the LLM has decided to analyse data
+    "wins_at_last_run":    0,
+    "trades_at_last_run":  0,
+
+    # Metadata
+    "_runs":           0,
+    "_last_run_at":    0,
+    "_last_reasoning": "",
 }
 
-_PARAMS_FILE = DATA_DIR / "analyst_params.json"
+_PARAMS_FILE  = DATA_DIR / "analyst_params.json"
+_HISTORY_FILE = DATA_DIR / "analyst_history.json"   # full run log
 
 
 def load_params() -> dict:
-    """Load analyst params from disk, falling back to defaults."""
     if _PARAMS_FILE.exists():
         try:
             stored = json.loads(_PARAMS_FILE.read_text())
-            merged = {**DEFAULT_PARAMS, **stored}
-            return merged
+            return {**DEFAULT_PARAMS, **stored}
         except Exception:
             pass
     return dict(DEFAULT_PARAMS)
@@ -59,8 +76,19 @@ def save_params(params: dict) -> None:
     _PARAMS_FILE.write_text(json.dumps(params, indent=2))
 
 
+def _append_history(entry: dict) -> None:
+    history = []
+    if _HISTORY_FILE.exists():
+        try:
+            history = json.loads(_HISTORY_FILE.read_text())
+        except Exception:
+            pass
+    history.append(entry)
+    _HISTORY_FILE.write_text(json.dumps(history[-50:], indent=2))  # keep last 50
+
+
 # ---------------------------------------------------------------------------
-# Ollama health check
+# Ollama helpers
 # ---------------------------------------------------------------------------
 
 def _ollama_available() -> bool:
@@ -72,15 +100,12 @@ def _ollama_available() -> bool:
 
 
 def _ensure_model() -> bool:
-    """Return True if the model is available (pulls if needed)."""
     try:
         r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-        tags = r.json().get("models", [])
-        names = [m.get("name", "") for m in tags]
+        names = [m.get("name", "") for m in r.json().get("models", [])]
         if any(MODEL in n for n in names):
             return True
-        # Model not present — pull it (takes a while on first run)
-        logger.info(f"[ANALYST] Pulling {MODEL} — this takes a few minutes on first run…")
+        logger.info(f"[ANALYST] Pulling {MODEL}…")
         resp = requests.post(
             f"{OLLAMA_URL}/api/pull",
             json={"name": MODEL, "stream": False},
@@ -93,122 +118,180 @@ def _ensure_model() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Journal formatting
+# Journal helpers
 # ---------------------------------------------------------------------------
 
-def _format_journal(learner: "AdaptiveLearner", n: int = 20) -> list[dict]:
+def _format_journal(learner: "AdaptiveLearner", n: int = 30) -> list[dict]:
     journal = getattr(learner, "_journal", [])
     closed  = [r for r in journal if r.closed][-n:]
     rows = []
     for r in closed:
         rows.append({
-            "asset":      _extract_asset(r.question),
-            "side":       r.side,
-            "entry":      round(r.entry_price, 4),
-            "exit":       round(r.exit_price, 4),
-            "pnl":        round(r.pnl_usdc, 4),
-            "win":        r.pnl_usdc > 0,
-            "momentum":   round(getattr(r, "momentum_signal", 0.0), 6),
-            "composite":  round(getattr(r, "composite_signal", 0.0), 4),
-            "ts":         int(getattr(r, "opened_at", 0)),
+            "asset":     _extract_asset(r.question),
+            "side":      r.side,
+            "entry":     round(r.entry_price, 4),
+            "exit":      round(r.exit_price, 4),
+            "pnl":       round(r.pnl_usdc, 4),
+            "win":       r.pnl_usdc > 0,
+            "momentum":  round(getattr(r, "momentum_signal", 0.0), 6),
+            "composite": round(getattr(r, "composite_signal", 0.0), 4),
+            "ts":        int(getattr(r, "opened_at", 0)),
         })
     return rows
 
 
 def _extract_asset(question: str) -> str:
     q = question.upper()
-    for sym in ["BITCOIN", "BTC"]:
-        if sym in q:
-            return "BTC"
-    for sym in ("ETHEREUM", "ETH"):
-        if sym in q:
-            return "ETH"
-    for sym in ("SOLANA", "SOL"):
-        if sym in q:
-            return "SOL"
-    for sym in ("DOGECOIN", "DOGE"):
-        if sym in q:
-            return "DOGE"
-    for sym in ("RIPPLE", "XRP"):
-        if sym in q:
-            return "XRP"
-    for sym in ("BNB",):
-        if sym in q:
-            return "BNB"
-    for sym in ("HYPERLIQUID", "HYPE"):
-        if sym in q:
-            return "HYPE"
+    for k, syms in {
+        "BTC":  ["BITCOIN", "BTC"],
+        "ETH":  ["ETHEREUM", "ETH"],
+        "SOL":  ["SOLANA", "SOL"],
+        "DOGE": ["DOGECOIN", "DOGE"],
+        "XRP":  ["RIPPLE", "XRP"],
+        "BNB":  ["BNB"],
+        "HYPE": ["HYPERLIQUID", "HYPE"],
+    }.items():
+        if any(s in q for s in syms):
+            return k
     return "UNKNOWN"
 
 
-def _asset_win_rates(rows: list[dict]) -> dict:
-    stats: dict[str, dict] = {}
+def _asset_stats(rows: list[dict]) -> dict:
+    s: dict[str, dict] = {}
     for r in rows:
         a = r["asset"]
-        if a not in stats:
-            stats[a] = {"wins": 0, "total": 0}
-        stats[a]["total"] += 1
+        if a not in s:
+            s[a] = {"wins": 0, "total": 0, "pnl": 0.0}
+        s[a]["total"] += 1
+        s[a]["pnl"]   += r["pnl"]
         if r["win"]:
-            stats[a]["wins"] += 1
+            s[a]["wins"] += 1
     return {
         a: {
             "win_rate": round(v["wins"] / v["total"], 3),
-            "trades": v["total"],
+            "trades":   v["total"],
+            "total_pnl": round(v["pnl"], 4),
         }
-        for a, v in stats.items()
+        for a, v in s.items()
     }
 
 
 # ---------------------------------------------------------------------------
-# LLM call
+# Prompt construction
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are a profit-focused trading analyst for a Polymarket bot
-trading 5-minute UpDown crypto markets. Your PRIMARY goal is to MAKE MONEY and
-PROTECT CAPITAL. Winning 60%+ of trades is profitable. A trade that should not
-be taken is worth more than a marginal trade that loses. Be ruthless: if an
-asset is consistently losing, eliminate it. If the signal threshold is too low,
-raise it. Fewer, higher-quality trades beat more, lower-quality trades.
+_SYSTEM_PROMPT = """\
+You are a self-improving trading analyst embedded in a Polymarket bot. You run
+repeatedly, and each run you can read your own previous notes and decisions to
+improve your analysis over time.
 
-The bot's edge: at window open YES=0.50 regardless of Binance price. Market
-makers take 60-120s to reprice. Signal = window_return = (current - start) / start.
-The bot also tracks consecutive-window trend (have the last 3-4 windows been
-going the same direction?). Both signals together = higher confidence.
+YOUR GOALS (in order):
+1. PROTECT CAPITAL — avoid losing trades
+2. GROW PROFIT — increase win rate and PnL
+3. IMPROVE YOURSELF — update your self_notes and analysis_strategy each run
+   based on what you learned. Future runs will read these notes.
 
-Parameters you control:
-- signal_threshold: minimum |window_return| to trade. Raise it if losing on
-  weak signals. Range: 0.0005–0.005.
-- min_trend_score: require consecutive-window trend agreement. 0.5 means 3/4
-  recent windows must agree. 0.0 = off. Range: 0.0–0.75.
-- skip_assets: list of CONSISTENTLY LOSING assets to stop trading entirely.
-- prefer_assets: assets with PROVEN win rates — prioritize these.
-- max_secs_in: stop entering after this many seconds. Reduce if late entries
-  lose more than early ones. Range: 120–240.
+THE MARKET:
+- 5-minute UpDown crypto markets on Polymarket
+- Edge: at window open, YES=0.50 regardless of Binance price. Market makers
+  take 60-120s to reprice → oracle lag window.
+- Signal: window_return = (price_now - price_at_window_start) / price_at_window_start
+- Also tracks: consecutive_window_trend = fraction of last 4 windows same direction
 
-Respond ONLY with valid JSON in exactly this format (no extra text):
+PARAMETERS YOU CONTROL:
+- signal_threshold (0.0005–0.005): min |window_return| to trade. Raise to filter noise.
+- min_trend_score (0.0–0.75): require consecutive-window agreement. 0.5 = 3/4 windows.
+- skip_assets: consistently losing assets to stop trading.
+- prefer_assets: proven winners to prioritise.
+- max_secs_in (120–240): stop entering after this many seconds into the window.
+
+SELF-IMPROVEMENT FIELDS (you write these for your future self):
+- self_notes: running memory of what you've observed about market behaviour,
+  which assets behave differently, time-of-day patterns, etc. Append new
+  observations; don't erase old ones unless they're proven wrong.
+- analysis_strategy: your current approach to interpreting the data. Update
+  this when you develop a better analytical method.
+
+OUTPUT FORMAT — respond ONLY with valid JSON, no extra text:
 {
   "signal_threshold": <float>,
   "min_trend_score": <float>,
   "skip_assets": [<strings>],
   "prefer_assets": [<strings>],
   "max_secs_in": <int>,
-  "reasoning": "<1-2 sentences: what losing pattern you identified and what you changed>"
+  "reasoning": "<what pattern you found and what you changed>",
+  "self_notes": "<updated running memory — append new observations>",
+  "analysis_strategy": "<your current analytical approach>"
 }"""
 
 
-def _build_prompt(rows: list[dict], asset_stats: dict, current_params: dict) -> str:
-    total  = len(rows)
-    wins   = sum(1 for r in rows if r["win"])
-    win_rt = round(wins / total, 3) if total else 0.0
-    return (
-        f"Recent {total} trades: {wins} wins / {total - wins} losses ({win_rt:.1%} win rate)\n\n"
-        f"Per-asset stats: {json.dumps(asset_stats)}\n\n"
-        f"Last 10 trades (most recent last):\n{json.dumps(rows[-10:], indent=2)}\n\n"
-        f"Current parameters: {json.dumps(current_params)}\n\n"
-        f"Analyze the data and suggest parameter adjustments. "
-        f"Focus on patterns: which assets win/lose, what momentum values predict wins, "
-        f"whether requiring stronger trends would help filter bad signals."
-    )
+def _build_prompt(
+    rows: list[dict],
+    asset_stats: dict,
+    current_params: dict,
+    perf_delta: dict,
+) -> str:
+    total = len(rows)
+    wins  = sum(1 for r in rows if r["win"])
+    wr    = round(wins / total, 3) if total else 0.0
+
+    parts = []
+
+    # Self-context: what the LLM decided last time and whether it worked
+    runs = current_params.get("_runs", 0)
+    if runs > 0:
+        parts.append(f"=== YOUR PREVIOUS ANALYSIS (Run #{runs}) ===")
+        parts.append(f"Last reasoning: {current_params.get('_last_reasoning', 'none')}")
+        parts.append(f"Parameters set: threshold={current_params['signal_threshold']:.4f}  "
+                     f"min_trend={current_params['min_trend_score']:.2f}  "
+                     f"skip={current_params['skip_assets']}  "
+                     f"prefer={current_params['prefer_assets']}")
+        if perf_delta.get("trades_since") is not None:
+            ts = perf_delta["trades_since"]
+            ws = perf_delta["wins_since"]
+            wr_since = round(ws / ts, 3) if ts else 0.0
+            pnl_since = perf_delta.get("pnl_since", 0)
+            parts.append(
+                f"OUTCOME since your last run: {ts} trades, {ws} wins "
+                f"({wr_since:.1%} win rate), PnL ${pnl_since:+.4f}. "
+                + ("Your adjustment HELPED." if wr_since >= 0.55 else
+                   "Your adjustment DID NOT HELP — reconsider." if ts >= 3 else
+                   "Too few trades to evaluate yet.")
+            )
+        if current_params.get("self_notes"):
+            parts.append(f"\nYOUR SELF-NOTES FROM PREVIOUS RUNS:\n{current_params['self_notes']}")
+        if current_params.get("analysis_strategy"):
+            parts.append(f"\nYOUR CURRENT ANALYSIS STRATEGY:\n{current_params['analysis_strategy']}")
+        parts.append("")
+
+    parts.append(f"=== CURRENT PERFORMANCE ===")
+    parts.append(f"Last {total} trades: {wins}W / {total-wins}L ({wr:.1%} win rate)")
+    parts.append(f"\nPer-asset stats:\n{json.dumps(asset_stats, indent=2)}")
+    parts.append(f"\nLast 15 trades (most recent last):\n{json.dumps(rows[-15:], indent=2)}")
+    parts.append(f"\nCurrent parameters:\n{json.dumps({k: v for k, v in current_params.items() if not k.startswith('_') and k not in ('self_notes','analysis_strategy','wins_at_last_run','trades_at_last_run')}, indent=2)}")
+    parts.append("\nNow produce your updated analysis and self-notes.")
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Performance delta
+# ---------------------------------------------------------------------------
+
+def _perf_delta(rows: list[dict], current_params: dict) -> dict:
+    """Win rate / PnL since the last analyst run."""
+    last_trades = current_params.get("trades_at_last_run", 0)
+    last_wins   = current_params.get("wins_at_last_run", 0)
+    total_now   = len(rows)
+    wins_now    = sum(1 for r in rows if r["win"])
+    trades_since = total_now - last_trades
+    wins_since   = wins_now  - last_wins
+    pnl_since    = sum(r["pnl"] for r in rows[last_trades:])
+    return {
+        "trades_since": trades_since,
+        "wins_since":   wins_since,
+        "pnl_since":    round(pnl_since, 4),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -216,37 +299,34 @@ def _build_prompt(rows: list[dict], asset_stats: dict, current_params: dict) -> 
 # ---------------------------------------------------------------------------
 
 def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
-    """
-    Run LLM analysis on the recent journal and update analyst_params.json.
-    Returns the new params dict, or None if analysis was skipped.
-    """
+    """Run LLM self-improving analysis. Returns new params or None if skipped."""
     if not _ollama_available():
-        logger.debug("[ANALYST] Ollama not available — skipping analysis")
+        logger.debug("[ANALYST] Ollama not running — skipping")
         return None
-
     if not _ensure_model():
-        logger.warning(f"[ANALYST] Model {MODEL} not available")
+        logger.warning(f"[ANALYST] Model {MODEL} unavailable")
         return None
 
-    rows        = _format_journal(learner)
+    rows = _format_journal(learner)
     if len(rows) < 5:
-        logger.debug("[ANALYST] Not enough closed trades yet for analysis")
+        logger.debug("[ANALYST] Need at least 5 closed trades")
         return None
 
-    asset_stats    = _asset_win_rates(rows)
     current_params = load_params()
-    prompt         = _build_prompt(rows, asset_stats, current_params)
+    stats          = _asset_stats(rows)
+    delta          = _perf_delta(rows, current_params)
+    prompt         = _build_prompt(rows, stats, current_params, delta)
 
     try:
-        t0 = time.time()
+        t0   = time.time()
         resp = requests.post(
             f"{OLLAMA_URL}/api/generate",
             json={
-                "model":  MODEL,
-                "system": _SYSTEM_PROMPT,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.2, "num_predict": 256},
+                "model":   MODEL,
+                "system":  _SYSTEM_PROMPT,
+                "prompt":  prompt,
+                "stream":  False,
+                "options": {"temperature": 0.3, "num_predict": 512},
             },
             timeout=TIMEOUT_SEC,
         )
@@ -256,25 +336,20 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
         logger.warning(f"[ANALYST] LLM call failed: {exc}")
         return None
 
-    # Extract JSON from response (model sometimes wraps it in markdown)
     try:
-        start = raw.index("{")
-        end   = raw.rindex("}") + 1
+        start   = raw.index("{")
+        end     = raw.rindex("}") + 1
         payload = json.loads(raw[start:end])
     except (ValueError, json.JSONDecodeError) as exc:
-        logger.warning(f"[ANALYST] Could not parse LLM response: {exc}\nRaw: {raw[:300]}")
+        logger.warning(f"[ANALYST] Could not parse response: {exc}\nRaw: {raw[:400]}")
         return None
 
-    # Sanitize and clamp values
-    new_params: dict = dict(current_params)
+    # Apply trading params (clamped)
+    new_params = dict(current_params)
     if "signal_threshold" in payload:
-        new_params["signal_threshold"] = float(
-            max(0.0003, min(0.005, payload["signal_threshold"]))
-        )
+        new_params["signal_threshold"] = float(max(0.0003, min(0.005, payload["signal_threshold"])))
     if "min_trend_score" in payload:
-        new_params["min_trend_score"] = float(
-            max(0.0, min(0.75, payload["min_trend_score"]))
-        )
+        new_params["min_trend_score"] = float(max(0.0, min(0.75, payload["min_trend_score"])))
     if "skip_assets" in payload and isinstance(payload["skip_assets"], list):
         new_params["skip_assets"] = [str(s).upper() for s in payload["skip_assets"]]
     if "prefer_assets" in payload and isinstance(payload["prefer_assets"], list):
@@ -282,13 +357,34 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
     if "max_secs_in" in payload:
         new_params["max_secs_in"] = int(max(120, min(240, payload["max_secs_in"])))
 
-    reasoning = payload.get("reasoning", "")
+    # Self-improvement: persist the LLM's own notes and strategy
+    if payload.get("self_notes"):
+        new_params["self_notes"] = str(payload["self_notes"])[:2000]
+    if payload.get("analysis_strategy"):
+        new_params["analysis_strategy"] = str(payload["analysis_strategy"])[:1000]
 
-    # Store reasoning and run metadata in the params file for export/tracking
-    new_params["_last_run_at"]  = int(time.time())
-    new_params["_last_reasoning"] = reasoning
-    new_params["_runs"] = new_params.get("_runs", 0) + 1
+    # Metadata
+    reasoning = payload.get("reasoning", "")
+    new_params["_last_reasoning"]   = reasoning
+    new_params["_last_run_at"]      = int(time.time())
+    new_params["_runs"]             = new_params.get("_runs", 0) + 1
+    new_params["trades_at_last_run"] = len(rows)
+    new_params["wins_at_last_run"]   = sum(1 for r in rows if r["win"])
+
     save_params(new_params)
+
+    # Append to history log
+    _append_history({
+        "run":        new_params["_runs"],
+        "ts":         new_params["_last_run_at"],
+        "elapsed_s":  round(elapsed, 1),
+        "trades":     len(rows),
+        "win_rate":   round(sum(1 for r in rows if r["win"]) / len(rows), 3),
+        "params_set": {k: new_params[k] for k in ("signal_threshold","min_trend_score","skip_assets","prefer_assets","max_secs_in")},
+        "reasoning":  reasoning,
+        "self_notes": new_params.get("self_notes", ""),
+        "perf_delta": delta,
+    })
 
     logger.warning(
         f"\n{'='*60}\n"
@@ -299,6 +395,7 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
         f"  prefer    : {new_params['prefer_assets']}\n"
         f"  max_secs  : {new_params['max_secs_in']}\n"
         f"  reasoning : {reasoning}\n"
+        f"  self_notes: {new_params.get('self_notes','')[:120]}…\n"
         f"{'='*60}"
     )
     return new_params
