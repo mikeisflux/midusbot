@@ -1325,6 +1325,17 @@ class PolymarketBot:
         if config.DRY_RUN:
             sim_open_cost = sum(t.cost_usdc for t in self._sim._open.values())
             sim_equity = self._sim._wallet + sim_open_cost
+            # Auto-reset: if sim wallet is too depleted to place even one
+            # minimum-size trade (~$2.50), refill it from the real wallet
+            # so paper-trading can continue. Learning data is NOT cleared.
+            min_tradeable = config.MIN_ORDER_SHARES * 0.50  # ~$2.50 at 50¢
+            if sim_equity < min_tradeable and balance and balance > 0:
+                logger.warning(
+                    f"[SIM] Equity ${sim_equity:.2f} below minimum ${min_tradeable:.2f} — "
+                    f"resetting sim wallet to real balance ${balance:.2f}"
+                )
+                self._sim.reset_wallet(balance)
+                sim_equity = balance
             if sim_equity > 0:
                 self._risk.set_wallet_balance(sim_equity)
         elif balance is not None and balance > 0:

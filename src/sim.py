@@ -73,6 +73,26 @@ class SimPortfolio:
         self._save()
         logger.info(f"[SIM] Wallet synced to real balance: ${self._wallet:.2f}")
 
+    def reset_wallet(self, new_balance: float) -> None:
+        """
+        Hard-reset the sim wallet to new_balance.  Clears all open/closed history
+        so the sim can start fresh paper-trading (learning data in journal.json
+        is NOT touched — only the paper portfolio resets).
+        Called when sim equity drops too low to place even minimum-size trades.
+        """
+        if new_balance <= 0:
+            return
+        old_wallet = self._wallet
+        self._wallet = round(new_balance, 6)
+        self._open.clear()
+        self._closed.clear()
+        self._equity.clear()
+        self._save()
+        logger.warning(
+            f"[SIM] Wallet auto-reset: ${old_wallet:.2f} → ${new_balance:.2f}  "
+            f"(paper trades cleared; learning data preserved)"
+        )
+
     def open_position(
         self, *,
         token_id:    str,
