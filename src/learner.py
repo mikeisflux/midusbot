@@ -131,8 +131,15 @@ class AdaptiveLearner:
         self._name = name
         # Backward-compatible paths for the main learner
         if name == "main":
-            self._journal_file = DATA_DIR / "trade_journal.json"
-            self._params_file  = DATA_DIR / "learned_params.json"
+            self._journal_file = DATA_DIR / "journal_main.json"
+            self._params_file  = DATA_DIR / "params_main.json"
+            # Migrate old file names on first run
+            _old_j = DATA_DIR / "trade_journal.json"
+            _old_p = DATA_DIR / "learned_params.json"
+            if _old_j.exists() and not self._journal_file.exists():
+                _old_j.rename(self._journal_file)
+            if _old_p.exists() and not self._params_file.exists():
+                _old_p.rename(self._params_file)
         else:
             self._journal_file = DATA_DIR / f"{name}_journal.json"
             self._params_file  = DATA_DIR / f"{name}_params.json"

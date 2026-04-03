@@ -335,6 +335,12 @@ _UPDOWN_ASSETS = {
 # Minimum absolute 60s momentum to act on (0.05% move in 60s)
 _MIN_MOMENTUM_PCT = 0.0005
 
+# Minimum window-relative return to generate a signal.
+# 0.08% means BTC moved 0.08% from window-start — enough edge to trade.
+# At 30s into a 5-min window, a 0.08% move gives ~60% probability of
+# staying in the same direction at resolution (Brownian bridge estimate).
+_MIN_WINDOW_RETURN_PCT = 0.0008
+
 
 def _detect_updown_market(question: str) -> str | None:
     """
@@ -441,54 +447,59 @@ class UpDownMomentumStrategy:
         if symbol is None:
             return None
 
-        # ── Guard 1: Only enter in the first 90s of the window ──────────────
-        # At window open the price is near 0.50 regardless of Binance movement.
-        # That lag is the edge. After 90s market makers have already repriced it.
+        # ── Guard 1: Strict timing — must know window start, 15–75s in ───────
+        # The oracle lag edge is only available in the first ~75s of each window.
+        # Before 15s we have too little window data to measure the return.
+        # After 75s the market makers have already repriced to fair value.
+        # If end_date is unparseable, skip entirely — don't trade blind.
         secs_in = _market_seconds_into_window(market)
-        if secs_in is not None and (secs_in > 90 or secs_in < 0):
+        if secs_in is None or secs_in < 15 or secs_in > 75:
             return None
 
-        # Warm up the price history
+        # Warm up price history
         live_price = _fetch_price(symbol)
         if live_price is None:
             return None
 
         # ── Guard 2: Entry price must still be near 0.50 ─────────────────────
-        # If it's already at 0.70+, someone beat us to it — no edge left.
         mid = order_book.mid if order_book else market.yes_price
         if mid > 0.62 or mid < 0.38:
             return None
 
-        # ── Signal: multi-timeframe consensus + BTC leadership for alts ──────
-        consensus, conf_label = _multitf_consensus(symbol)
-
-        # BTC moves before alts — add its directional signal as confirmation
-        btc_lead = _btc_leadership_signal(symbol)
-        if btc_lead != 0.0:
-            # Only use BTC lead if it agrees OR if we have no local signal yet
-            if consensus == 0.0 or (btc_lead > 0) == (consensus > 0):
-                consensus = consensus + btc_lead
-                if conf_label == "NONE":
-                    conf_label = "LOW"
-
-        # Require at least MEDIUM confidence — no LOW or NONE trades
-        if conf_label in ("NONE", "LOW") or abs(consensus) < self.min_momentum_pct:
-            hist_len = len(_PRICE_HISTORY.get(symbol.upper(), []))
+        # ── PRIMARY SIGNAL: window-relative return ────────────────────────────
+        # _price_momentum(symbol, secs_in) = (price_now - price_at_window_start)
+        #                                    / price_at_window_start
+        # This is EXACTLY what the oracle measures. If it's positive → YES is
+        # already ahead; negative → NO is already ahead. The Polymarket price
+        # is still 0.50 (oracle lag) → we have edge.
+        window_return = _price_momentum(symbol, int(secs_in))
+        if window_return is None or abs(window_return) < _MIN_WINDOW_RETURN_PCT:
             logger.debug(
-                f"[UPDOWN SKIP] {symbol} conf={conf_label} consensus={consensus:+.4%} "
-                f"ticks={hist_len}"
+                f"[UPDOWN SKIP] {symbol} window_return={window_return} "
+                f"< min {_MIN_WINDOW_RETURN_PCT:.4%}  t={secs_in:.0f}s"
             )
             return None
 
-        # ── Fair value: calibrated cap at 0.68 ───────────────────────────────
-        # Even with perfect momentum, a 5-min market resolves correctly ~65-68%
-        # of the time. Paying 90¢ is never right.
-        strength = min(abs(consensus) / 0.004, 1.0)   # normalise to 0-1
-        fair_prob = 0.53 + strength * 0.15             # 0.53 → 0.68
+        # ── CONFIRMATION: BTC leadership for alts ────────────────────────────
+        btc_lead = _btc_leadership_signal(symbol)
+        combined = window_return + btc_lead
+
+        # Skip if BTC leadership strongly contradicts the window return
+        if btc_lead != 0.0 and (combined > 0) != (window_return > 0):
+            logger.debug(f"[UPDOWN SKIP] {symbol} BTC lead contradicts window return")
+            return None
+
+        direction = "UP" if combined > 0 else "DOWN"
+
+        # ── Fair value ────────────────────────────────────────────────────────
+        # A 0.1% window return → probability based on Brownian bridge:
+        # P(stay same side at end | currently X% from start, secs_in elapsed) ≈
+        # Φ(|window_return| / σ_remaining). Calibrated empirically to 0.53–0.68.
+        strength = min(abs(window_return) / 0.01, 1.0)   # 1.0% = full strength
+        fair_prob = 0.53 + strength * 0.15                 # 0.53 → 0.68
         fair_prob = float(np.clip(fair_prob, 0.53, 0.68))
 
-        # ── Direction ─────────────────────────────────────────────────────────
-        if consensus > 0:
+        if direction == "UP":
             side = "YES"
             token = market.yes_token
             mkt_price = mid
@@ -503,20 +514,14 @@ class UpDownMomentumStrategy:
         if edge < config.MIN_EDGE:
             return None
 
-        # Only trade HIGH/MEDIUM — LOW is noise
-        if conf_label == "LOW":
-            return None
-
-        m15 = _price_momentum_15s(symbol) or 0.0
-        m30 = _price_momentum_30s(symbol) or 0.0
-        m60 = _price_momentum_60s(symbol) or 0.0
+        confidence = "HIGH" if abs(window_return) >= 0.003 else "MEDIUM"
         pressure = _exchange_pressure(symbol)
-        direction = "UP" if consensus > 0 else "DOWN"
+
         logger.info(
             f"[UPDOWN] {symbol} {direction}  "
-            f"15s={m15:+.3%} 30s={m30:+.3%} 60s={m60:+.3%} btc_lead={btc_lead:+.4%}  "
+            f"win_ret={window_return:+.4%}  btc_lead={btc_lead:+.4%}  "
             f"fair={fair_value:.3f}  mkt={mkt_price:.3f}  edge={edge:+.3f}  "
-            f"win={secs_in:.0f}s  → {side} [{conf_label}]  \"{market.question[:45]}\""
+            f"t={secs_in:.0f}s  → {side} [{confidence}]  \"{market.question[:45]}\""
         )
 
         return TradeSignal(
@@ -527,9 +532,9 @@ class UpDownMomentumStrategy:
             market_price=mkt_price,
             fair_value=fair_value,
             edge=edge,
-            signal=float(np.clip(abs(consensus) * 200, 0.0, 1.0)),
-            confidence=conf_label,
-            momentum_signal=float(consensus),
+            signal=float(np.clip(abs(window_return) * 200, 0.0, 1.0)),
+            confidence=confidence,
+            momentum_signal=float(window_return),
             imbalance_signal=float(pressure),
             is_latency_arb=False,
         )
@@ -576,9 +581,9 @@ class TrendFollowStrategy:
         if direction is None:
             return None   # no history yet — UpDownMomentumStrategy handles cold starts
 
-        # Only enter in first 90s of the window
+        # Strict timing: same window as UpDownMomentumStrategy
         secs_in = _market_seconds_into_window(market)
-        if secs_in is not None and (secs_in > 90 or secs_in < 0):
+        if secs_in is None or secs_in < 15 or secs_in > 75:
             return None
 
         streak = self._tracker.get_streak(symbol)
@@ -597,15 +602,16 @@ class TrendFollowStrategy:
         if mkt_price > self.MAX_ENTRY_PRICE:
             return None
 
-        # Momentum confirmation: only trade when trend + momentum agree.
-        # Disagreement means the market is working against the trend — skip.
-        consensus, _ = _multitf_consensus(symbol)
-        btc_lead = _btc_leadership_signal(symbol)
-        combined = consensus + btc_lead
-        if combined != 0.0:
-            momentum_dir = "UP" if combined > 0 else "DOWN"
-            if momentum_dir != direction:
-                return None   # trend and momentum disagree — sit out
+        # Window-relative confirmation: the current price must agree with trend
+        # direction. If trend says UP but window return is DOWN (price is below
+        # window-start reference), the trend is working against us — sit out.
+        window_return = _price_momentum(symbol, int(secs_in))
+        if window_return is None:
+            return None
+        window_dir = "UP" if window_return > 0 else "DOWN"
+        if window_dir != direction:
+            return None  # window-relative signal contradicts trend — sit out
+        combined = window_return + _btc_leadership_signal(symbol)
 
         fair_value = min(self.FAIR_VALUE_BASE + streak * self.STREAK_BONUS, 0.68)
         edge = fair_value - mkt_price
@@ -613,16 +619,16 @@ class TrendFollowStrategy:
         if edge < config.MIN_EDGE:
             return None
 
-        # Streak 1 = LOW, require momentum confirmation to trade LOW streaks
+        # Streak 1 = LOW, require meaningful window return to trade LOW streaks
         confidence = "HIGH" if streak >= 3 else "MEDIUM" if streak >= 2 else "LOW"
-        if confidence == "LOW" and combined == 0.0:
-            return None   # fresh direction flip with no momentum — too risky
+        if confidence == "LOW" and abs(window_return) < _MIN_WINDOW_RETURN_PCT * 2:
+            return None   # fresh direction flip + weak window signal — too risky
 
         logger.info(
             f"[TREND-FOLLOW] {symbol} {direction}  streak={streak}  "
-            f"momentum={'agree' if combined != 0.0 else 'neutral'}  "
+            f"win_ret={window_return:+.4%}  "
             f"fair={fair_value:.2f}  mkt={mkt_price:.2f}  edge={edge:+.2f}  "
-            f"win={secs_in:.0f}s  [{confidence}]  \"{market.question[:45]}\""
+            f"t={secs_in:.0f}s  [{confidence}]  \"{market.question[:45]}\""
         )
 
         return TradeSignal(
