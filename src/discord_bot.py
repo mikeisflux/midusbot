@@ -60,13 +60,15 @@ class DiscordCommander:
         self._connected = False
 
         # Injected by bot.py after construction
-        self.get_state:   Callable[[], "DashboardState | None"] = lambda: None
-        self.do_stop:     Callable[[], None]  = lambda: None
-        self.do_pause:    Callable[[], None]  = lambda: None
-        self.do_resume:   Callable[[], None]  = lambda: None
-        self.do_live:     Callable[[], None]  = lambda: None
-        self.do_dry:      Callable[[], None]  = lambda: None
-        self.do_refactor: Callable[[str], None] = lambda _: None
+        self.get_state:    Callable[[], "DashboardState | None"] = lambda: None
+        self.get_sim:      Callable[[], None]   = lambda: None
+        self.do_stop:      Callable[[], None]   = lambda: None
+        self.do_pause:     Callable[[], None]   = lambda: None
+        self.do_resume:    Callable[[], None]   = lambda: None
+        self.do_live:      Callable[[], None]   = lambda: None
+        self.do_dry:       Callable[[], None]   = lambda: None
+        self.do_refactor:  Callable[[str], None] = lambda _: None
+        self.do_reset_dry: Callable[[], str]    = lambda: "Not available"
 
     # ------------------------------------------------------------------
 
@@ -254,6 +256,11 @@ class DiscordCommander:
             self.send(f"🤖 Queuing LLM refactor: _{arg}_")
             self.do_refactor(arg)
 
+        elif cmd == "!resetdryrun":
+            self.send("🔄 Resetting sim wallet…")
+            result = self.do_reset_dry()
+            self.send(f"✅ {result}")
+
         elif cmd == "!help":
             self.send(
                 "**MIDUSBOT Commands**\n"
@@ -261,6 +268,7 @@ class DiscordCommander:
                 "`!pause` / `!resume` — pause/resume new trades\n"
                 "`!live` / `!dry` — switch trading mode\n"
                 "`!stop` — graceful shutdown\n"
+                "`!resetdryrun` — reset sim wallet back to $150\n"
                 "`!refactor <text>` — trigger LLM analyst\n"
             )
         else:
@@ -283,7 +291,7 @@ class DiscordCommander:
         lines = [
             "**MIDUSBOT Status**",
             f"Mode: **{mode}**{paused}",
-            f"Balance: **${balance:.2f}** USDC",
+            f"Real Balance: **${balance:.2f}** USDC",
             f"Exposure: ${s.exposure:.2f}",
             f"Open positions: {len(s.positions)}",
             f"Win rate: {wr}  ({s.wins}W / {s.total_trades}T)",
@@ -291,6 +299,33 @@ class DiscordCommander:
             f"Daily P&L: ${daily}",
             f"Loop: #{s.loop_count}  Uptime: {s.uptime}",
         ]
+
+        # Sim wallet section (DRY-RUN only)
+        if config.DRY_RUN:
+            sim = self.get_sim()
+            if sim is not None:
+                sim_cash   = sim._wallet
+                sim_open   = sim._open
+                sim_closed = sim._closed
+                open_cost  = sum(t.cost_usdc for t in sim_open.values())
+                sim_equity = sim_cash + open_cost
+
+                sim_wins  = [t for t in sim_closed if t.pnl_usdc > 0]
+                sim_pnl   = sum(t.pnl_usdc for t in sim_closed)
+                sim_wr    = f"{len(sim_wins)/len(sim_closed):.1%}" if sim_closed else "—"
+
+                from src.sim import STARTING_BALANCE as SIM_START
+                pnl_vs_start = sim_equity - SIM_START
+
+                lines += [
+                    "",
+                    "**SIM PORTFOLIO** _(paper wallet)_",
+                    f"Cash: **${sim_cash:.2f}**  Open: ${open_cost:.2f}  Equity: **${sim_equity:.2f}**",
+                    f"vs start (${SIM_START:.0f}): `{pnl_vs_start:+.2f}`",
+                    f"Trades: {len(sim_closed)}  WR: {sim_wr}  P&L: `{sim_pnl:+.2f}`",
+                    f"Open positions: {len(sim_open)}",
+                ]
+
         return "\n".join(lines)
 
 

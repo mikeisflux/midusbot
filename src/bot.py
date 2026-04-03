@@ -138,13 +138,15 @@ class PolymarketBot:
         webui.start(self._dash_state, port=8080, learner=self._learner, close_position_fn=self._close_position, sim=self._sim)
 
         # Wire up Discord commander
-        commander.get_state   = lambda: self._dash_state
-        commander.do_stop     = lambda: setattr(self, "_running", False)
-        commander.do_pause    = lambda: setattr(config, "TRADING_PAUSED", True)
-        commander.do_resume   = lambda: setattr(config, "TRADING_PAUSED", False)
-        commander.do_live     = lambda: self._switch_mode(dry_run=False, reason="Discord command")
-        commander.do_dry      = lambda: self._switch_mode(dry_run=True,  reason="Discord command")
-        commander.do_refactor = self._discord_refactor
+        commander.get_state      = lambda: self._dash_state
+        commander.get_sim        = lambda: self._sim
+        commander.do_stop        = lambda: setattr(self, "_running", False)
+        commander.do_pause       = lambda: setattr(config, "TRADING_PAUSED", True)
+        commander.do_resume      = lambda: setattr(config, "TRADING_PAUSED", False)
+        commander.do_live        = lambda: self._switch_mode(dry_run=False, reason="Discord command")
+        commander.do_dry         = lambda: self._switch_mode(dry_run=True,  reason="Discord command")
+        commander.do_refactor    = self._discord_refactor
+        commander.do_reset_dry   = self._reset_sim_wallet
         commander.start()
 
         # Cancel any stale open orders left from previous runs
@@ -1351,17 +1353,9 @@ class PolymarketBot:
         if config.DRY_RUN:
             sim_open_cost = sum(t.cost_usdc for t in self._sim._open.values())
             sim_equity = self._sim._wallet + sim_open_cost
-            # Auto-reset: if sim wallet is too depleted to place even one
-            # minimum-size trade (~$2.50), refill it from the real wallet
-            # so paper-trading can continue. Learning data is NOT cleared.
-            min_tradeable = config.MIN_ORDER_SHARES * 0.50  # ~$2.50 at 50¢
-            if sim_equity < min_tradeable and balance and balance > 0:
-                logger.warning(
-                    f"[SIM] Equity ${sim_equity:.2f} below minimum ${min_tradeable:.2f} — "
-                    f"resetting sim wallet to real balance ${balance:.2f}"
-                )
-                self._sim.reset_wallet(balance)
-                sim_equity = balance
+            self._check_sim_loss_limit(sim_equity)
+            # Refresh after possible reset above
+            sim_equity = self._sim._wallet + sum(t.cost_usdc for t in self._sim._open.values())
             if sim_equity > 0:
                 self._risk.set_wallet_balance(sim_equity)
         elif balance is not None and balance > 0:
@@ -1369,8 +1363,74 @@ class PolymarketBot:
         else:
             logger.debug("Wallet balance unavailable (no auth or dry-run)")
 
-    _DAILY_LOSS_ALERT_PCT = 0.10   # alert if daily P&L drops below -10% of wallet
-    _daily_loss_alerted   = False
+    _DAILY_LOSS_ALERT_PCT   = 0.10   # alert if daily P&L drops below -10% of wallet
+    _daily_loss_alerted     = False
+
+    # Sim auto-reset: fire when equity < 20% of starting balance
+    _SIM_LOSS_RESET_PCT     = 0.20
+    _SIM_MIN_TRADEABLE      = 2.50   # $2.50 = 5 shares @ 50¢
+
+    def _check_sim_loss_limit(self, sim_equity: float) -> None:
+        """
+        Reset the sim wallet if equity has fallen too low:
+          1. Below $2.50 — can't place even a minimum trade
+          2. Below 20% of starting balance — loss limit hit
+
+        Logs a detailed failure summary so the bot learns from the session.
+        """
+        from src.sim import STARTING_BALANCE as SIM_START
+        loss_limit = SIM_START * self._SIM_LOSS_RESET_PCT   # e.g. $30 at $150 start
+
+        needs_reset = (
+            sim_equity < self._SIM_MIN_TRADEABLE
+            or sim_equity < loss_limit
+        )
+        if not needs_reset:
+            return
+
+        reason = (
+            f"below minimum trade size (${sim_equity:.2f} < ${self._SIM_MIN_TRADEABLE:.2f})"
+            if sim_equity < self._SIM_MIN_TRADEABLE
+            else f"loss limit hit (${sim_equity:.2f} < {self._SIM_LOSS_RESET_PCT:.0%} of ${SIM_START:.0f})"
+        )
+        summary = self._sim.reset_wallet()   # logs + returns session summary
+
+        # Alert Discord
+        wr_str = f"{summary['win_rate']:.1%}" if summary['total_trades'] else "—"
+        alerter.send(
+            f"SIM wallet reset — {reason}\n"
+            f"Session: {summary['total_trades']}T  WR {wr_str}  "
+            f"P&L {summary['total_pnl']:+.2f}  "
+            f"→ Restarting at ${summary['new_wallet']:.0f}",
+            level="warning",
+        )
+
+        # Record to failure log for post-analysis
+        from src.utils import atomic_json_write
+        import json
+        from pathlib import Path
+        fail_log_path = Path("data/sim_failures.json")
+        try:
+            failures = json.loads(fail_log_path.read_text()) if fail_log_path.exists() else []
+        except Exception:
+            failures = []
+        failures.append({**summary, "reason": reason,
+                         "learned": self._dash_state.learned or {}})
+        atomic_json_write(fail_log_path, failures)
+        logger.info(f"[SIM] Failure logged to {fail_log_path}")
+
+    def _reset_sim_wallet(self) -> str:
+        """Manual sim wallet reset (called by !resetdryrun Discord command)."""
+        from src.sim import STARTING_BALANCE as SIM_START
+        summary = self._sim.reset_wallet(SIM_START)
+        wr_str = f"{summary['win_rate']:.1%}" if summary['total_trades'] else "—"
+        msg = (
+            f"SIM wallet manually reset to ${SIM_START:.0f}\n"
+            f"Ended session: {summary['total_trades']}T  WR {wr_str}  "
+            f"P&L {summary['total_pnl']:+.2f}"
+        )
+        alerter.send(msg, level="info")
+        return msg
 
     def _check_daily_loss_alert(self) -> None:
         """Send one alert per day if daily P&L exceeds the loss threshold."""

@@ -18,7 +18,7 @@ from src.utils import atomic_json_write
 
 DATA_DIR = Path("data")
 SIM_FILE  = DATA_DIR / "journal_sim.json"
-STARTING_BALANCE = 49.48
+STARTING_BALANCE = 150.00   # paper wallet size — update to match planned real deposit
 
 
 @dataclass
@@ -74,25 +74,47 @@ class SimPortfolio:
         self._save()
         logger.info(f"[SIM] Wallet synced to real balance: ${self._wallet:.2f}")
 
-    def reset_wallet(self, new_balance: float) -> None:
+    def reset_wallet(self, new_balance: float | None = None) -> dict:
         """
-        Hard-reset the sim wallet to new_balance.  Clears all open/closed history
-        so the sim can start fresh paper-trading (learning data in journal.json
-        is NOT touched — only the paper portfolio resets).
-        Called when sim equity drops too low to place even minimum-size trades.
+        Hard-reset the sim wallet.  Clears all open/closed history so paper-trading
+        starts fresh.  Learning data in journal.json is NOT touched.
+
+        Returns a summary dict of the session that just ended (for logging/learning).
         """
+        if new_balance is None:
+            new_balance = STARTING_BALANCE
         if new_balance <= 0:
-            return
-        old_wallet = self._wallet
-        self._wallet = round(new_balance, 6)
+            new_balance = STARTING_BALANCE
+
+        # Build session summary before clearing
+        closed      = self._closed
+        wins        = [t for t in closed if t.pnl_usdc > 0]
+        total_pnl   = sum(t.pnl_usdc for t in closed)
+        summary = {
+            "old_wallet":    self._wallet,
+            "new_wallet":    round(new_balance, 2),
+            "total_trades":  len(closed),
+            "wins":          len(wins),
+            "losses":        len(closed) - len(wins),
+            "win_rate":      round(len(wins) / len(closed), 4) if closed else 0.0,
+            "total_pnl":     round(total_pnl, 4),
+            "open_at_reset": len(self._open),
+            "reset_at":      time.time(),
+        }
+
+        old_wallet       = self._wallet
+        self._wallet     = round(new_balance, 6)
         self._open.clear()
         self._closed.clear()
         self._equity.clear()
         self._save()
         logger.warning(
-            f"[SIM] Wallet auto-reset: ${old_wallet:.2f} → ${new_balance:.2f}  "
+            f"[SIM] Wallet reset: ${old_wallet:.2f} → ${new_balance:.2f}  "
+            f"session: {summary['total_trades']}T  "
+            f"wr={summary['win_rate']:.1%}  pnl={summary['total_pnl']:+.2f}  "
             f"(paper trades cleared; learning data preserved)"
         )
+        return summary
 
     def open_position(
         self, *,
