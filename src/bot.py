@@ -872,11 +872,12 @@ class PolymarketBot:
         """
         now = time.time()
         if sig.hours_to_close is not None and 0 < sig.hours_to_close <= 24:
-            # Close at market expiry (add 10s buffer for the market to settle)
-            close_after = now + sig.hours_to_close * 3600 + 10
+            # Close after market expiry + 90s oracle settlement buffer.
+            # Oracle typically settles 60-120s after window close.
+            close_after = now + sig.hours_to_close * 3600 + 90
         else:
-            # Unknown end — default to 5-minute hold
-            close_after = now + 300
+            # Unknown end — default to 5-minute hold + 90s settlement buffer
+            close_after = now + 300 + 90
 
         self._sim_queue.append({
             "question":    sig.question,
@@ -890,7 +891,7 @@ class PolymarketBot:
         })
 
     def _process_sim_queue(self) -> None:
-        """Resolve pending simulated trades using real market prices for accuracy."""
+        """Resolve pending simulated trades using real settled market prices."""
         now = time.time()
         still_open = []
         for sim in self._sim_queue:
@@ -898,35 +899,48 @@ class PolymarketBot:
                 still_open.append(sim)
                 continue
 
-            # Resolve the simulated trade using the real market outcome.
+            # Try to get the settled price (must be clearly 0 or 1, not mid).
             # Priority:
-            #   1. CLOB order book mid (fast, works while market is active)
-            #   2. CLOB market tokens endpoint (works AFTER resolution — gives 0.00 or 1.00)
-            #   3. Gaussian noise fallback (should rarely be needed)
+            #   1. CLOB tokens endpoint — gives 0.00 or 1.00 after resolution
+            #   2. CLOB order book — only useful if already settled (< 0.05 or > 0.95)
+            #   3. Wait up to 10 min past close_after for oracle to settle
             exit_price = None
-            try:
-                ob = self._client.get_order_book(sim["token_id"])
-                if ob and 0.02 < ob.mid < 0.98:
-                    exit_price = ob.mid
-            except Exception:
-                pass
 
-            # For resolved markets the CLOB book disappears — use tokens endpoint
-            if exit_price is None and sim.get("market_id"):
+            if sim.get("market_id"):
                 try:
                     mkt = self._client.get_clob_market(sim["market_id"])
                     if mkt:
                         for tok in mkt.get("tokens") or []:
                             if str(tok.get("token_id", "")) == sim["token_id"]:
                                 p = float(tok.get("price") or 0)
-                                if p > 0:
+                                if p < 0.05 or p > 0.95:  # settled
                                     exit_price = p
-                                    break
+                                break
                 except Exception:
                     pass
 
             if exit_price is None:
-                # Last resort: Gaussian noise around fair value (rarely reached)
+                try:
+                    ob = self._client.get_order_book(sim["token_id"])
+                    if ob and (ob.mid < 0.05 or ob.mid > 0.95):
+                        exit_price = ob.mid  # already settled
+                except Exception:
+                    pass
+
+            # Oracle hasn't settled yet — wait up to 10 minutes past close_after
+            if exit_price is None and now < sim["close_after"] + 600:
+                still_open.append(sim)
+                continue
+
+            # Max wait exceeded — use best available price (mid or fallback)
+            if exit_price is None:
+                try:
+                    ob = self._client.get_order_book(sim["token_id"])
+                    if ob:
+                        exit_price = ob.mid
+                except Exception:
+                    pass
+            if exit_price is None:
                 noise      = random.gauss(0, 0.018)
                 exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
             # Close the corresponding sim portfolio position
