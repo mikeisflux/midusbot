@@ -399,10 +399,6 @@ class PolymarketBot:
                 sig = self._updown.analyse(market, ob)
 
             if sig is None:
-                logger.debug(
-                    f"NO-SIGNAL \"{market.question[:55]}\"  "
-                    f"price={ob.mid if ob else 0:.3f}  ob={'yes' if ob else 'no'}"
-                )
                 continue
 
             # Skip if we already hold this exact token
@@ -998,7 +994,6 @@ class PolymarketBot:
 
             if is_updown:
                 if not (0.01 <= m.yes_price <= 0.99):
-                    logger.debug(f"[UD-DROP price] yes_price={m.yes_price:.3f} q={m.question[:60]}")
                     n_price += 1; n_ud_price += 1; continue
             else:
                 # Non-UpDown markets — keep in candidates list for logging but
@@ -1019,17 +1014,20 @@ class PolymarketBot:
                         if is_updown:
                             n_ud_expired += 1
                         continue
-                    # UpDown 5-min markets: allow entry as long as >1 min remains
-                    # Regular markets: use MIN_MINUTES_TO_RESOLUTION (default 5)
-                    effective_min_secs = 60 if is_updown else min_minutes * 60
-                    if secs_left < effective_min_secs:
-                        n_toosoon += 1
-                        if is_updown:
-                            n_ud_toosoon += 1
-                        logger.debug(f"too_soon: is_updown={is_updown} secs={secs_left:.0f} slug={m.slug[:40]} q={m.question[:70]}")
-                        continue
+                    # UpDown 5-min markets: only trade within the active window.
+                    # secs_left > window_duration means the window hasn't opened yet.
                     if is_updown:
-                        logger.debug(f"[UD-PASS time] secs={secs_left:.0f} price={m.yes_price:.3f} q={m.question[:60]}")
+                        win_secs = (_updown_window_mins(m.question) or 5) * 60
+                        if secs_left > win_secs:
+                            # Window hasn't started — skip silently
+                            continue
+                        if secs_left < 60:
+                            n_toosoon += 1; n_ud_toosoon += 1; continue
+                    else:
+                        effective_min_secs = min_minutes * 60
+                        if secs_left < effective_min_secs:
+                            n_toosoon += 1
+                            continue
                     hours_left = secs_left / 3600
                     day_cap = 999 if is_updown else cutoff
                     if hours_left > day_cap * 24:
