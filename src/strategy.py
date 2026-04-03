@@ -626,7 +626,7 @@ class UpDownMomentumStrategy:
 
         logger.info(
             f"[UPDOWN] {symbol} {direction}  "
-            f"win_ret={window_return:+.4%}  trend={trend_score:+.2f}  btc={btc_lead:+.4%}  "
+            f"win_ret={window_return:+.4%}  trend={trend_score:+.2f if trend_score is not None else 'N/A'}  btc={btc_lead:+.4%}  "
             f"fair={fair_value:.3f}  mkt={mkt_price:.3f}  edge={edge:+.3f}  "
             f"t={secs_in:.0f}s  → {side} [{confidence}]  \"{market.question[:45]}\""
         )
