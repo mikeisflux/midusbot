@@ -777,6 +777,94 @@ class UpDownMomentumStrategy:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Strategy 3b: Trend Follow  (per-asset win-streak direction tracker)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Track which direction (UP / DOWN) each asset has been winning in across
+# successive 5-minute UpDown markets.
+#
+#   WIN  → keep betting the same direction (trend continuing)
+#   LOSS → flip to the opposite direction (trend reversed)
+#
+# We enter near the START of each new 5-minute window when the price is
+# still close to 0.50, before the market has priced in the direction.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TrendFollowStrategy:
+    """
+    Follows the established per-asset UpDown trend direction.
+
+    State is maintained by a TrendTracker instance (passed in).
+    Signals are only generated when:
+      - The tracker has history for the asset (direction is known).
+      - The market price is still near 0.50 (early in the window).
+      - Edge exceeds MIN_EDGE.
+    """
+
+    MAX_ENTRY_PRICE = 0.60   # don't chase — only enter when market hasn't moved much
+    FAIR_VALUE_BASE = 0.63   # baseline fair value for trend continuation
+    STREAK_BONUS    = 0.02   # +2% per streak step, capped at 0.80
+
+    def __init__(self, tracker) -> None:
+        self._tracker = tracker
+
+    def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
+        symbol = _detect_updown_market(market.question)
+        if symbol is None:
+            return None
+
+        direction = self._tracker.get_direction(symbol)
+        if direction is None:
+            return None   # no history yet — UpDownMomentumStrategy handles cold starts
+
+        streak = self._tracker.get_streak(symbol)
+
+        mid = order_book.mid if order_book else market.yes_price
+
+        if direction == "UP":
+            side  = "YES"
+            token = market.yes_token
+            mkt_price = mid
+        else:
+            side  = "NO"
+            token = market.no_token
+            mkt_price = 1.0 - mid
+
+        # Only enter near the start of the window (price still close to 0.50)
+        if mkt_price > self.MAX_ENTRY_PRICE:
+            return None
+
+        fair_value = min(self.FAIR_VALUE_BASE + streak * self.STREAK_BONUS, 0.80)
+        edge = fair_value - mkt_price
+
+        if edge < config.MIN_EDGE:
+            return None
+
+        confidence = "HIGH" if streak >= 3 else "MEDIUM" if streak >= 2 else "LOW"
+
+        logger.info(
+            f"[TREND-FOLLOW] {symbol} {direction}  streak={streak}  "
+            f"fair={fair_value:.2f}  mkt={mkt_price:.2f}  edge={edge:+.2f}  [{confidence}]  "
+            f"\"{market.question[:45]}\""
+        )
+
+        return TradeSignal(
+            market_id=market.id,
+            question=market.question,
+            side=side,
+            token_id=token.token_id,
+            market_price=mkt_price,
+            fair_value=fair_value,
+            edge=edge,
+            signal=edge,
+            confidence=confidence,
+            momentum_signal=float(streak),
+            imbalance_signal=0.0,
+            is_latency_arb=False,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Strategy 4: BTC Price Level Markets (daily above/below + monthly reach/dip)
 # ═══════════════════════════════════════════════════════════════════════════
 #

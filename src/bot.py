@@ -38,6 +38,7 @@ from src.strategy import (
     MomentumImbalanceStrategy,
     NewsArbitrageStrategy,
     UpDownMomentumStrategy,
+    TrendFollowStrategy,
     BTCLevelStrategy,
     NewsEventStrategy,
     TradeSignal,
@@ -47,6 +48,7 @@ from src.strategy import (
     _parse_btc_level,
     update_price_snapshot,
 )
+from src.trend import TrendTracker
 import config
 import src.webui as webui
 
@@ -86,6 +88,8 @@ class PolymarketBot:
         self._strategy     = MomentumImbalanceStrategy(params=self._learner.strategy_params)
         self._latency      = LatencyArbStrategy()
         self._updown       = UpDownMomentumStrategy()
+        self._trend_tracker = TrendTracker()
+        self._trend        = TrendFollowStrategy(self._trend_tracker)
         self._btclevel     = BTCLevelStrategy()
         self._news         = NewsEventStrategy()
         self._positions: dict[str, OpenPosition] = {}
@@ -356,8 +360,12 @@ class PolymarketBot:
                         trades_placed += 1
                     continue
 
-            # ── Strategy 3: Up/Down 5-min Momentum (highest priority) ──
-            sig = self._updown.analyse(market, ob)
+            # ── Strategy 3a: Trend Follow (per-asset streak direction) ──
+            sig = self._trend.analyse(market, ob)
+
+            # ── Strategy 3b: Up/Down 5-min Momentum (cold-start fallback) ──
+            if sig is None:
+                sig = self._updown.analyse(market, ob)
 
             # ── Strategy 4: BTC Price Level (daily/weekly/monthly) ────
             if sig is None:
@@ -516,6 +524,11 @@ class PolymarketBot:
                     self._news_token_ids.discard(token_id)
                     self._risk.record_close(pnl_usdc=pnl)
                     self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
+                    # Trend: our token went to 0 — we lost
+                    symbol = _detect_updown_market(pos.question)
+                    if symbol:
+                        direction_bet = "UP" if pos.side == "YES" else "DOWN"
+                        self._trend_tracker.record_result(symbol, direction_bet, won=False)
                     del self._positions[token_id]
                     self._save_positions()
                     logger.info(f"AUTO-CLEAR: resolved NO — position removed  {pos.question[:50]}")
@@ -645,6 +658,17 @@ class PolymarketBot:
             self._news_token_ids.discard(token_id)
             self._risk.record_close(pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
+
+            # Update trend tracker for UpDown markets when they fully resolve
+            symbol = _detect_updown_market(pos.question)
+            if symbol:
+                direction_bet = "UP" if pos.side == "YES" else "DOWN"
+                if exit_price >= 0.95:
+                    self._trend_tracker.record_result(symbol, direction_bet, won=True)
+                elif exit_price <= 0.05:
+                    self._trend_tracker.record_result(symbol, direction_bet, won=False)
+                # intermediate exit (stop-loss/take-profit) — don't update trend
+
             # Always remove from tracking — in DRY_RUN this is simulated, but
             # we still need to delete so stop-loss/take-profit don't re-fire
             # every loop on the same position.
