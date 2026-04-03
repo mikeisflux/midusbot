@@ -154,6 +154,24 @@ class PolymarketBot:
         # persistence was added, or opened directly on polymarket.com
         self._reconcile_positions()
 
+        # Purge stale "open" journal entries whose token is no longer tracked.
+        # These accumulate when markets are abandoned mid-session (bot killed,
+        # sell failed, etc.) and skew the learner with phantom open positions.
+        active_tokens = set(self._positions.keys())
+        stale_count = 0
+        import time as _time
+        for rec in self._learner.journal:
+            if not rec.closed and rec.token_id not in active_tokens:
+                rec.closed   = True
+                rec.exit_price = rec.entry_price  # break-even; no real P&L known
+                rec.closed_at  = _time.time()
+                rec.pnl_usdc   = 0.0
+                rec.pnl_pct    = 0.0
+                stale_count   += 1
+        if stale_count:
+            self._learner._save_journal()
+            logger.info(f"Purged {stale_count} stale open journal entries (positions not reconciled).")
+
         # Restore performance stats + equity curve from persisted journal/file
         self._dash_state.restore_from_journal(self._learner.journal)
 
@@ -656,6 +674,11 @@ class PolymarketBot:
         if config.TRADING_PAUSED:
             return False
 
+        # Never open the same token twice — covers all strategy types.
+        if sig.token_id in self._positions:
+            logger.debug(f"Already tracking token {sig.token_id[:16]}… — skipping duplicate signal")
+            return False
+
         # One active UpDown bet per (symbol, window-category) at a time.
         # BTC 5-min and BTC hourly are different categories — both allowed.
         # But don't bet on "BTC 5-min 4AM" while "BTC 5-min 3AM" is still
@@ -930,18 +953,24 @@ class PolymarketBot:
                 n_updown_seen += 1
             is_btclevel = _parse_btc_level(m.question) is not None
             q_lower = m.question.lower()
-            is_sports_game = any(kw in q_lower for kw in (
-                " vs ", " beat ", " win game", "game 1", "game 2", "game 3",
-                "game 4", "game 5", "game 6", "game 7",
-                "tonight", "monday night", "tuesday night", "wednesday night",
-                "thursday night", "friday night", "saturday night", "sunday night",
-            )) and any(kw in q_lower for kw in (
-                "nfl", "nba", "mlb", "nhl", "epl", "premier league",
-                " fc ", "united", "city ", "lakers", "celtics", "bulls",
-                "yankees", "dodgers", "chiefs", "patriots", "eagles",
+
+            # Hard-ban all sports/league markets — series like "Stanley Cup 2026"
+            # have misleading near-term endDates on Gamma but resolve months out.
+            # Any question mentioning a league or championship is excluded entirely.
+            _SPORTS_BAN = (
+                "stanley cup", "nba finals", "super bowl", "world series",
+                "champions league", "premier league", "la liga", "serie a",
+                "bundesliga", "march madness", "nfl season", "nba season",
+                " nhl ", " nba ", " nfl ", " mlb ", " epl ",
+                "win the 202", "win the 203",   # "win the 2026 NHL..." style
                 "oilers", "bruins", "maple leafs", "canadiens", "penguins",
-                "rangers", "kings", "canucks", "flames", "jets",
-            ))
+                "lightning", "golden knights", "hurricanes", "avalanche",
+                "rangers win", "kings win", "canucks win", "flames win",
+                "lakers win", "celtics win", "warriors win", "heat win",
+                "yankees win", "dodgers win", "chiefs win", "patriots win",
+            )
+            if not is_updown and any(kw in q_lower for kw in _SPORTS_BAN):
+                continue  # skip silently — these are never tradeable
 
             if is_updown:
                 if not (0.01 <= m.yes_price <= 0.99):
