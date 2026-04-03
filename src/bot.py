@@ -217,12 +217,12 @@ class PolymarketBot:
     # Performance guard — auto-switch live ↔ dry-run
     # ------------------------------------------------------------------
 
-    _LIVE_FLOOR_WIN_RATE  = 0.45   # below this over live trades → back to dry-run
-    _LIVE_MIN_TRADES      = 15
+    _LIVE_FLOOR_WIN_RATE  = 0.40   # below this over live trades → back to dry-run
+    _LIVE_MIN_TRADES      = 30     # need 30 live trades before guard can fire
     _DRY_RECOVER_WIN_RATE = 0.55   # hit this in dry-run → go live
-    _DRY_MIN_TRADES       = 15     # number of settled dry-run trades needed
-    _SWITCH_COOLDOWN_SECS = 600
-    _EVAL_WINDOW          = 20
+    _DRY_MIN_TRADES       = 20     # dry-run trades needed to qualify for live
+    _SWITCH_COOLDOWN_SECS = 1800   # 30 min between mode switches
+    _EVAL_WINDOW          = 30
 
     def _recent_win_rate(self, dry_run: bool) -> tuple[int, float]:
         journal = getattr(self._learner, "_journal", [])

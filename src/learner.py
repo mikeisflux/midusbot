@@ -354,14 +354,19 @@ class AdaptiveLearner:
             f"TP={self.risk_params.take_profit_pct:.0%}"
         )
 
-        # ── 5. LLM analysis ───────────────────────────────────────────
-        # Run the LLM analyst after every adaptation cycle.
-        # Primary directive: make profit, not lose it.
-        try:
-            from src.analyst import analyse_and_update
-            analyse_and_update(self)
-        except Exception as exc:
-            logger.debug(f"[Learner] LLM analysis skipped: {exc}")
+        # ── 5. LLM analysis (non-blocking) ────────────────────────────
+        # Run in a daemon thread so the bot loop never stalls waiting for
+        # the LLM. The analyst writes analyst_params.json when done; the
+        # strategy picks them up on the next loop automatically.
+        import threading
+        def _run_analyst():
+            try:
+                from src.analyst import analyse_and_update
+                analyse_and_update(self)
+            except Exception as exc:
+                logger.debug(f"[Learner] LLM analysis skipped: {exc}")
+        threading.Thread(target=_run_analyst, daemon=True, name="analyst").start()
+        logger.info("[Learner] LLM analyst started in background thread")
         self._save_params()
 
     # ------------------------------------------------------------------
