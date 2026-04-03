@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 OLLAMA_URL  = "http://localhost:11434"
 MODEL       = "qwen2.5-coder:3b"
 _OLD_MODELS = ["qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5-coder:1.5b", "qwen2.5-coder:7b"]  # delete these if present
-TIMEOUT_SEC = 180         # 3B generates ~768 tokens; give plenty of room
+TIMEOUT_SEC = 180         # 3B on good CPU; ~60-80s on cax41 or dedicated cores
 DATA_DIR    = Path("data")
 
 # ---------------------------------------------------------------------------
@@ -586,7 +586,7 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
                 "stream":  False,
                 "options": {
                     "temperature":  0.3,
-                    "num_predict":  400,   # keep under 180s timeout on 3B model
+                    "num_predict":  400,   # 3B @ ~6-8 tok/s on cax41 = ~50-65s
                 },
             },
             timeout=TIMEOUT_SEC,
