@@ -268,8 +268,6 @@ class PolymarketClient:
             except (KeyError, ValueError, TypeError, IndexError) as exc:
                 logger.debug(f"Skipping malformed market: {exc}")
 
-        if sports_skipped:
-            logger.debug(f"Skipped {sports_skipped} sports/team markets.")
         logger.info(f"Fetched {len(markets)} active markets from Gamma API.")
         return markets
 
@@ -725,7 +723,8 @@ class PolymarketClient:
             if isinstance(data, dict) and data.get("condition_id"):
                 return data
         except Exception as exc:
-            logger.debug(f"get_clob_market({condition_id[:16]}) failed: {exc}")
+            if "404" not in str(exc):  # 404 = resolved market, expected
+                logger.debug(f"get_clob_market({condition_id[:16]}) failed: {exc}")
         return None
 
     def redeem_position(self, condition_id: str, neg_risk: bool = False) -> bool:

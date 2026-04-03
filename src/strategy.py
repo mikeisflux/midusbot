@@ -553,7 +553,6 @@ class UpDownMomentumStrategy:
         # is still 0.50 (oracle lag) → we have edge.
         # Apply LLM-suggested skip list
         if symbol.upper() in [s.upper() for s in _ap.get("skip_assets", [])]:
-            logger.debug(f"[UPDOWN SKIP] {symbol} on analyst skip list")
             return None
 
         window_return = _window_return(symbol, int(secs_in))
@@ -564,10 +563,6 @@ class UpDownMomentumStrategy:
             _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT))
         )
         if window_return is None or abs(window_return) < _sig_thresh:
-            logger.debug(
-                f"[UPDOWN SKIP] {symbol} win_ret={window_return}  "
-                f"min={_sig_thresh:.4%}  t={secs_in:.0f}s"
-            )
             return None
 
         # ── CONFIRMATION 1: consecutive window trend ─────────────────────────
@@ -578,21 +573,16 @@ class UpDownMomentumStrategy:
             trend_direction = "UP" if trend_score > 0 else "DOWN"
             signal_direction = "UP" if window_return > 0 else "DOWN"
             if trend_direction != signal_direction and abs(trend_score) >= 0.5:
-                logger.debug(f"[UPDOWN SKIP] {symbol} trend={trend_score:+.2f} contradicts window_return")
                 return None
             trend_dir_ok = trend_direction == signal_direction
-        # If analyst requires minimum trend alignment, enforce it
         if _min_trend > 0 and (trend_score is None or abs(trend_score) < _min_trend):
-            logger.debug(f"[UPDOWN SKIP] {symbol} trend={trend_score} below min={_min_trend:.2f}")
             return None
 
         # ── CONFIRMATION 2: BTC leadership for alts ──────────────────────────
         btc_lead = _btc_leadership_signal(symbol)
         combined = window_return + btc_lead
 
-        # Skip if BTC leadership strongly contradicts the window return
         if btc_lead != 0.0 and (combined > 0) != (window_return > 0):
-            logger.debug(f"[UPDOWN SKIP] {symbol} BTC lead contradicts window return")
             return None
 
         direction = "UP" if combined > 0 else "DOWN"
