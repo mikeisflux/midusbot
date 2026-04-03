@@ -40,6 +40,9 @@ class RiskManager:
         self._wallet_balance: float = 0.0
         self._daily_pnl: float = 0.0
         self._trades_today: int = 0
+        # Internal exposure counter — incremented on open, decremented on close.
+        # Never reads from _positions or the CLOB API so it can't drift/freeze.
+        self._open_exposure: float = 0.0
 
     # -- adaptive getters --------------------------------------------------
 
@@ -115,25 +118,24 @@ class RiskManager:
     def set_wallet_balance(self, balance: float) -> None:
         self._wallet_balance = max(0.0, balance)
 
-    def record_open(self) -> None:
-        """Call when a new trade is opened — tracks daily trade count."""
+    def record_open(self, cost_usdc: float = 0.0) -> None:
+        """Call when a new trade is opened — tracks count and exposure."""
         self._trades_today += 1
+        self._open_exposure = round(self._open_exposure + cost_usdc, 4)
 
-    def record_close(self, pnl_usdc: float = 0.0) -> None:
-        """Call when a trade is closed — tracks daily P&L."""
+    def record_close(self, pnl_usdc: float = 0.0, cost_usdc: float = 0.0) -> None:
+        """Call when a trade is closed — tracks daily P&L and frees exposure."""
         self._daily_pnl += pnl_usdc
+        # Free the capital that was deployed for this position.
+        self._open_exposure = round(max(0.0, self._open_exposure - cost_usdc), 4)
 
     def total_exposure(self) -> float:
-        """Live open exposure in USDC — bot-placed positions only.
+        """Live open exposure — purely internal counter, never reads from CLOB.
 
-        External (reconciled) positions are excluded: they represent capital
-        committed before the bot's risk management was active, so counting them
-        would incorrectly block new bot-placed trades.
+        Incremented by record_open(), decremented by record_close().
+        Cannot drift or freeze due to API inconsistencies.
         """
-        return sum(
-            p.cost_usdc for p in self._positions.values()
-            if not p.is_external
-        )
+        return self._open_exposure
 
     def should_stop_loss(self, pnl_pct: float) -> bool:
         return pnl_pct <= self._stop_loss

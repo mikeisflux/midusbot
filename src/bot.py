@@ -534,7 +534,7 @@ class PolymarketBot:
                 # Auto-clear: token resolved against us (worth $0.00).
                 if current_price <= 0.03:
                     pnl = self._learner.record_close(token_id, current_price)
-                    self._risk.record_close(pnl_usdc=pnl)
+                    self._risk.record_close(pnl_usdc=pnl, cost_usdc=pos.cost_usdc)
                     self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
                     # Trend: our token went to 0 — we lost
                     symbol = _detect_updown_market(pos.question)
@@ -666,7 +666,7 @@ class PolymarketBot:
             exit_usdc = exit_price * pos.shares
             fee = self._risk.trade_fee(pos.cost_usdc, exit_usdc)
             pnl = self._learner.record_close(token_id, exit_price)
-            self._risk.record_close(pnl_usdc=pnl - fee)
+            self._risk.record_close(pnl_usdc=pnl - fee, cost_usdc=pos.cost_usdc)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
 
             # Update trend tracker for UpDown markets when they fully resolve
@@ -691,7 +691,7 @@ class PolymarketBot:
         # For manual clicks, force-remove from tracking — user explicitly wants it
         # gone. Polymarket auto-credits resolved YES winnings to the wallet.
         if manual:
-            self._risk.record_close()
+            self._risk.record_close(cost_usdc=pos.cost_usdc)
             del self._positions[token_id]
             self._save_positions()
             logger.info(f"MANUAL-REMOVE: sell order unavailable (market closed?) — removed from tracking: {pos.question[:55]}")
@@ -813,7 +813,7 @@ class PolymarketBot:
                         actual_entry = making_f / taking_f   # real fill price
                 except (ValueError, TypeError):
                     pass
-            self._risk.record_open()
+            self._risk.record_open(cost_usdc=actual_cost)
             self._dash_state.orders_placed += 1
 
             self._positions[sig.token_id] = OpenPosition(
@@ -1011,8 +1011,9 @@ class PolymarketBot:
                     confidence=sim.get("confidence", "LOW"),
                     dry_run=True,
                 )
+            sim_cost = sim.get("shares", 0.0) * sim.get("entry", 0.5)
             self._learner.record_close(_sim_tid, exit_price)
-            self._risk.record_close(pnl_usdc=net_pnl)
+            self._risk.record_close(pnl_usdc=net_pnl, cost_usdc=sim_cost)
             self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
             # Remove from live positions if it was tracked
