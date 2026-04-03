@@ -435,13 +435,10 @@ class PolymarketBot:
                 sig = self._updown.analyse(market, ob)
 
             if sig is None:
-                # Log why no strategy fired for this market (DEBUG — noisy but useful)
-                is_ud = _detect_updown_market(market.question) is not None
-                if is_ud:
-                    logger.debug(
-                        f"NO-SIGNAL UpDown \"{market.question[:55]}\" "
-                        f"price={current_yes:.3f}  ob={'yes' if ob else 'no'}"
-                    )
+                logger.debug(
+                    f"NO-SIGNAL \"{market.question[:55]}\"  "
+                    f"price={ob.mid:.3f if ob else 0:.3f}  ob={'yes' if ob else 'no'}"
+                )
                 continue
 
             # Skip if we already hold this exact token
