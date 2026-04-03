@@ -560,28 +560,54 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
     # ── Apply trading params ───────────────────────────────────────────────
     new = dict(params)
 
-    if "signal_threshold" in payload:
-        new["signal_threshold"] = float(max(0.0003, min(0.005, payload["signal_threshold"])))
-    if "min_trend_score" in payload:
-        new["min_trend_score"] = float(max(0.0, min(0.75, payload["min_trend_score"])))
+    def _f(key, lo, hi, fallback=None):
+        """Safely extract a float from the LLM payload with clamping."""
+        val = payload.get(key)
+        if val is None:
+            return fallback
+        try:
+            return float(max(lo, min(hi, float(val))))
+        except (ValueError, TypeError):
+            logger.debug(f"[ANALYST] Invalid {key!r} from LLM: {val!r}")
+            return fallback
+
+    if _f("signal_threshold", 0.00005, 0.005) is not None:
+        new["signal_threshold"] = _f("signal_threshold", 0.00005, 0.005)
+    if _f("min_trend_score", 0.0, 0.75) is not None:
+        new["min_trend_score"] = _f("min_trend_score", 0.0, 0.75)
     if "skip_assets" in payload and isinstance(payload["skip_assets"], list):
         new["skip_assets"] = [str(s).upper() for s in payload["skip_assets"]]
     if "prefer_assets" in payload and isinstance(payload["prefer_assets"], list):
         new["prefer_assets"] = [str(s).upper() for s in payload["prefer_assets"]]
-    if "max_secs_in" in payload:
-        new["max_secs_in"] = int(max(120, min(240, payload["max_secs_in"])))
+    try:
+        if "max_secs_in" in payload and payload["max_secs_in"] is not None:
+            new["max_secs_in"] = int(max(120, min(240, int(payload["max_secs_in"]))))
+    except (ValueError, TypeError):
+        pass
     if "kelly_override" in payload:
         ko = payload["kelly_override"]
-        new["kelly_override"] = float(max(0.05, min(0.5, ko))) if ko is not None else None
+        try:
+            new["kelly_override"] = float(max(0.05, min(0.5, float(ko)))) if ko is not None else None
+        except (ValueError, TypeError):
+            pass
     if "time_of_day_skip" in payload and isinstance(payload["time_of_day_skip"], list):
-        new["time_of_day_skip"] = [int(h) % 24 for h in payload["time_of_day_skip"]]
+        try:
+            new["time_of_day_skip"] = [int(h) % 24 for h in payload["time_of_day_skip"]]
+        except (ValueError, TypeError):
+            pass
     if "asset_thresholds" in payload and isinstance(payload["asset_thresholds"], dict):
-        new["asset_thresholds"] = {
-            str(k).upper(): float(max(0.0003, min(0.005, v)))
-            for k, v in payload["asset_thresholds"].items()
-        }
-    if "min_price_history_s" in payload:
-        new["min_price_history_s"] = int(max(60, min(300, payload["min_price_history_s"])))
+        cleaned = {}
+        for k, v in payload["asset_thresholds"].items():
+            try:
+                cleaned[str(k).upper()] = float(max(0.00005, min(0.005, float(v))))
+            except (ValueError, TypeError):
+                pass
+        new["asset_thresholds"] = cleaned
+    try:
+        if "min_price_history_s" in payload and payload["min_price_history_s"] is not None:
+            new["min_price_history_s"] = int(max(60, min(300, int(payload["min_price_history_s"]))))
+    except (ValueError, TypeError):
+        pass
 
     # ── Self-improvement ───────────────────────────────────────────────────
     ww_mrd    = str(payload.get("ww_mrd_action", ""))

@@ -91,7 +91,7 @@ class BinanceWSFeed:
 
     def _run(self) -> None:
         """Background thread: connect and auto-reconnect on failure."""
-        backoff = 1
+        self._backoff = 1
         while self._running:
             try:
                 import websocket
@@ -107,13 +107,13 @@ class BinanceWSFeed:
                 logger.warning(f"BinanceWSFeed error: {exc}")
             if not self._running:
                 break
-            logger.info(f"BinanceWSFeed reconnecting in {backoff}s…")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            logger.info(f"BinanceWSFeed reconnecting in {self._backoff}s…")
+            time.sleep(self._backoff)
+            self._backoff = min(self._backoff * 2, 60)
 
     def _on_open(self, ws) -> None:
         logger.info("BinanceWSFeed connected ✓")
-        backoff = 1  # reset on successful connect
+        self._backoff = 1  # reset on successful connect
 
     def _on_close(self, ws, code, msg) -> None:
         logger.warning(f"BinanceWSFeed disconnected (code={code})")

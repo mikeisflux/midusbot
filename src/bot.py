@@ -1082,7 +1082,7 @@ class PolymarketBot:
             return token_id in self._positions
         return (
             market.yes_token.token_id in self._positions
-            and market.no_token.token_id in self._positions
+            or market.no_token.token_id in self._positions
         )
 
     # ------------------------------------------------------------------
