@@ -320,9 +320,10 @@ def _learning_progress() -> dict:
     adapted = _learner._adaptation_count
     wr      = _state.win_rate
 
-    # "Ready to go live" = at least 30 resolved trades and win rate > 52%
-    MIN_TRADES = 30
-    MIN_WIN_RATE = 0.52
+    # "Ready to go live" = at least 20 dry-run trades and win rate >= 60%
+    # (matches _DRY_RECOVER_WIN_RATE and _DRY_MIN_TRADES in bot.py)
+    MIN_TRADES = 20
+    MIN_WIN_RATE = 0.60
     ready = total >= MIN_TRADES and wr >= MIN_WIN_RATE
 
     # Overall progress toward going live (0-100)
