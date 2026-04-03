@@ -320,74 +320,30 @@ class PolymarketBot:
         for market in candidates:
             if not self._running:
                 break
+
+            # ONLY trade UpDown crypto markets — this is where our edge is
+            _asset = _detect_updown_market(market.question)
+            if _asset is None:
+                continue
+
             if self._already_positioned(market):
                 continue  # both sides held — skip
             # Skip markets where we already hold one side
             if (market.yes_token.token_id in self._positions or
                     market.no_token.token_id in self._positions):
                 continue
-            # For UpDown markets: one bet per asset per loop, and skip if we
-            # already hold a position on that asset from a previous loop.
-            _asset = _detect_updown_market(market.question)
-            if _asset:
-                if _asset in _updown_bet_this_loop or _asset in _updown_assets_held:
-                    continue
+            # One bet per asset per loop; skip if already holding this asset
+            if _asset in _updown_bet_this_loop or _asset in _updown_assets_held:
+                continue
 
             ob = self._client.get_order_book(market.yes_token.token_id)
 
-            # Hours until this market closes (used for urgency boost)
-            hours_to_close: float | None = None
-            if market.end_date:
-                try:
-                    from datetime import timezone as _tz
-                    end = datetime.fromisoformat(market.end_date.replace("Z", "+00:00"))
-                    hours_to_close = (end - datetime.now(_tz.utc)).total_seconds() / 3600
-                except Exception:
-                    pass
-
-            # Update price snapshot for news detection BEFORE running strategies
-            current_yes = ob.mid if ob else market.yes_price
-            update_price_snapshot(market.id, current_yes)
-
-            # News-flagged markets: force NewsEventStrategy to run first
-            if market.id in _news_flagged:
-                sig = self._news.analyse(market, ob)
-                if sig:
-                    sig.confidence = "HIGH"   # news-confirmed → high conviction
-                    signals_found += 1
-                    self._dash_state.push_signal(sig)
-                    if self._execute_signal(sig):
-                        trades_placed += 1
-                    continue
-
-            # ── Strategy 3a: Trend Follow (per-asset streak direction) ──
+            # ── Strategy 1: Trend Follow (per-asset streak + momentum confirm) ──
             sig = self._trend.analyse(market, ob)
 
-            # ── Strategy 3b: Up/Down 5-min Momentum (cold-start fallback) ──
+            # ── Strategy 2: Momentum (cold-start / no trend history yet) ────────
             if sig is None:
                 sig = self._updown.analyse(market, ob)
-
-            # ── Strategy 4: BTC Price Level (daily/weekly/monthly) ────
-            if sig is None:
-                sig = self._btclevel.analyse(market, ob)
-
-            # ── Strategy 5: News/Event Sudden Price Move ───────────────
-            if sig is None:
-                sig = self._news.analyse(market, ob)
-
-            # ── Strategy 8: News Arbitrage (headline sentiment) ────────
-            # Limited to MAX_NEWS_TRADES_PER_DAY total per calendar day.
-            if sig is None and self._news_trades_today < config.MAX_NEWS_TRADES_PER_DAY:
-                sig = self._news_arb.analyse(market, ob)
-
-            # ── Strategy 1: Momentum + Imbalance ─────────────────────
-            if sig is None:
-                price_hist = self._client.get_price_history(market.yes_token.token_id)
-                sig = self._strategy.analyse(market, ob, price_hist)
-
-            # ── Strategy 2: Latency Arbitrage ─────────────────────────
-            if sig is None:
-                sig = self._latency.analyse(market, ob)
 
             if sig is None:
                 # Log why no strategy fired for this market (DEBUG — noisy but useful)
