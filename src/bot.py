@@ -37,6 +37,7 @@ from src.strategy import (
     TradeSignal,
     _fetch_price,
     _detect_updown_market,
+    _updown_window_mins,
 )
 from src.trend import TrendTracker
 from src.sim import SimPortfolio
@@ -379,6 +380,11 @@ class PolymarketBot:
             if _asset is None:
                 continue
 
+            # Only 5-minute windows — our oracle-lag edge doesn't apply to
+            # 15-min / 1-hour / 4-hour markets (market makers reprice too fast)
+            if _updown_window_mins(market.question) != 5:
+                continue
+
             if self._already_positioned(market):
                 continue  # both sides held — skip
             # Skip markets where we already hold one side
@@ -710,7 +716,6 @@ class PolymarketBot:
         # BTC 5-min and BTC hourly are different categories — both allowed.
         # But don't bet on "BTC 5-min 4AM" while "BTC 5-min 3AM" is still
         # open — we don't know if we won the first one yet.
-        from src.strategy import _detect_updown_market, _updown_window_mins
         sig_symbol = _detect_updown_market(sig.question)
         sig_window = _updown_window_mins(sig.question) if sig_symbol else None
         if sig_symbol and sig_window:
