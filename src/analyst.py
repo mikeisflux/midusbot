@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 OLLAMA_URL  = "http://localhost:11434"
 MODEL       = "qwen2.5-coder:3b"
 _OLD_MODELS = ["qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5-coder:1.5b", "qwen2.5-coder:7b"]  # delete these if present
-TIMEOUT_SEC = 90          # 3B generates ~768 tokens in ~30-60s
+TIMEOUT_SEC = 180         # 3B generates ~768 tokens; give plenty of room
 DATA_DIR    = Path("data")
 
 # ---------------------------------------------------------------------------
@@ -461,11 +461,14 @@ CODE PATCH (use whenever parameters alone can't make real difference):
     src/strategy.py, src/bot.py, src/risk.py, src/sim.py,
     src/feeds.py, src/learner.py, src/analyst.py, src/client.py,
     src/trend.py, src/dashboard.py, src/webui.py, config.py, main.py
-  HOW TO PATCH: read the file, modify the string, write it back:
+  HOW TO PATCH: your script runs from the project root. Read files first,
+  modify, then write back. Example:
     with open('src/strategy.py') as f: code = f.read()
     code = code.replace('OLD_LINE', 'NEW_LINE')
     with open('src/strategy.py', 'w') as f: f.write(code)
     print("Changed X to Y in strategy.py")
+  You MUST read the file inside your patch script — source code is NOT
+  provided in this prompt to save tokens. Use open() to read any file.
   RULES: no exec(), no eval(), no __import__, no deleting files.
   Leave as "" if parameters are sufficient.
 
@@ -543,9 +546,6 @@ def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> s
     p.append(f"\nCurrent parameters:\n{json.dumps({k: v for k, v in params.items() if not k.startswith('_') and k not in ('analysis_strategy','ww_mrd_action','trades_at_last_run','wins_at_last_run')}, indent=2)}")
     p.append("")
     p.append("Now apply WW_MRD: what ONE THING will make real difference? Do it.")
-    p.append("")
-    p.append("━━━ SOURCE CODE YOU CAN READ AND PATCH ━━━")
-    p.append(_read_sources())
 
     return "\n".join(p)
 
