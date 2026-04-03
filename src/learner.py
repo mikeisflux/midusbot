@@ -353,6 +353,15 @@ class AdaptiveLearner:
             f"SL={self.risk_params.stop_loss_pct:.0%}  "
             f"TP={self.risk_params.take_profit_pct:.0%}"
         )
+
+        # ── 5. LLM analysis ───────────────────────────────────────────
+        # Run the LLM analyst after every adaptation cycle.
+        # Primary directive: make profit, not lose it.
+        try:
+            from src.analyst import analyse_and_update
+            analyse_and_update(self)
+        except Exception as exc:
+            logger.debug(f"[Learner] LLM analysis skipped: {exc}")
         self._save_params()
 
     # ------------------------------------------------------------------

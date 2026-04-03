@@ -85,9 +85,7 @@ class PolymarketBot:
         self._dash_state   = DashboardState()
 
         self._running = False
-
-        # Performance guard: auto-switch live ↔ dry-run based on win rate
-        self._last_mode_switch: float = 0.0   # timestamp of last switch (cooldown)
+        self._last_mode_switch: float = 0.0
 
         # Live data feeds
         self._price_feed = BinanceWSFeed()
@@ -194,19 +192,14 @@ class PolymarketBot:
     # Performance guard — auto-switch live ↔ dry-run
     # ------------------------------------------------------------------
 
-    # Thresholds
-    _LIVE_FLOOR_WIN_RATE  = 0.55   # drop below this in live → retreat to dry-run
-    _LIVE_MIN_TRADES      = 15     # need at least this many live trades to evaluate
-    _DRY_RECOVER_WIN_RATE = 0.60   # hit this in dry-run → go live
-    _DRY_MIN_TRADES       = 20     # need at least this many dry-run trades to evaluate
-    _SWITCH_COOLDOWN_SECS = 600    # 10 min between any mode switches (no thrashing)
-    _EVAL_WINDOW          = 20     # look at last N trades when computing win rate
+    _LIVE_FLOOR_WIN_RATE  = 0.45   # below this over live trades → back to dry-run
+    _LIVE_MIN_TRADES      = 15
+    _DRY_RECOVER_WIN_RATE = 0.55   # hit this in dry-run → go live
+    _DRY_MIN_TRADES       = 15     # number of settled dry-run trades needed
+    _SWITCH_COOLDOWN_SECS = 600
+    _EVAL_WINDOW          = 20
 
     def _recent_win_rate(self, dry_run: bool) -> tuple[int, float]:
-        """
-        Returns (count, win_rate) for the last _EVAL_WINDOW closed trades
-        of the given type (live or dry-run), using the learner journal.
-        """
         journal = getattr(self._learner, "_journal", [])
         trades = [r for r in journal if r.closed and r.dry_run == dry_run]
         recent = trades[-self._EVAL_WINDOW:]
@@ -216,64 +209,42 @@ class PolymarketBot:
         return len(recent), wins / len(recent)
 
     def _set_mode(self, dry_run: bool, reason: str) -> None:
-        """Persist DRY_RUN to .env and in-process config, log the reason."""
         config.DRY_RUN = dry_run
         try:
             env_path = Path(".env")
-            if env_path.exists():
-                lines = env_path.read_text().splitlines()
-                new_lines, found = [], False
-                for line in lines:
-                    if line.startswith("DRY_RUN="):
-                        new_lines.append(f"DRY_RUN={'true' if dry_run else 'false'}")
-                        found = True
-                    else:
-                        new_lines.append(line)
-                if not found:
+            lines = env_path.read_text().splitlines() if env_path.exists() else []
+            new_lines, found = [], False
+            for line in lines:
+                if line.startswith("DRY_RUN="):
                     new_lines.append(f"DRY_RUN={'true' if dry_run else 'false'}")
-                env_path.write_text("\n".join(new_lines) + "\n")
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                new_lines.append(f"DRY_RUN={'true' if dry_run else 'false'}")
+            env_path.write_text("\n".join(new_lines) + "\n")
         except Exception as exc:
             logger.warning(f"[GUARD] Could not persist .env: {exc}")
-
-        mode = "DRY-RUN" if dry_run else "LIVE"
         self._last_mode_switch = time.time()
+        mode = "DRY-RUN" if dry_run else "LIVE"
         msg = f"[AUTO-SWITCH] → {mode}  reason: {reason}"
         logger.warning(msg)
         self._dash_state.add_exec_log("info", msg)
 
     def _check_performance_guard(self) -> None:
-        """
-        Automatically switch between live and dry-run based on recent win rate.
-
-        Live → Dry-run : win rate < _LIVE_FLOOR_WIN_RATE after _LIVE_MIN_TRADES live trades
-        Dry-run → Live : win rate ≥ _DRY_RECOVER_WIN_RATE after _DRY_MIN_TRADES dry-run trades
-        """
-        # Enforce cooldown — don't switch more than once per 10 minutes
+        """Auto-switch live ↔ dry-run based on recent win rate."""
         if time.time() - self._last_mode_switch < self._SWITCH_COOLDOWN_SECS:
             return
-
         if not config.DRY_RUN:
-            # LIVE mode: check if recent performance justifies staying live
             count, wr = self._recent_win_rate(dry_run=False)
             if count >= self._LIVE_MIN_TRADES and wr < self._LIVE_FLOOR_WIN_RATE:
-                self._set_mode(
-                    dry_run=True,
-                    reason=(
-                        f"live win rate {wr:.1%} < {self._LIVE_FLOOR_WIN_RATE:.1%} "
-                        f"over last {count} trades — retraining in sandbox"
-                    ),
-                )
+                self._set_mode(True,
+                    f"live win rate {wr:.1%} < {self._LIVE_FLOOR_WIN_RATE:.1%} over {count} trades")
         else:
-            # DRY-RUN mode: check if we've recovered enough to go live
             count, wr = self._recent_win_rate(dry_run=True)
             if count >= self._DRY_MIN_TRADES and wr >= self._DRY_RECOVER_WIN_RATE:
-                self._set_mode(
-                    dry_run=False,
-                    reason=(
-                        f"dry-run win rate {wr:.1%} ≥ {self._DRY_RECOVER_WIN_RATE:.1%} "
-                        f"over last {count} trades — going live"
-                    ),
-                )
+                self._set_mode(False,
+                    f"dry-run win rate {wr:.1%} ≥ {self._DRY_RECOVER_WIN_RATE:.1%} over {count} trades — going live")
 
     # ------------------------------------------------------------------
     # Single loop iteration

@@ -184,6 +184,40 @@ def _window_return(symbol: str, secs_in: int) -> float | None:
     return (cur_price - ref_price) / ref_price
 
 
+def _consecutive_window_trend(symbol: str, n_windows: int = 4) -> float | None:
+    """
+    Looks at the last n_windows completed 5-minute windows and returns
+    a score from -1.0 to +1.0:
+      +1.0 = all windows closed UP (strong upward trend)
+      -1.0 = all windows closed DOWN (strong downward trend)
+       0.0 = mixed (no trend)
+
+    Uses price history ticks. Requires at least 2 valid window samples.
+    """
+    sym = symbol.upper()
+    hist = _PRICE_HISTORY.get(sym, [])
+    if len(hist) < 10:
+        return None
+    now = time.time()
+    results = []
+    for i in range(1, n_windows + 1):
+        # Each completed window: ends i*300s ago, starts (i+1)*300s ago
+        end_target   = now - i * 300
+        start_target = now - (i + 1) * 300
+        end_tick   = min(hist, key=lambda x: abs(x[1] - end_target))
+        start_tick = min(hist, key=lambda x: abs(x[1] - start_target))
+        # Only use if we have ticks within 60s of the target time
+        if abs(end_tick[1] - end_target) > 60 or abs(start_tick[1] - start_target) > 60:
+            continue
+        if start_tick[0] <= 0:
+            continue
+        window_ret = (end_tick[0] - start_tick[0]) / start_tick[0]
+        results.append(1 if window_ret > 0 else -1)
+    if len(results) < 2:
+        return None
+    return sum(results) / len(results)   # -1.0 .. +1.0
+
+
 # Assets that BTC leads (moves before them in correlated markets)
 _BTC_LED_ALTS = frozenset({"ETH", "SOL", "XRP", "DOGE", "BNB"})
 
@@ -476,10 +510,14 @@ class UpDownMomentumStrategy:
         # After 75s the market makers have already repriced to fair value.
         # If end_date is unparseable, skip entirely — don't trade blind.
         secs_in = _market_seconds_into_window(market)
-        # Allow entry from 5s (enough data) to 240s (4 min into 5-min window).
-        # The entry-price guard (mid > 0.62) handles "too late" cases — if the
-        # market has already repriced, the price cap kills the signal.
-        if secs_in is None or secs_in < 5 or secs_in > 240:
+        # Load analyst params (LLM-tuned, default to built-in values if not set)
+        try:
+            from src.analyst import load_params as _load_analyst_params
+            _aparams = _load_analyst_params()
+        except Exception:
+            _aparams = {}
+        _max_secs_in = int(_aparams.get("max_secs_in", 240))
+        if secs_in is None or secs_in < 5 or secs_in > _max_secs_in:
             return None
 
         # Warm up price history
@@ -498,15 +536,37 @@ class UpDownMomentumStrategy:
         # This is EXACTLY what the oracle measures. If it's positive → YES is
         # already ahead; negative → NO is already ahead. The Polymarket price
         # is still 0.50 (oracle lag) → we have edge.
+        # Apply LLM-suggested skip list
+        if symbol.upper() in [s.upper() for s in _aparams.get("skip_assets", [])]:
+            logger.debug(f"[UPDOWN SKIP] {symbol} on analyst skip list")
+            return None
+
         window_return = _window_return(symbol, int(secs_in))
-        if window_return is None or abs(window_return) < _MIN_WINDOW_RETURN_PCT:
+        _sig_thresh = float(_aparams.get("signal_threshold", _MIN_WINDOW_RETURN_PCT))
+        if window_return is None or abs(window_return) < _sig_thresh:
             logger.debug(
                 f"[UPDOWN SKIP] {symbol} win_ret={window_return}  "
-                f"min={_MIN_WINDOW_RETURN_PCT:.4%}  t={secs_in:.0f}s"
+                f"min={_sig_thresh:.4%}  t={secs_in:.0f}s"
             )
             return None
 
-        # ── CONFIRMATION: BTC leadership for alts ────────────────────────────
+        # ── CONFIRMATION 1: consecutive window trend ─────────────────────────
+        trend_score = _consecutive_window_trend(symbol)  # -1..+1, None = unknown
+        trend_dir_ok = True
+        _min_trend = float(_aparams.get("min_trend_score", 0.0))
+        if trend_score is not None:
+            trend_direction = "UP" if trend_score > 0 else "DOWN"
+            signal_direction = "UP" if window_return > 0 else "DOWN"
+            if trend_direction != signal_direction and abs(trend_score) >= 0.5:
+                logger.debug(f"[UPDOWN SKIP] {symbol} trend={trend_score:+.2f} contradicts window_return")
+                return None
+            trend_dir_ok = trend_direction == signal_direction
+        # If analyst requires minimum trend alignment, enforce it
+        if _min_trend > 0 and (trend_score is None or abs(trend_score) < _min_trend):
+            logger.debug(f"[UPDOWN SKIP] {symbol} trend={trend_score} below min={_min_trend:.2f}")
+            return None
+
+        # ── CONFIRMATION 2: BTC leadership for alts ──────────────────────────
         btc_lead = _btc_leadership_signal(symbol)
         combined = window_return + btc_lead
 
@@ -518,12 +578,11 @@ class UpDownMomentumStrategy:
         direction = "UP" if combined > 0 else "DOWN"
 
         # ── Fair value ────────────────────────────────────────────────────────
-        # A 0.1% window return → probability based on Brownian bridge:
-        # P(stay same side at end | currently X% from start, secs_in elapsed) ≈
-        # Φ(|window_return| / σ_remaining). Calibrated empirically to 0.53–0.68.
-        strength = min(abs(window_return) / 0.01, 1.0)   # 1.0% = full strength
-        fair_prob = 0.53 + strength * 0.15                 # 0.53 → 0.68
-        fair_prob = float(np.clip(fair_prob, 0.53, 0.68))
+        strength = min(abs(window_return) / 0.01, 1.0)
+        # Base 53% → 68%; add up to +5% when trend agrees (consecutive windows)
+        trend_boost = 0.05 * abs(trend_score) if (trend_score is not None and trend_dir_ok) else 0.0
+        fair_prob = 0.53 + strength * 0.15 + trend_boost
+        fair_prob = float(np.clip(fair_prob, 0.53, 0.73))
 
         if direction == "UP":
             side = "YES"
@@ -540,12 +599,16 @@ class UpDownMomentumStrategy:
         if edge < config.MIN_EDGE:
             return None
 
-        confidence = "HIGH" if abs(window_return) >= 0.003 else "MEDIUM"
+        # HIGH if strong window return OR trend strongly agrees
+        confidence = (
+            "HIGH" if abs(window_return) >= 0.003 or (trend_score is not None and abs(trend_score) >= 0.75)
+            else "MEDIUM"
+        )
         pressure = _exchange_pressure(symbol)
 
         logger.info(
             f"[UPDOWN] {symbol} {direction}  "
-            f"win_ret={window_return:+.4%}  btc_lead={btc_lead:+.4%}  "
+            f"win_ret={window_return:+.4%}  trend={trend_score:+.2f}  btc={btc_lead:+.4%}  "
             f"fair={fair_value:.3f}  mkt={mkt_price:.3f}  edge={edge:+.3f}  "
             f"t={secs_in:.0f}s  → {side} [{confidence}]  \"{market.question[:45]}\""
         )
@@ -628,9 +691,7 @@ class TrendFollowStrategy:
         if mkt_price > self.MAX_ENTRY_PRICE:
             return None
 
-        # Window-relative confirmation: the current price must agree with trend
-        # direction. If trend says UP but window return is DOWN (price is below
-        # window-start reference), the trend is working against us — sit out.
+        # Window-relative confirmation: current price must agree with trend direction.
         window_return = _window_return(symbol, int(secs_in))
         if window_return is None:
             return None
@@ -639,7 +700,16 @@ class TrendFollowStrategy:
             return None  # window-relative signal contradicts trend — sit out
         combined = window_return + _btc_leadership_signal(symbol)
 
-        fair_value = min(self.FAIR_VALUE_BASE + streak * self.STREAK_BONUS, 0.68)
+        # Consecutive-window trend: if recent windows have been going the same
+        # way as our streak direction, boost the streak bonus slightly.
+        cw_trend = _consecutive_window_trend(symbol)
+        cw_boost = 0
+        if cw_trend is not None:
+            cw_dir = "UP" if cw_trend > 0 else "DOWN"
+            if cw_dir == direction and abs(cw_trend) >= 0.5:
+                cw_boost = 1  # treat as +1 to streak for fair value calc
+
+        fair_value = min(self.FAIR_VALUE_BASE + (streak + cw_boost) * self.STREAK_BONUS, 0.72)
         edge = fair_value - mkt_price
 
         if edge < config.MIN_EDGE:
@@ -651,7 +721,7 @@ class TrendFollowStrategy:
             return None   # fresh direction flip + weak window signal — too risky
 
         logger.info(
-            f"[TREND-FOLLOW] {symbol} {direction}  streak={streak}  "
+            f"[TREND-FOLLOW] {symbol} {direction}  streak={streak}  cw={cw_trend:+.2f}  "
             f"win_ret={window_return:+.4%}  "
             f"fair={fair_value:.2f}  mkt={mkt_price:.2f}  edge={edge:+.2f}  "
             f"t={secs_in:.0f}s  [{confidence}]  \"{market.question[:45]}\""
