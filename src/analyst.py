@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,9 +47,13 @@ _PATCH_BACKUP = DATA_DIR / "analyst_patch_backup"  # backups before applying
 # Source files the LLM is allowed to read and patch
 _READABLE_SOURCES = [
     "src/strategy.py",
-    "src/analyst.py",
-    "src/learner.py",
+    "src/bot.py",
     "src/risk.py",
+    "src/sim.py",
+    "src/feeds.py",
+    "src/learner.py",
+    "src/analyst.py",
+    "config.py",
 ]
 
 # ---------------------------------------------------------------------------
@@ -304,14 +311,21 @@ def _apply_patch(patch_code: str) -> bool:
         return False
 
     # Safety: block dangerous patterns
-    forbidden = ["exec(", "eval(", "__import__", "subprocess", "os.system",
-                 "shutil.rmtree", "open('/", "open(\"/"]
+    forbidden = ["exec(", "eval(", "__import__", "os.system",
+                 "shutil.rmtree", "rmdir", "unlink"]
     for f in forbidden:
         if f in patch_code:
             logger.warning(f"[ANALYST] Patch rejected — forbidden pattern: {f!r}")
             return False
 
-    # Back up current source files before applying
+    # Must parse as valid Python before we touch any files
+    try:
+        ast.parse(patch_code)
+    except SyntaxError as e:
+        logger.warning(f"[ANALYST] Patch rejected — syntax error after re-check: {e}")
+        return False
+
+    # Back up all patchable source files before applying
     _PATCH_BACKUP.mkdir(parents=True, exist_ok=True)
     ts = int(time.time())
     for path in _READABLE_SOURCES:
@@ -319,23 +333,44 @@ def _apply_patch(patch_code: str) -> bool:
         if p.exists():
             shutil.copy2(p, _PATCH_BACKUP / f"{p.name}.{ts}.bak")
 
-    # Write and execute the patch
+    # Write and execute the patch using the same Python interpreter as the bot
     _PATCH_FILE.write_text(patch_code)
     try:
         result = subprocess.run(
-            ["python", str(_PATCH_FILE)],
-            capture_output=True, text=True, timeout=30
+            [sys.executable, str(_PATCH_FILE)],
+            capture_output=True, text=True, timeout=60,
+            cwd=Path(__file__).parent.parent,  # run from project root
         )
         if result.returncode != 0:
             logger.warning(
                 f"[ANALYST] Patch failed (exit {result.returncode}):\n"
-                f"{result.stderr[:500]}"
+                f"{result.stderr[:800]}"
             )
+            # Restore backups on failure
+            for path in _READABLE_SOURCES:
+                bak = _PATCH_BACKUP / f"{Path(path).name}.{ts}.bak"
+                if bak.exists():
+                    shutil.copy2(bak, path)
             return False
-        logger.warning(f"[ANALYST] Patch applied successfully:\n{result.stdout[:300]}")
+        logger.warning(f"[ANALYST] Patch applied:\n{result.stdout[:500]}")
+
+        # Git-commit the change so there's a human-readable history
+        try:
+            subprocess.run(
+                ["git", "add"] + _READABLE_SOURCES,
+                timeout=15, cwd=Path(__file__).parent.parent,
+            )
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"[ANALYST] auto-patch run #{ts} — {result.stdout[:80].strip()}"],
+                timeout=15, cwd=Path(__file__).parent.parent,
+            )
+        except Exception as git_exc:
+            logger.debug(f"[ANALYST] Git commit skipped: {git_exc}")
+
         return True
     except subprocess.TimeoutExpired:
-        logger.warning("[ANALYST] Patch timed out after 30s — skipped")
+        logger.warning("[ANALYST] Patch timed out after 60s — skipped")
         return False
     except Exception as exc:
         logger.warning(f"[ANALYST] Patch execution error: {exc}")
@@ -411,15 +446,22 @@ MEMORY:
   Update it if you've found a better approach.
 - ww_mrd_action: the ONE highest-impact thing you are doing this run.
 
-CODE PATCH (advanced — use when parameters alone can't make real difference):
-- code_patch: a complete, executable Python script that modifies source files
-  to implement your idea. The script runs as a subprocess with access to all
-  project files. Use this for structural improvements that parameters can't
-  express — e.g. adding a new signal, changing how window_return is calculated,
-  adding a new filter. Leave as "" if parameters are sufficient.
-  RULES: no exec/eval, no subprocess calls inside the patch, no deleting files.
-  Write to source files using open(path, 'w') with the full modified content,
-  or append specific changes. Print what you changed so it appears in logs.
+CODE PATCH (use whenever parameters alone can't make real difference):
+- code_patch: a complete, executable Python script that directly rewrites
+  source files. After it runs, the bot restarts automatically so changes
+  take effect immediately. Use this for any structural improvement —
+  new signals, better filters, bug fixes, algorithm changes.
+  The script runs from the project root with full filesystem access.
+  Source files you can read and rewrite:
+    src/strategy.py, src/bot.py, src/risk.py, src/sim.py,
+    src/feeds.py, src/learner.py, src/analyst.py, config.py
+  HOW TO PATCH: read the file, modify the string, write it back:
+    with open('src/strategy.py') as f: code = f.read()
+    code = code.replace('OLD_LINE', 'NEW_LINE')
+    with open('src/strategy.py', 'w') as f: f.write(code)
+    print("Changed X to Y in strategy.py")
+  RULES: no exec(), no eval(), no __import__, no deleting files.
+  Leave as "" if parameters are sufficient.
 
 OUTPUT — respond ONLY with valid JSON, no extra text:
 {
@@ -631,7 +673,12 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
     # ── Apply code patch if proposed ──────────────────────────────────────
     code_patch = str(payload.get("code_patch", "")).strip()
     if code_patch:
-        _apply_patch(code_patch)
+        patched = _apply_patch(code_patch)
+        if patched:
+            # Restart the bot process so the new code takes effect.
+            # pm2 will automatically relaunch it.
+            logger.warning("[ANALYST] Code patch applied — restarting bot to load new code…")
+            os.kill(os.getpid(), signal.SIGTERM)
 
     # ── Append to unlimited memory ─────────────────────────────────────────
     if mem_entry:
