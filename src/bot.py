@@ -38,6 +38,7 @@ from src.strategy import (
     _fetch_price,
     _detect_updown_market,
     _updown_window_mins,
+    _market_seconds_into_window,
 )
 from src.trend import TrendTracker
 from src.sim import SimPortfolio
@@ -351,13 +352,17 @@ class PolymarketBot:
                 continue
 
             if self._already_positioned(market):
-                continue  # both sides held — skip
-            # Skip markets where we already hold one side
+                continue
             if (market.yes_token.token_id in self._positions or
                     market.no_token.token_id in self._positions):
                 continue
-            # One bet per asset per loop; skip if already holding this asset
             if _asset in _updown_bet_this_loop or _asset in _updown_assets_held:
+                continue
+
+            # Check window timing BEFORE fetching the order book.
+            # Only ~7 markets are ever in the active entry window at once.
+            _secs = _market_seconds_into_window(market)
+            if _secs is None or _secs < 5 or _secs > 240:
                 continue
 
             ob = self._client.get_order_book(market.yes_token.token_id)
@@ -1018,11 +1023,9 @@ class PolymarketBot:
                     if hours_left > day_cap * 24:
                         n_toolate += 1; continue
                 except Exception:
-                    if not is_updown:
-                        n_nodate += 1; continue
-            else:
-                if not is_updown:
                     n_nodate += 1; continue
+            else:
+                n_nodate += 1; continue
 
             if is_updown:
                 n_updown_pass += 1
