@@ -1023,7 +1023,7 @@ class PolymarketBot:
                     if not is_updown and not is_btclevel:
                         n_nodate += 1; continue
             else:
-                if not is_updown and not is_sports_game:
+                if not is_updown:
                     n_nodate += 1; continue
 
             if is_updown:
