@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import random
 import signal
+import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -43,6 +44,7 @@ from src.strategy import (
 from src.trend import TrendTracker
 from src.sim import SimPortfolio
 from src.utils import alerter
+from src.discord_bot import commander
 import config
 import src.webui as webui
 
@@ -134,6 +136,16 @@ class PolymarketBot:
         # Start web UI immediately so the browser is never refused while
         # the slow startup tasks (reconcile, balance fetch) run below.
         webui.start(self._dash_state, port=8080, learner=self._learner, close_position_fn=self._close_position, sim=self._sim)
+
+        # Wire up Discord commander
+        commander.get_state   = lambda: self._dash_state
+        commander.do_stop     = lambda: setattr(self, "_running", False)
+        commander.do_pause    = lambda: setattr(config, "TRADING_PAUSED", True)
+        commander.do_resume   = lambda: setattr(config, "TRADING_PAUSED", False)
+        commander.do_live     = lambda: self._switch_mode(dry_run=False, reason="Discord command")
+        commander.do_dry      = lambda: self._switch_mode(dry_run=True,  reason="Discord command")
+        commander.do_refactor = self._discord_refactor
+        commander.start()
 
         # Cancel any stale open orders left from previous runs
         if not config.DRY_RUN:
@@ -1428,6 +1440,20 @@ class PolymarketBot:
                     time.sleep(BURST_INTERVAL_SECS)
         else:
             time.sleep(config.LOOP_INTERVAL_SECONDS)
+
+    def _discord_refactor(self, instruction: str) -> None:
+        """Trigger the LLM analyst with a custom instruction injected into the prompt."""
+        def _run():
+            try:
+                from src.analyst import analyse_and_update, load_params, save_params
+                params = load_params()
+                params["_discord_instruction"] = instruction
+                save_params(params)
+                analyse_and_update(self._learner)
+                commander.send(f"✅ Refactor complete.")
+            except Exception as exc:
+                commander.send(f"❌ Refactor failed: {exc}")
+        threading.Thread(target=_run, daemon=True, name="discord-refactor").start()
 
     def _shutdown(self, *_) -> None:
         logger.info("Shutdown signal received…")
