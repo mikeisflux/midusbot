@@ -41,6 +41,7 @@ class TradeSignal:
     hours_to_close: float | None = None
     best_ask: float | None = None
     best_bid: float | None = None
+    no_best_ask: float | None = None   # NO token ask (fetched separately for NO trades)
     is_news_arb: bool = False
 
     def __str__(self) -> str:

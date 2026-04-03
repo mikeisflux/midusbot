@@ -419,6 +419,14 @@ class PolymarketBot:
             if ob:
                 sig.best_ask = ob.best_ask
                 sig.best_bid = ob.best_bid
+            # For NO trades, fetch the NO token OB directly for accurate sim entry
+            if sig.side == "NO" and market.no_token:
+                try:
+                    no_ob = self._client.get_order_book(market.no_token.token_id)
+                    if no_ob and no_ob.best_ask < 0.99:
+                        sig.no_best_ask = no_ob.best_ask
+                except Exception:
+                    pass
 
             signals_found += 1
             self._dash_state.push_signal(sig)
@@ -834,9 +842,15 @@ class PolymarketBot:
             # Entry price: real ask for YES, implied NO ask (1-best_bid) for NO
             # sig.best_ask is set from ob before _execute_signal is called
             if sig.side == "YES":
-                sim_entry = sig.best_ask if sig.best_ask and sig.best_ask > 0.01 else limit_price
+                sim_entry = sig.best_ask if sig.best_ask and 0.01 < sig.best_ask < 0.99 else limit_price
             else:
-                sim_entry = (1.0 - sig.best_bid) if sig.best_bid and sig.best_bid > 0 else limit_price
+                # Use NO token's own ask if available; fall back to complement of YES bid
+                if sig.no_best_ask and 0.01 < sig.no_best_ask < 0.99:
+                    sim_entry = sig.no_best_ask
+                elif sig.best_bid and 0.05 < sig.best_bid < 0.95:
+                    sim_entry = 1.0 - sig.best_bid
+                else:
+                    sim_entry = limit_price
             sim_entry = round(max(0.01, min(0.99, sim_entry)), 4)
             sim_shares = round(actual_cost / sim_entry, 4) if sim_entry > 0 else shares
             self._sim.open_position(
