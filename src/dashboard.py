@@ -407,7 +407,7 @@ class Dashboard:
             "", "",
         )
 
-        return Panel(t, title="Performance", title_style="bold blue", border_style="blue", padding=0)
+        return Panel(t, title="[bold blue]Performance[/bold blue]", border_style="blue", padding=0)
 
     def _learned_panel(self, s: DashboardState) -> Panel:
         lp = s.learned
@@ -435,4 +435,4 @@ class Dashboard:
             "", "",
         )
 
-        return Panel(t, title="Learned Parameters", title_style="bold white", border_style="white", padding=0)
+        return Panel(t, title="[bold white]Learned Parameters[/bold white]", border_style="white", padding=0)
