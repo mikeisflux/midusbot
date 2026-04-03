@@ -63,6 +63,18 @@ _BINANCE_FEEDS: dict[str, str] = {
     "XRP":  "https://api.binance.com/api/v3/ticker/price?symbol=XRPUSDT",
     "SOL":  "https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT",
     "DOGE": "https://api.binance.com/api/v3/ticker/price?symbol=DOGEUSDT",
+    "BNB":  "https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT",
+    "HYPE": "https://api.binance.com/api/v3/ticker/price?symbol=HYPEUSDT",
+    "AVAX": "https://api.binance.com/api/v3/ticker/price?symbol=AVAXUSDT",
+    "LINK": "https://api.binance.com/api/v3/ticker/price?symbol=LINKUSDT",
+    "ADA":  "https://api.binance.com/api/v3/ticker/price?symbol=ADAUSDT",
+    "LTC":  "https://api.binance.com/api/v3/ticker/price?symbol=LTCUSDT",
+    "DOT":  "https://api.binance.com/api/v3/ticker/price?symbol=DOTUSDT",
+    "MATIC":"https://api.binance.com/api/v3/ticker/price?symbol=MATICUSDT",
+    "SUI":  "https://api.binance.com/api/v3/ticker/price?symbol=SUIUSDT",
+    "PEPE": "https://api.binance.com/api/v3/ticker/price?symbol=PEPEUSDT",
+    "WIF":  "https://api.binance.com/api/v3/ticker/price?symbol=WIFUSDT",
+    "TRX":  "https://api.binance.com/api/v3/ticker/price?symbol=TRXUSDT",
 }
 _COINGECKO_IDS: dict[str, str] = {
     "BTC":  "bitcoin",
@@ -70,6 +82,18 @@ _COINGECKO_IDS: dict[str, str] = {
     "XRP":  "ripple",
     "SOL":  "solana",
     "DOGE": "dogecoin",
+    "BNB":  "binancecoin",
+    "HYPE": "hyperliquid",
+    "AVAX": "avalanche-2",
+    "LINK": "chainlink",
+    "ADA":  "cardano",
+    "LTC":  "litecoin",
+    "DOT":  "polkadot",
+    "MATIC":"matic-network",
+    "SUI":  "sui",
+    "PEPE": "pepe",
+    "WIF":  "dogwifcoin",
+    "TRX":  "tron",
 }
 
 _PRICE_CACHE: dict[str, tuple[float, float]] = {}     # symbol → (price, timestamp)
@@ -78,7 +102,7 @@ _CACHE_TTL = 2.0   # seconds
 
 # Rolling 60-second price history for momentum: symbol → [(price, ts), ...]
 _PRICE_HISTORY: dict[str, list[tuple[float, float]]] = {}
-_HISTORY_WINDOW = 600  # keep 10 minutes of ticks for multi-timeframe analysis
+_HISTORY_WINDOW = 5400  # keep 90 minutes of ticks — supports 12+ completed 5-min windows
 
 
 def _fetch_price(symbol: str) -> float | None:
@@ -186,7 +210,7 @@ def _window_return(symbol: str, secs_in: int) -> float | None:
     return (cur_price - ref_price) / ref_price
 
 
-def _consecutive_window_trend(symbol: str, n_windows: int = 4) -> float | None:
+def _consecutive_window_trend(symbol: str, n_windows: int = 12) -> float | None:
     """
     Looks at the last n_windows completed 5-minute windows and returns
     a score from -1.0 to +1.0:
@@ -221,7 +245,9 @@ def _consecutive_window_trend(symbol: str, n_windows: int = 4) -> float | None:
 
 
 # Assets that BTC leads (moves before them in correlated markets)
-_BTC_LED_ALTS = frozenset({"ETH", "SOL", "XRP", "DOGE", "BNB"})
+_BTC_LED_ALTS = frozenset({"ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE",
+                           "AVAX", "LINK", "ADA", "LTC", "DOT", "MATIC",
+                           "SUI", "PEPE", "WIF", "TRX"})
 
 
 def _btc_leadership_signal(symbol: str) -> float:
@@ -377,18 +403,38 @@ import re as _re
 
 # Maps keywords in the market question to the Binance symbol to fetch
 _UPDOWN_ASSETS = {
-    "xrp":      "XRP",
-    "ripple":   "XRP",
-    "btc":      "BTC",
-    "bitcoin":  "BTC",
-    "eth":      "ETH",
-    "ethereum": "ETH",
-    "sol":      "SOL",
-    "solana":   "SOL",
-    "doge":     "DOGE",
-    "dogecoin": "DOGE",
-    "bnb":      "BNB",
-    "hype":     "HYPE",
+    "xrp":          "XRP",
+    "ripple":       "XRP",
+    "btc":          "BTC",
+    "bitcoin":      "BTC",
+    "eth":          "ETH",
+    "ethereum":     "ETH",
+    "sol":          "SOL",
+    "solana":       "SOL",
+    "doge":         "DOGE",
+    "dogecoin":     "DOGE",
+    "bnb":          "BNB",
+    "hype":         "HYPE",
+    "hyperliquid":  "HYPE",
+    "avax":         "AVAX",
+    "avalanche":    "AVAX",
+    "link":         "LINK",
+    "chainlink":    "LINK",
+    "ada":          "ADA",
+    "cardano":      "ADA",
+    "ltc":          "LTC",
+    "litecoin":     "LTC",
+    "dot":          "DOT",
+    "polkadot":     "DOT",
+    "matic":        "MATIC",
+    "pol":          "MATIC",
+    "polygon":      "MATIC",
+    "sui":          "SUI",
+    "pepe":         "PEPE",
+    "wif":          "WIF",
+    "dogwifhat":    "WIF",
+    "trx":          "TRX",
+    "tron":         "TRX",
 }
 
 # Minimum absolute 60s momentum to act on (0.05% move in 60s)

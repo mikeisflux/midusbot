@@ -34,9 +34,18 @@ _WS_SYMBOLS: dict[str, str] = {
     "XRP":  "xrpusdt",
     "DOGE": "dogeusdt",
     "BNB":  "bnbusdt",
+    "HYPE": "hypeusdt",
+    "AVAX": "avaxusdt",
+    "LINK": "linkusdt",
+    "ADA":  "adausdt",
+    "LTC":  "ltcusdt",
+    "DOT":  "dotusdt",
+    "MATIC":"maticusdt",
+    "SUI":  "suiusdt",
+    "PEPE": "pepeusdt",
+    "WIF":  "wifusdt",
+    "TRX":  "trxusdt",
 }
-
-# HYPE is not on Binance — fetch via REST fallback handled by strategy.py
 
 
 class BinanceWSFeed:
@@ -121,18 +130,23 @@ class BinanceWSFeed:
     def _on_error(self, ws, error) -> None:
         logger.warning(f"BinanceWSFeed error: {error}")
 
+    # Reverse map: binance base (e.g. "btcusdt") → internal symbol (e.g. "BTC")
+    _STREAM_TO_SYM: dict[str, str] = {v: k for k, v in _WS_SYMBOLS.items()}
+
     def _on_message(self, ws, raw: str) -> None:
         try:
             msg = json.loads(raw)
             data = msg.get("data", {})
             stream = msg.get("stream", "")
 
-            sym_lower = stream.split("@")[0].replace("usdt", "")
-            symbol = sym_lower.upper()
-            if symbol == "SOLUSD" or sym_lower == "sol":
-                symbol = "SOL"
-
-            stream_type = stream.split("@")[1] if "@" in stream else ""
+            parts = stream.split("@")
+            if len(parts) < 2:
+                return
+            base = parts[0]          # e.g. "btcusdt"
+            stream_type = parts[1]   # e.g. "aggTrade"
+            symbol = self._STREAM_TO_SYM.get(base)
+            if symbol is None:
+                return
 
             if stream_type == "aggTrade":
                 price_str = data.get("p")
