@@ -454,7 +454,7 @@ class PolymarketBot:
         if signals_found == 0 and len(candidates) > 0:
             logger.debug("No trades this loop — signal/edge threshold not met")
         elif signals_found > 0 and trades_placed == 0:
-            logger.info(f"Signals found but no trades placed — risk/position guards blocked execution")
+            logger.debug("Signals found but cap/guards blocked all trades")
 
         logger.info(
             f"── Loop done — signals={signals_found}  trades={trades_placed}  "

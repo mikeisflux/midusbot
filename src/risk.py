@@ -89,7 +89,7 @@ class RiskManager:
         open_usdc = self.total_exposure()
         headroom = dynamic_cap - open_usdc
         if headroom <= 0:
-            logger.warning(
+            logger.debug(
                 f"Exposure cap reached (cap={dynamic_cap:.2f} USDC, open={open_usdc:.2f}) — skipping."
             )
             return 0.0
