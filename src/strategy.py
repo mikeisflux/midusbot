@@ -1079,10 +1079,11 @@ class NewsArbitrageStrategy:
     news AdaptiveLearner and count against the daily news trade cap.
     """
 
-    MIN_SENTIMENT  = 0.20   # minimum absolute avg sentiment to act
+    MIN_SENTIMENT  = 0.50   # minimum absolute avg sentiment to act (raised from 0.20)
     MIN_EDGE       = 0.08   # minimum edge after fair-value estimate
     MIN_RELEVANCE  = 0.20   # minimum news score against market question
     MAX_HEADLINES  = 5      # use top-5 most relevant headlines
+    MIN_HEADLINES  = 2      # require at least 2 matching headlines
 
     def __init__(self, news_feed) -> None:
         """news_feed: a NewsFeed instance (imported lazily to avoid circular dep)."""
@@ -1090,12 +1091,16 @@ class NewsArbitrageStrategy:
 
     def analyse(self, market: Market, order_book: OrderBook | None) -> TradeSignal | None:
         try:
+            # News sentiment cannot predict 5-minute price windows — skip UpDown markets
+            if _detect_updown_market(market.question) is not None:
+                return None
+
             headlines = self._feed.recent_for_market(
                 market.question,
                 max_results=self.MAX_HEADLINES,
                 min_score=self.MIN_RELEVANCE,
             )
-            if not headlines:
+            if not headlines or len(headlines) < self.MIN_HEADLINES:
                 return None
 
             sentiments = [h.sentiment for h in headlines]
