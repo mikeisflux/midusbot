@@ -245,6 +245,26 @@ def _read_sources() -> str:
     return "\n".join(parts)
 
 
+def _recent_errors(n: int = 20) -> str:
+    """Return the last N runtime errors from the bot error log."""
+    err_log = DATA_DIR / "bot_errors.jsonl"
+    if not err_log.exists():
+        return "(none)"
+    try:
+        lines = err_log.read_text().strip().splitlines()[-n:]
+        entries = []
+        for line in lines:
+            try:
+                e = json.loads(line)
+                ts = time.strftime("%H:%M:%S", time.gmtime(e.get("ts", 0)))
+                entries.append(f"[{ts}] {e.get('error','')}")
+            except Exception:
+                entries.append(line)
+        return "\n".join(entries) if entries else "(none)"
+    except Exception:
+        return "(none)"
+
+
 def _apply_patch(patch_code: str) -> bool:
     """
     Safely apply a Python patch proposed by the LLM.
@@ -336,6 +356,9 @@ This overrides timid adjustments.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 YOUR GOALS (in order):
+0. FIX CRASHES — if RECENT RUNTIME ERRORS contains errors, fix them via
+   code_patch immediately. A crashed bot earns nothing. This is always the
+   highest-priority WW_MRD action.
 1. PROTECT CAPITAL — a trade not taken beats a losing trade
 2. GROW PROFIT — increase win rate toward 60%+
 3. REMEMBER & IMPROVE — write useful memory entries each run; your future
@@ -437,6 +460,12 @@ def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> s
 
     p.append("━━━ YOUR MEMORY (all previous observations) ━━━")
     p.append(memory_ctx)
+    p.append("")
+
+    p.append("━━━ RECENT RUNTIME ERRORS ━━━")
+    p.append(_recent_errors(20))
+    p.append("If you see errors above: use code_patch to fix them. Fixing crashes")
+    p.append("is always the highest-priority WW_MRD action — a crashed bot earns nothing.")
     p.append("")
 
     p.append("━━━ CURRENT DATA ━━━")

@@ -45,6 +45,18 @@ from src.sim import SimPortfolio
 import config
 import src.webui as webui
 
+_ERROR_LOG = Path("data/bot_errors.jsonl")
+
+
+def _record_error(msg: str) -> None:
+    """Append a runtime error to the error log so the analyst can read it."""
+    try:
+        _ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _ERROR_LOG.open("a") as fh:
+            fh.write(json.dumps({"ts": int(time.time()), "error": msg}) + "\n")
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Internal bookkeeping
@@ -370,11 +382,21 @@ class PolymarketBot:
             ob = self._client.get_order_book(market.yes_token.token_id)
 
             # ── Strategy 1: Trend Follow (per-asset streak + momentum confirm) ──
-            sig = self._trend.analyse(market, ob)
+            try:
+                sig = self._trend.analyse(market, ob)
+            except Exception as _e:
+                logger.warning(f"[BOT] trend.analyse error ({market.question[:40]}): {_e}")
+                _record_error(str(_e))
+                continue
 
             # ── Strategy 2: Momentum (cold-start / no trend history yet) ────────
             if sig is None:
-                sig = self._updown.analyse(market, ob)
+                try:
+                    sig = self._updown.analyse(market, ob)
+                except Exception as _e:
+                    logger.warning(f"[BOT] updown.analyse error ({market.question[:40]}): {_e}")
+                    _record_error(str(_e))
+                    continue
 
             if sig is None:
                 continue
