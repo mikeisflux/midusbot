@@ -912,6 +912,7 @@ class PolymarketBot:
             "entry":       entry,
             "fair_value":  sig.fair_value,
             "shares":      shares,
+            "confidence":  sig.confidence,
             "close_after": close_after,
         })
         self._save_sim_queue()
@@ -992,7 +993,24 @@ class PolymarketBot:
                     f"SLIPPED ${net_pnl:.2f} (fee ${fee:.3f}) // adverse fill  \"{sim['question'][:38]}\"")
 
             # Update learner + dashboard
+            # If learner lost the open record (e.g. after a reset), backfill it
+            # so the trade still contributes to adaptation.
             _sim_tid = sim["token_id"]
+            if not self._learner.has_open(token_id=_sim_tid):
+                self._learner.record_open(
+                    market_id=sim.get("market_id", ""),
+                    token_id=_sim_tid,
+                    side=sim.get("side", "YES"),
+                    question=sim.get("question", ""),
+                    entry_price=sim.get("entry", 0.5),
+                    shares=sim.get("shares", 0.0),
+                    cost_usdc=sim.get("shares", 0.0) * sim.get("entry", 0.5),
+                    momentum_signal=0.0,
+                    imbalance_signal=0.0,
+                    composite_signal=0.0,
+                    confidence=sim.get("confidence", "LOW"),
+                    dry_run=True,
+                )
             self._learner.record_close(_sim_tid, exit_price)
             self._risk.record_close(pnl_usdc=net_pnl)
             self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
