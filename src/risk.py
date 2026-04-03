@@ -163,9 +163,17 @@ class RiskManager:
         if kelly_fraction <= 0:
             return 0.0
 
+        # Allow LLM analyst to override kelly fraction
+        try:
+            from src.analyst import load_params as _lp
+            _ko = _lp().get("kelly_override")
+            kelly_cfg = float(_ko) if _ko is not None else config.KELLY_FRACTION
+        except Exception:
+            kelly_cfg = config.KELLY_FRACTION
+
         return float(
             kelly_fraction
-            * config.KELLY_FRACTION
+            * kelly_cfg
             * self._kelly_mult
             * config.MAX_TOTAL_EXPOSURE_USDC
         )

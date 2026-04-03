@@ -510,19 +510,32 @@ class UpDownMomentumStrategy:
         # After 75s the market makers have already repriced to fair value.
         # If end_date is unparseable, skip entirely — don't trade blind.
         secs_in = _market_seconds_into_window(market)
-        # Load analyst params (LLM-tuned, default to built-in values if not set)
+        # Load analyst params (LLM-tuned)
         try:
             from src.analyst import load_params as _load_analyst_params
-            _aparams = _load_analyst_params()
+            _ap = _load_analyst_params()
         except Exception:
-            _aparams = {}
-        _max_secs_in = int(_aparams.get("max_secs_in", 240))
+            _ap = {}
+
+        _max_secs_in = int(_ap.get("max_secs_in", 240))
         if secs_in is None or secs_in < 5 or secs_in > _max_secs_in:
             return None
 
-        # Warm up price history
+        # Time-of-day skip (UTC hours the LLM decided are bad)
+        _tod_skip = _ap.get("time_of_day_skip", [])
+        if _tod_skip and time.gmtime().tm_hour in _tod_skip:
+            return None
+
+        # Warm up price history — require minimum seconds of feed data
+        _min_hist = int(_ap.get("min_price_history_s", 120))
         live_price = _fetch_price(symbol)
         if live_price is None:
+            return None
+        hist = _PRICE_HISTORY.get(symbol.upper(), [])
+        if len(hist) < 2:
+            return None
+        hist_span = hist[-1][1] - hist[0][1]
+        if hist_span < _min_hist:
             return None
 
         # ── Guard 2: Entry price must still be near 0.50 ─────────────────────
@@ -537,12 +550,17 @@ class UpDownMomentumStrategy:
         # already ahead; negative → NO is already ahead. The Polymarket price
         # is still 0.50 (oracle lag) → we have edge.
         # Apply LLM-suggested skip list
-        if symbol.upper() in [s.upper() for s in _aparams.get("skip_assets", [])]:
+        if symbol.upper() in [s.upper() for s in _ap.get("skip_assets", [])]:
             logger.debug(f"[UPDOWN SKIP] {symbol} on analyst skip list")
             return None
 
         window_return = _window_return(symbol, int(secs_in))
-        _sig_thresh = float(_aparams.get("signal_threshold", _MIN_WINDOW_RETURN_PCT))
+        # Per-asset threshold overrides take priority over global threshold
+        _asset_thresholds = _ap.get("asset_thresholds", {})
+        _sig_thresh = float(
+            _asset_thresholds.get(symbol.upper(),
+            _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT))
+        )
         if window_return is None or abs(window_return) < _sig_thresh:
             logger.debug(
                 f"[UPDOWN SKIP] {symbol} win_ret={window_return}  "
@@ -553,7 +571,7 @@ class UpDownMomentumStrategy:
         # ── CONFIRMATION 1: consecutive window trend ─────────────────────────
         trend_score = _consecutive_window_trend(symbol)  # -1..+1, None = unknown
         trend_dir_ok = True
-        _min_trend = float(_aparams.get("min_trend_score", 0.0))
+        _min_trend = float(_ap.get("min_trend_score", 0.0))
         if trend_score is not None:
             trend_direction = "UP" if trend_score > 0 else "DOWN"
             signal_direction = "UP" if window_return > 0 else "DOWN"
