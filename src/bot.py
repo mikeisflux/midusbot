@@ -1003,6 +1003,11 @@ class PolymarketBot:
         self._sim_queue = still_open
         self._save_sim_queue()
 
+        # After settling, update the risk manager's bank to the current sim
+        # wallet so future position sizing reflects actual P&L performance.
+        if config.DRY_RUN and self._sim._wallet > 0:
+            self._risk.set_wallet_balance(self._sim._wallet)
+
     # ------------------------------------------------------------------
     # Dashboard
     # ------------------------------------------------------------------
@@ -1285,7 +1290,6 @@ class PolymarketBot:
         balance = self._client.get_usdc_balance()
         if balance is not None and balance > 0:
             self._dash_state.wallet_balance = balance
-            self._risk.set_wallet_balance(balance)
             # On first call, also set the equity-curve seed so P&L is relative
             # to the real starting balance
             if self._dash_state._seed == config.MAX_TOTAL_EXPOSURE_USDC:
@@ -1293,6 +1297,15 @@ class PolymarketBot:
             logger.info(f"Wallet balance: ${balance:.2f} USDC")
             self._dash_state.add_exec_log("info", f"Wallet: ${balance:.2f} USDC")
             self._sim.sync_starting_balance(balance)
+
+        # In dry-run, the risk manager should size based on the sim wallet
+        # (which grows/shrinks with trade P&L) rather than the real wallet.
+        # In live mode, size based on the real wallet balance.
+        if config.DRY_RUN:
+            if self._sim._wallet > 0:
+                self._risk.set_wallet_balance(self._sim._wallet)
+        elif balance is not None and balance > 0:
+            self._risk.set_wallet_balance(balance)
         else:
             logger.debug("Wallet balance unavailable (no auth or dry-run)")
 

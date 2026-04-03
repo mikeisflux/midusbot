@@ -171,9 +171,11 @@ class RiskManager:
         except Exception:
             kelly_cfg = config.KELLY_FRACTION
 
+        # Use actual wallet balance when known; fall back to config cap
+        bank = self._wallet_balance if self._wallet_balance > 0 else config.MAX_TOTAL_EXPOSURE_USDC
         return float(
             kelly_fraction
             * kelly_cfg
             * self._kelly_mult
-            * config.MAX_TOTAL_EXPOSURE_USDC
+            * bank
         )
