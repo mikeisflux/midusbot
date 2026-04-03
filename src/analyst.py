@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 OLLAMA_URL  = "http://localhost:11434"
 MODEL       = "qwen2.5-coder:1.5b"
+_OLD_MODELS = ["qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5-coder:3b"]  # delete these if present
 TIMEOUT_SEC = 90          # longer — bigger prompt + more output
 DATA_DIR    = Path("data")
 
@@ -149,16 +150,34 @@ def _ollama_available() -> bool:
 
 def _ensure_model() -> bool:
     try:
-        r    = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        r     = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
         names = [m.get("name", "") for m in r.json().get("models", [])]
-        if any(MODEL in n for n in names):
-            return True
-        logger.info(f"[ANALYST] Pulling {MODEL}…")
-        return requests.post(
-            f"{OLLAMA_URL}/api/pull",
-            json={"name": MODEL, "stream": False},
-            timeout=300,
-        ).status_code == 200
+
+        # Pull target model if not present
+        if not any(MODEL in n for n in names):
+            logger.info(f"[ANALYST] Pulling {MODEL}…")
+            ok = requests.post(
+                f"{OLLAMA_URL}/api/pull",
+                json={"name": MODEL, "stream": False},
+                timeout=300,
+            ).status_code == 200
+            if not ok:
+                return False
+
+        # Delete old/superseded models to reclaim disk space
+        for old in _OLD_MODELS:
+            if any(old in n for n in names):
+                try:
+                    requests.delete(
+                        f"{OLLAMA_URL}/api/delete",
+                        json={"name": old},
+                        timeout=30,
+                    )
+                    logger.info(f"[ANALYST] Deleted old model {old!r} to free space")
+                except Exception as e:
+                    logger.warning(f"[ANALYST] Could not delete {old!r}: {e}")
+
+        return True
     except Exception as exc:
         logger.warning(f"[ANALYST] Model check failed: {exc}")
         return False
