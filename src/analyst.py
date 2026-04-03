@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from src.learner import AdaptiveLearner
 
 OLLAMA_URL  = "http://localhost:11434"
-MODEL       = "qwen2.5:1.5b"
+MODEL       = "qwen2.5-coder:1.5b"
 TIMEOUT_SEC = 90          # longer — bigger prompt + more output
 DATA_DIR    = Path("data")
 
