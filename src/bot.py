@@ -1344,7 +1344,8 @@ class PolymarketBot:
                 self._dash_state._seed = balance
             logger.info(f"Wallet balance: ${balance:.2f} USDC")
             self._dash_state.add_exec_log("info", f"Wallet: ${balance:.2f} USDC")
-            self._sim.sync_starting_balance(balance)
+            # Sim wallet is intentionally fixed at STARTING_BALANCE ($150),
+            # not synced to the real wallet — they are independent.
 
         # In dry-run, size based on total sim equity = cash + open position costs.
         # Use sim._open (not self._positions) so we correctly account for

@@ -714,9 +714,9 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 <!-- SIMULATION PORTFOLIO PANEL -->
 <div id="sim-panel">
   <div id="sim-header">
-    <span>SIMULATION PORTFOLIO <span class="d">// virtual $100 • real prices</span></span>
+    <span>SIMULATION PORTFOLIO <span class="d">// virtual $150 • real prices</span></span>
     <div id="sim-stats-row">
-      <span>balance: <span id="sim-wallet" class="sim-val">$100.00</span></span>
+      <span>balance: <span id="sim-wallet" class="sim-val">$150.00</span></span>
       <span>p&amp;l: <span id="sim-pnl" class="sim-val">$0.00</span></span>
       <span>trades: <span id="sim-trades" class="sim-val">0</span></span>
       <span>win rate: <span id="sim-wr" class="sim-val">0.0%</span></span>
