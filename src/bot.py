@@ -5,9 +5,7 @@ adaptive learner, and live dashboard.
 Loop per iteration
 ──────────────────
 1. Manage existing positions (stop-loss / take-profit).
-2. Scan markets — run both strategies:
-     a. Momentum + Imbalance (all markets).
-     b. Latency Arbitrage    (BTC / crypto price-level markets).
+2. Scan UpDown crypto markets — run TrendFollow then Momentum strategy.
 3. Size and place orders for valid signals.
 4. Record trades in the learner; learner adapts when enough data exists.
 5. Push state to the dashboard.
@@ -30,23 +28,15 @@ _POSITIONS_FILE = Path("data/positions.json")
 
 from src.client import Market, PolymarketClient
 from src.dashboard import Dashboard, DashboardState
-from src.feeds import BinanceWSFeed, NewsFeed
+from src.feeds import BinanceWSFeed
 from src.learner import AdaptiveLearner
 from src.risk import RiskManager
 from src.strategy import (
-    LatencyArbStrategy,
-    MomentumImbalanceStrategy,
-    NewsArbitrageStrategy,
     UpDownMomentumStrategy,
     TrendFollowStrategy,
-    BTCLevelStrategy,
-    NewsEventStrategy,
     TradeSignal,
-    _fetch_btc_price,
     _fetch_price,
     _detect_updown_market,
-    _parse_btc_level,
-    update_price_snapshot,
 )
 from src.trend import TrendTracker
 import config
@@ -83,23 +73,15 @@ class OpenPosition:
 class PolymarketBot:
     def __init__(self, *, dashboard_enabled: bool = True) -> None:
         self._learner      = AdaptiveLearner(name="main")
-        self._news_learner = AdaptiveLearner(name="news")
         self._client       = PolymarketClient()
-        self._strategy     = MomentumImbalanceStrategy(params=self._learner.strategy_params)
-        self._latency      = LatencyArbStrategy()
         self._updown       = UpDownMomentumStrategy()
         self._trend_tracker = TrendTracker()
         self._trend        = TrendFollowStrategy(self._trend_tracker)
-        self._btclevel     = BTCLevelStrategy()
-        self._news         = NewsEventStrategy()
         self._positions: dict[str, OpenPosition] = {}
         self._risk         = RiskManager(params=self._learner.risk_params, positions=self._positions)
         self._dashboard    = Dashboard(enabled=dashboard_enabled)
         self._dash_state   = DashboardState()
 
-        # Tokens opened via NewsArbitrageStrategy — routed to _news_learner
-        self._news_token_ids: set[str] = set()
-        self._news_trades_today: int = 0
         self._running = False
 
         # Performance guard: auto-switch live ↔ dry-run based on win rate
@@ -107,10 +89,6 @@ class PolymarketBot:
 
         # Live data feeds
         self._price_feed = BinanceWSFeed()
-        self._news_feed  = NewsFeed()
-
-        # News arbitrage strategy (wired to the live news feed)
-        self._news_arb = NewsArbitrageStrategy(news_feed=self._news_feed)
 
         # Simulation queue — pending dry-run trades waiting for synthetic fill
         self._sim_queue: list[dict] = []
@@ -135,7 +113,6 @@ class PolymarketBot:
         self._running = True
         self._dashboard.start()
         self._price_feed.start()   # Binance WebSocket — real-time prices
-        self._news_feed.start()    # RSS headlines — news arb pre-signal
 
         # Start web UI immediately so the browser is never refused while
         # the slow startup tasks (reconcile, balance fetch) run below.
@@ -312,7 +289,6 @@ class PolymarketBot:
         if today != self._today:
             self._today = today
             self._risk.reset_daily()
-            self._news_trades_today = 0
             logger.info("Daily risk reset — new trading day started.")
 
         # 0b. Refresh wallet balance every 10 loops (or every loop in live mode)
@@ -332,10 +308,7 @@ class PolymarketBot:
 
         # 2. Update live crypto prices (WebSocket feed handles this in real-time;
         #    REST fallback warms history for symbols not on Binance WS like HYPE)
-        btc = _fetch_btc_price()
-        if btc:
-            self._dash_state.btc_price = btc
-        for sym in ("XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE"):
+        for sym in ("BTC", "XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE"):
             _fetch_price(sym)
 
         # Log price feed status every 4 loops so it's visible in the logs.
@@ -363,17 +336,6 @@ class PolymarketBot:
         markets = self._client.get_markets()
         updown  = self._client.get_updown_markets()
 
-        # Drain new news headlines and score against fetched markets
-        new_headlines = self._news_feed.drain_new()
-        _news_flagged: set[str] = set()
-        if new_headlines:
-            for h in new_headlines:
-                for m in (updown + markets):
-                    score = self._news_feed.score_against_markets(h, [m.question])
-                    if score >= 0.3:
-                        _news_flagged.add(m.id)
-                        self._dash_state.add_exec_log("news",
-                            f"[NEWS] {h.source}: \"{h.title[:55]}\" → \"{m.question[:40]}\"")
         # Deduplicate and put Up/Down markets first (they have highest urgency)
         seen_ids = {m.id for m in updown}
         all_markets = updown + [m for m in markets if m.id not in seen_ids]
@@ -445,6 +407,16 @@ class PolymarketBot:
             if self._already_positioned(market, token_id=sig.token_id):
                 continue
 
+            # Compute time to close from market end_date
+            hours_to_close = None
+            if market.end_date:
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+                    _end = _dt.fromisoformat(market.end_date.replace("Z", "+00:00"))
+                    _secs = (_end - _dt.now(_tz.utc)).total_seconds()
+                    hours_to_close = max(0.0, _secs / 3600)
+                except Exception:
+                    pass
             sig.hours_to_close = hours_to_close
             if ob:
                 sig.best_ask = ob.best_ask
@@ -464,23 +436,15 @@ class PolymarketBot:
 
         # "Why no bet" summary — only shown when we found candidates but placed nothing
         if signals_found == 0 and len(candidates) > 0:
-            reasons = []
             updown_cands = [m for m in candidates if _detect_updown_market(m.question)]
-            reg_cands    = [m for m in candidates if not _detect_updown_market(m.question)]
             if updown_cands:
-                reasons.append(
+                reason = (
                     f"UpDown ({len(updown_cands)} markets): momentum/consensus too weak "
                     f"or edge below {config.MIN_EDGE:.0%} threshold"
                 )
-            if reg_cands:
-                reasons.append(
-                    f"Regular ({len(reg_cands)} markets): composite signal below threshold "
-                    f"or edge too small — best candidates: "
-                    + ", ".join(f'\"{m.question[:40]}\"' for m in reg_cands[:2])
-                )
-            if not updown_cands and not reg_cands:
-                reasons.append("no candidate markets passed filters")
-            logger.info(f"No trades this loop — " + " | ".join(reasons))
+            else:
+                reason = "no UpDown candidate markets passed filters"
+            logger.info(f"No trades this loop — {reason}")
         elif signals_found > 0 and trades_placed == 0:
             logger.info(f"Signals found but no trades placed — risk/position guards blocked execution")
 
@@ -561,9 +525,7 @@ class PolymarketBot:
 
                 # Auto-clear: token resolved against us (worth $0.00).
                 if current_price <= 0.03:
-                    _close_learner = self._news_learner if token_id in self._news_token_ids else self._learner
-                    pnl = _close_learner.record_close(token_id, current_price)
-                    self._news_token_ids.discard(token_id)
+                    pnl = self._learner.record_close(token_id, current_price)
                     self._risk.record_close(pnl_usdc=pnl)
                     self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
                     # Trend: our token went to 0 — we lost
@@ -695,9 +657,7 @@ class PolymarketBot:
             )
             exit_usdc = exit_price * pos.shares
             fee = self._risk.trade_fee(pos.cost_usdc, exit_usdc)
-            _cl = self._news_learner if token_id in self._news_token_ids else self._learner
-            pnl = _cl.record_close(token_id, exit_price)
-            self._news_token_ids.discard(token_id)
+            pnl = self._learner.record_close(token_id, exit_price)
             self._risk.record_close(pnl_usdc=pnl - fee)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
 
@@ -866,9 +826,7 @@ class PolymarketBot:
             )
             self._save_positions()
 
-            # Route to the correct learner based on signal type
-            active_learner = self._news_learner if sig.is_news_arb else self._learner
-            active_learner.record_open(
+            self._learner.record_open(
                 market_id=sig.market_id,
                 token_id=sig.token_id,
                 side=sig.side,
@@ -882,10 +840,6 @@ class PolymarketBot:
                 confidence=sig.confidence,
                 dry_run=config.DRY_RUN,
             )
-            if sig.is_news_arb:
-                self._news_token_ids.add(sig.token_id)
-                self._news_trades_today += 1
-                logger.info(f"[NEWS-ARB] Trade #{self._news_trades_today}/{config.MAX_NEWS_TRADES_PER_DAY} today")
 
             # Queue a simulated fill for dry-run mode so the UI shows activity
             if config.DRY_RUN:
@@ -963,11 +917,9 @@ class PolymarketBot:
                 self._dash_state.add_exec_log("slipped",
                     f"SLIPPED ${net_pnl:.2f} (fee ${fee:.3f}) // adverse fill  \"{sim['question'][:38]}\"")
 
-            # Update learner + dashboard (route to news learner if applicable)
+            # Update learner + dashboard
             _sim_tid = sim["token_id"]
-            _sim_cl  = self._news_learner if _sim_tid in self._news_token_ids else self._learner
-            _sim_cl.record_close(_sim_tid, exit_price)
-            self._news_token_ids.discard(_sim_tid)
+            self._learner.record_close(_sim_tid, exit_price)
             self._risk.record_close(pnl_usdc=net_pnl)
             self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
@@ -981,13 +933,7 @@ class PolymarketBot:
     # ------------------------------------------------------------------
 
     def _refresh_dashboard(self) -> None:
-        self._dash_state.learned = {
-            **self._learner.get_dashboard_dict(),
-            "news_trades_today":    self._news_trades_today,
-            "news_trades_cap":      config.MAX_NEWS_TRADES_PER_DAY,
-            "news_journal_size":    self._news_learner.get_dashboard_dict()["journal_size"],
-            "news_adaptation_count": self._news_learner.get_dashboard_dict()["adaptation_count"],
-        }
+        self._dash_state.learned = self._learner.get_dashboard_dict()
         self._dashboard.refresh(self._dash_state)
 
     # ------------------------------------------------------------------
@@ -1013,46 +959,19 @@ class PolymarketBot:
                 n_inactive += 1
                 continue
 
-            is_updown   = _detect_updown_market(m.question) is not None
+            is_updown = _detect_updown_market(m.question) is not None
             if is_updown:
                 n_updown_seen += 1
-            is_btclevel = _parse_btc_level(m.question) is not None
-            q_lower = m.question.lower()
-
-            # Hard-ban all sports/league markets — series like "Stanley Cup 2026"
-            # have misleading near-term endDates on Gamma but resolve months out.
-            # Any question mentioning a league or championship is excluded entirely.
-            _SPORTS_BAN = (
-                "stanley cup", "nba finals", "super bowl", "world series",
-                "champions league", "premier league", "la liga", "serie a",
-                "bundesliga", "march madness", "nfl season", "nba season",
-                " nhl ", " nba ", " nfl ", " mlb ", " epl ",
-                "win the 202", "win the 203",   # "win the 2026 NHL..." style
-                "oilers", "bruins", "maple leafs", "canadiens", "penguins",
-                "lightning", "golden knights", "hurricanes", "avalanche",
-                "rangers win", "kings win", "canucks win", "flames win",
-                "lakers win", "celtics win", "warriors win", "heat win",
-                "yankees win", "dodgers win", "chiefs win", "patriots win",
-            )
-            if not is_updown and any(kw in q_lower for kw in _SPORTS_BAN):
-                continue  # skip silently — these are never tradeable
 
             if is_updown:
                 if not (0.01 <= m.yes_price <= 0.99):
                     logger.debug(f"[UD-DROP price] yes_price={m.yes_price:.3f} q={m.question[:60]}")
                     n_price += 1; n_ud_price += 1; continue
-            elif is_btclevel:
-                if m.liquidity < 50:
-                    n_liquidity += 1; continue
-                if not (0.001 <= m.yes_price <= 0.999):
-                    n_price += 1; continue
             else:
+                # Non-UpDown markets — keep in candidates list for logging but
+                # they will be skipped by the main loop (_asset is None check)
                 if m.liquidity < config.MIN_LIQUIDITY_USDC:
                     n_liquidity += 1; continue
-                if m.volume < config.MIN_VOLUME_24H_USDC:
-                    n_volume += 1; continue
-                # Allow wider price range: cheap options (1¢) and near-settled (99¢)
-                # can still have edge for BTCLevel and NewsEvent strategies
                 if not (0.005 <= m.yes_price <= 0.995):
                     n_price += 1; continue
 
@@ -1079,14 +998,11 @@ class PolymarketBot:
                     if is_updown:
                         logger.debug(f"[UD-PASS time] secs={secs_left:.0f} price={m.yes_price:.3f} q={m.question[:60]}")
                     hours_left = secs_left / 3600
-                    if is_updown:
-                        day_cap = 999   # UpDown markets resolve in minutes/hours
-                    else:
-                        day_cap = cutoff  # MAX_DAYS_TO_RESOLUTION (default 2 = 48h)
+                    day_cap = 999 if is_updown else cutoff
                     if hours_left > day_cap * 24:
                         n_toolate += 1; continue
                 except Exception:
-                    if not is_updown and not is_btclevel:
+                    if not is_updown:
                         n_nodate += 1; continue
             else:
                 if not is_updown:
@@ -1298,4 +1214,3 @@ class PolymarketBot:
         logger.info("Shutdown signal received…")
         self._running = False
         self._price_feed.stop()
-        self._news_feed.stop()

@@ -243,9 +243,7 @@ def api_export():
         return None
 
     journal_main = _load_json("data/journal_main.json") or []
-    journal_news = _load_json("data/journal_news.json") or []
     params_main  = _load_json("data/params_main.json")  or {}
-    params_news  = _load_json("data/params_news.json")  or {}
     trend_state  = _load_json("data/trend_state.json")  or {}
 
     # Compute win/loss breakdown from journals
@@ -285,14 +283,11 @@ def api_export():
             "best_trade":   _state.best_trade    if _state else 0,
             "worst_trade":  _state.worst_trade   if _state else 0,
         },
-        "journal_stats": {
-            "main": _wl(journal_main),
-            "news": _wl(journal_news),
-        },
+        "journal_stats":   _wl(journal_main),
         "trend_state":     trend_state,
-        "learned_params":  {"main": params_main, "news": params_news},
+        "learned_params":  params_main,
         "equity_curve":    _state.equity_curve if _state else [],
-        "trade_journal":   {"main": journal_main, "news": journal_news},
+        "trade_journal":   journal_main,
     }
 
     blob = json.dumps(payload, indent=2)
