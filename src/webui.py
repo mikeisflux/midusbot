@@ -231,52 +231,116 @@ def api_reset_training():
 def api_export():
     """Download full training data as a JSON file for analysis."""
     from pathlib import Path
-    journal_path = Path("data/trade_journal.json")
-    params_path  = Path("data/learned_params.json")
 
-    journal = []
-    if journal_path.exists():
-        with open(journal_path) as f:
-            journal = json.load(f)
+    def _load_json(path):
+        p = Path(path)
+        if p.exists():
+            try:
+                with open(p) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return None
 
-    params = {}
-    if params_path.exists():
-        with open(params_path) as f:
-            params = json.load(f)
+    journal_main = _load_json("data/journal_main.json") or []
+    journal_news = _load_json("data/journal_news.json") or []
+    params_main  = _load_json("data/params_main.json")  or {}
+    params_news  = _load_json("data/params_news.json")  or {}
+    trend_state  = _load_json("data/trend_state.json")  or {}
+
+    # Compute win/loss breakdown from journals
+    def _wl(journal):
+        closed = [r for r in journal if r.get("closed")]
+        wins   = [r for r in closed  if r.get("pnl_usdc", 0) > 0]
+        losses = [r for r in closed  if r.get("pnl_usdc", 0) <= 0]
+        total_pnl = sum(r.get("pnl_usdc", 0) for r in closed)
+        return {
+            "total": len(closed),
+            "wins":  len(wins),
+            "losses": len(losses),
+            "win_rate": len(wins) / len(closed) if closed else 0,
+            "total_pnl_usdc": round(total_pnl, 4),
+            "best_trade":  round(max((r.get("pnl_usdc",0) for r in closed), default=0), 4),
+            "worst_trade": round(min((r.get("pnl_usdc",0) for r in closed), default=0), 4),
+            "avg_pnl":     round(total_pnl / len(closed), 4) if closed else 0,
+        }
 
     payload = {
-        "exported_at":    datetime.utcnow().isoformat() + "Z",
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "mode":        "DRY_RUN" if config.DRY_RUN else "LIVE",
         "config": {
-            "dry_run":              config.DRY_RUN,
-            "max_position_usdc":    config.MAX_POSITION_USDC,
-            "max_total_exposure":   config.MAX_TOTAL_EXPOSURE_USDC,
-            "kelly_fraction":       config.KELLY_FRACTION,
-            "min_edge":             config.MIN_EDGE,
+            "dry_run":            config.DRY_RUN,
+            "max_position_usdc":  config.MAX_POSITION_USDC,
+            "max_total_exposure": config.MAX_TOTAL_EXPOSURE_USDC,
+            "kelly_fraction":     config.KELLY_FRACTION,
+            "min_edge":           config.MIN_EDGE,
         },
         "performance": {
             "total_trades": _state.total_trades if _state else 0,
             "wins":         _state.wins         if _state else 0,
+            "losses":       (_state.total_trades - _state.wins) if _state else 0,
             "total_pnl":    _state.total_pnl    if _state else 0,
             "total_fees":   _state.total_fees   if _state else 0,
             "win_rate":     _state.win_rate      if _state else 0,
             "best_trade":   _state.best_trade    if _state else 0,
             "worst_trade":  _state.worst_trade   if _state else 0,
         },
-        "learned_params":  params,
-        "trade_journal":   journal,
+        "journal_stats": {
+            "main": _wl(journal_main),
+            "news": _wl(journal_news),
+        },
+        "trend_state":     trend_state,
+        "learned_params":  {"main": params_main, "news": params_news},
         "equity_curve":    _state.equity_curve if _state else [],
+        "trade_journal":   {"main": journal_main, "news": journal_news},
     }
 
     blob = json.dumps(payload, indent=2)
     return Response(
         blob,
         mimetype="application/json",
-        headers={"Content-Disposition": "attachment; filename=midusbot_training_data.json"},
+        headers={"Content-Disposition": "attachment; filename=midusbot_export.json"},
     )
 
 # ---------------------------------------------------------------------------
 # State serialiser
 # ---------------------------------------------------------------------------
+
+def _learning_progress() -> dict:
+    """Returns learning progress data for the dry-run progress bar."""
+    from src.learner import ADAPT_EVERY_N
+    if _learner is None or _state is None:
+        return {"closed_since_adapt": 0, "adapt_every_n": ADAPT_EVERY_N,
+                "adaptation_count": 0, "total_trades": 0, "win_rate": 0,
+                "ready": False, "pct": 0}
+
+    closed  = _learner._closed_since_adapt
+    total   = _state.total_trades
+    wins    = _state.wins
+    adapted = _learner._adaptation_count
+    wr      = _state.win_rate
+
+    # "Ready to go live" = at least 30 resolved trades and win rate > 52%
+    MIN_TRADES = 30
+    MIN_WIN_RATE = 0.52
+    ready = total >= MIN_TRADES and wr >= MIN_WIN_RATE
+
+    # Overall progress toward going live (0-100)
+    trade_pct = min(total / MIN_TRADES * 100, 100)
+    wr_pct    = min(wr / MIN_WIN_RATE * 100, 100) if total > 0 else 0
+    overall   = (trade_pct + wr_pct) / 2
+
+    return {
+        "closed_since_adapt": closed,
+        "adapt_every_n":      ADAPT_EVERY_N,
+        "adaptation_count":   adapted,
+        "total_trades":       total,
+        "win_rate":           wr,
+        "ready":              ready,
+        "pct":                round(overall, 1),
+        "next_adapt_pct":     round(closed / ADAPT_EVERY_N * 100, 0) if ADAPT_EVERY_N else 0,
+    }
+
 
 def _build(s: DashboardState) -> dict:
     return {
@@ -335,6 +399,7 @@ def _build(s: DashboardState) -> dict:
             "worst_trade":  s.worst_trade,
         },
         "learned": s.learned,
+        "learning_progress": _learning_progress(),
     }
 
 # ---------------------------------------------------------------------------
@@ -402,6 +467,21 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 .stat-lbl{color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
 .stat-val{font-size:28px;font-weight:bold;line-height:1}
 .stat-sub{color:var(--dim);font-size:11px;margin-top:3px}
+
+/* ── LEARNING BAR ── */
+#learn-bar-wrap{
+  padding:6px 20px;background:var(--bg2);border-bottom:1px solid var(--border);
+  display:none;align-items:center;gap:16px;font-size:11px;
+}
+#learn-bar-wrap.visible{display:flex}
+.lb-label{color:var(--dim);white-space:nowrap}
+.lb-track{flex:1;height:6px;background:var(--bg3);border-radius:3px;position:relative;overflow:hidden}
+.lb-fill{height:100%;border-radius:3px;transition:width .5s ease}
+.lb-fill.red   {background:var(--red)}
+.lb-fill.yellow{background:var(--yellow)}
+.lb-fill.green {background:var(--green)}
+.lb-val{color:var(--text);white-space:nowrap;min-width:36px;text-align:right}
+.lb-ready{color:var(--green);font-weight:bold;letter-spacing:1px;animation:pulse 2s infinite}
 
 /* ── INFO STRIP ── */
 #info{
@@ -521,6 +601,18 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div class="stat-val r" id="s-fees">$0.00</div>
     <div class="stat-sub d">gas + maker fee</div>
   </div>
+</div>
+
+<!-- LEARNING PROGRESS BAR (dry-run only) -->
+<div id="learn-bar-wrap">
+  <span class="lb-label">DRY-RUN LEARNING</span>
+  <span class="lb-label" id="lb-adapt-lbl" style="color:var(--dim)">next adapt</span>
+  <div class="lb-track"><div class="lb-fill" id="lb-adapt-fill" style="width:0%"></div></div>
+  <span class="lb-val" id="lb-adapt-val">0/10</span>
+  <span class="lb-label" style="margin-left:8px">ready to go live</span>
+  <div class="lb-track"><div class="lb-fill" id="lb-ready-fill" style="width:0%"></div></div>
+  <span class="lb-val" id="lb-ready-val">0%</span>
+  <span id="lb-ready-badge" style="display:none" class="lb-ready">✓ READY</span>
 </div>
 
 <!-- INFO STRIP -->
@@ -744,6 +836,28 @@ async function refresh() {
         `<span class="log-ts">${e.ts}</span>${escHtml(e.text)}` +
         `</div>`
       ).join('');
+    }
+
+    // Learning progress bar (dry-run only)
+    const lp = d.learning_progress;
+    const learnWrap = $('learn-bar-wrap');
+    if (lp && d.mode !== 'LIVE') {
+      learnWrap.classList.add('visible');
+      // Next adaptation mini-bar
+      const nPct = lp.next_adapt_pct || 0;
+      $('lb-adapt-fill').style.width = nPct + '%';
+      $('lb-adapt-fill').className = 'lb-fill ' + (nPct < 40 ? 'red' : nPct < 80 ? 'yellow' : 'green');
+      $('lb-adapt-val').textContent = lp.closed_since_adapt + '/' + lp.adapt_every_n;
+      // Overall ready-to-go-live bar
+      const rPct = lp.pct || 0;
+      $('lb-ready-fill').style.width = Math.min(rPct, 100) + '%';
+      $('lb-ready-fill').className = 'lb-fill ' + (rPct < 40 ? 'red' : rPct < 80 ? 'yellow' : 'green');
+      $('lb-ready-val').textContent = Math.min(rPct, 100).toFixed(0) + '%';
+      const badge = $('lb-ready-badge');
+      if (lp.ready) { badge.style.display = 'inline'; $('lb-ready-val').style.display = 'none'; }
+      else           { badge.style.display = 'none';   $('lb-ready-val').style.display = 'inline'; }
+    } else if (learnWrap) {
+      learnWrap.classList.remove('visible');
     }
 
     // Footer
