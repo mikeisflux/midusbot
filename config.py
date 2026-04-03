@@ -60,4 +60,6 @@ LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "15"))  # fa
 # ── Alerts ───────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID:   str = os.getenv("TELEGRAM_CHAT_ID", "")
-DISCORD_WEBHOOK_URL: str = os.getenv("DISCORD_WEBHOOK_URL", "")
+DISCORD_WEBHOOK_URL: str  = os.getenv("DISCORD_WEBHOOK_URL", "")
+DISCORD_BOT_TOKEN:   str  = os.getenv("DISCORD_BOT_TOKEN",   "")
+DISCORD_CHANNEL_ID:  str  = os.getenv("DISCORD_CHANNEL_ID",  "")
