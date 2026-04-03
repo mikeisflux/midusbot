@@ -150,9 +150,11 @@ class PolymarketBot:
             _pos_file.unlink()
             logger.info("Cleared stale positions file — will re-reconcile from CLOB.")
 
-        # Reconcile with live CLOB positions — catches positions opened before
-        # persistence was added, or opened directly on polymarket.com
-        self._reconcile_positions()
+        # Reconcile with live CLOB positions — only in live mode.
+        # In dry-run, real wallet positions must not count against the sim
+        # exposure cap; they're unrelated to the current paper-trading session.
+        if not config.DRY_RUN:
+            self._reconcile_positions()
 
         # Purge stale "open" journal entries whose token is no longer tracked.
         # These accumulate when markets are abandoned mid-session (bot killed,
@@ -284,9 +286,8 @@ class PolymarketBot:
         if not config.DRY_RUN or self._dash_state.loop_count % 10 == 0:
             self._sync_wallet_balance()
 
-        # 0c. Re-run position reconciliation every 20 loops so positions opened
-        #     via the UI (or missed at startup) are picked up automatically.
-        if self._dash_state.loop_count % 20 == 0:
+        # 0c. Re-run position reconciliation every 20 loops (live mode only).
+        if not config.DRY_RUN and self._dash_state.loop_count % 20 == 0:
             self._reconcile_positions()
 
         # 0c. Process any pending simulated fills
