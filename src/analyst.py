@@ -26,9 +26,9 @@ if TYPE_CHECKING:
     from src.learner import AdaptiveLearner
 
 OLLAMA_URL  = "http://localhost:11434"
-MODEL       = "qwen2.5-coder:7b"
-_OLD_MODELS = ["qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5-coder:1.5b", "qwen2.5-coder:3b"]  # delete these if present
-TIMEOUT_SEC = 180         # 7B is slower — give it time
+MODEL       = "qwen2.5-coder:3b"
+_OLD_MODELS = ["qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5-coder:1.5b", "qwen2.5-coder:7b"]  # delete these if present
+TIMEOUT_SEC = 90          # 3B generates ~768 tokens in ~30-60s
 DATA_DIR    = Path("data")
 
 # ---------------------------------------------------------------------------
