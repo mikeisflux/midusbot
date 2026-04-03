@@ -26,7 +26,11 @@ if TYPE_CHECKING:
 DEFAULT_STOP_LOSS_PCT   = -0.50
 DEFAULT_TAKE_PROFIT_PCT =  0.80
 DEFAULT_KELLY_MULT      =  1.0
-DEFAULT_DAILY_LOSS_CAP  = -0.02  # stop trading if daily P&L < -2 %
+# Daily loss cap: how much of the bank can be lost before halting new trades.
+# Dry-run uses a much looser cap — simulated losses are how the bot learns.
+# Live trading uses a tight cap to protect real capital.
+DEFAULT_DAILY_LOSS_CAP_LIVE    = -0.03   # -3% of wallet in live mode
+DEFAULT_DAILY_LOSS_CAP_DRYRUN  = -0.20   # -20% of sim wallet in dry-run
 
 
 class RiskManager:
@@ -57,9 +61,12 @@ class RiskManager:
 
     def position_size(self, signal: TradeSignal) -> float:
         """Returns the USDC to spend. 0.0 = skip trade."""
-        # Daily loss breaker
-        daily_pnl_pct = self._daily_pnl / config.MAX_TOTAL_EXPOSURE_USDC if config.MAX_TOTAL_EXPOSURE_USDC else 0
-        if daily_pnl_pct <= DEFAULT_DAILY_LOSS_CAP:
+        # Daily loss breaker — use actual bank for denominator; use loose cap
+        # in dry-run so the bot can keep learning from losses.
+        bank = self._wallet_balance if self._wallet_balance > 0 else config.MAX_TOTAL_EXPOSURE_USDC
+        daily_pnl_pct = self._daily_pnl / bank if bank else 0
+        cap = DEFAULT_DAILY_LOSS_CAP_DRYRUN if config.DRY_RUN else DEFAULT_DAILY_LOSS_CAP_LIVE
+        if daily_pnl_pct <= cap:
             logger.warning(f"Daily loss cap hit ({daily_pnl_pct:.1%}) — no new trades until reset.")
             return 0.0
 
@@ -171,11 +178,11 @@ class RiskManager:
         except Exception:
             kelly_cfg = config.KELLY_FRACTION
 
-        # Use actual wallet balance when known; fall back to config cap
-        bank = self._wallet_balance if self._wallet_balance > 0 else config.MAX_TOTAL_EXPOSURE_USDC
+        # MAX_TOTAL_EXPOSURE_USDC is the intended portfolio bank for Kelly sizing.
+        # The wallet balance cap is enforced separately in position_size().
         return float(
             kelly_fraction
             * kelly_cfg
             * self._kelly_mult
-            * bank
+            * config.MAX_TOTAL_EXPOSURE_USDC
         )
