@@ -925,8 +925,13 @@ class PolymarketBot:
             if exit_price is None:
                 try:
                     ob = self._client.get_order_book(sim["token_id"])
-                    if ob and (ob.mid < 0.05 or ob.mid > 0.95):
-                        exit_price = ob.mid  # already settled
+                    if ob:
+                        # Use best_bid: settled tokens have best_bid ~0.99 (win) or ~0.01 (loss).
+                        # mid = (0.01+1.00)/2 = 0.505 for a settled market — do NOT use mid.
+                        if ob.best_bid > 0.95:
+                            exit_price = ob.best_bid   # winner → ~0.99
+                        elif ob.best_bid < 0.05:
+                            exit_price = ob.best_bid   # loser  → ~0.01
                 except Exception:
                     pass
 
@@ -935,12 +940,12 @@ class PolymarketBot:
                 still_open.append(sim)
                 continue
 
-            # Max wait exceeded — use best available price (mid or fallback)
+            # Max wait exceeded — use best_bid as best proxy (never use mid)
             if exit_price is None:
                 try:
                     ob = self._client.get_order_book(sim["token_id"])
                     if ob:
-                        exit_price = ob.mid
+                        exit_price = ob.best_bid if ob.best_bid > 0.01 else ob.best_ask
                 except Exception:
                     pass
             if exit_price is None:
