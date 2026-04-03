@@ -52,7 +52,7 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 
 DATA_DIR       = Path("data")
-ADAPT_EVERY_N  = 10          # run adaptation after this many new closed trades
+ADAPT_EVERY_N  = 5           # run adaptation after this many new closed trades
 LOOKBACK       = 50          # only look at the most recent N trades
 
 

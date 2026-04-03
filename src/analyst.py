@@ -283,14 +283,22 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
         new_params["max_secs_in"] = int(max(120, min(240, payload["max_secs_in"])))
 
     reasoning = payload.get("reasoning", "")
+
+    # Store reasoning and run metadata in the params file for export/tracking
+    new_params["_last_run_at"]  = int(time.time())
+    new_params["_last_reasoning"] = reasoning
+    new_params["_runs"] = new_params.get("_runs", 0) + 1
     save_params(new_params)
 
-    logger.info(
-        f"[ANALYST] Updated params in {elapsed:.1f}s — "
-        f"threshold={new_params['signal_threshold']:.4f}  "
-        f"trend_min={new_params['min_trend_score']:.2f}  "
-        f"skip={new_params['skip_assets']}  "
-        f"prefer={new_params['prefer_assets']}\n"
-        f"  Reasoning: {reasoning}"
+    logger.warning(
+        f"\n{'='*60}\n"
+        f"[ANALYST] Run #{new_params['_runs']} — {elapsed:.1f}s\n"
+        f"  threshold : {new_params['signal_threshold']:.4f}\n"
+        f"  min_trend : {new_params['min_trend_score']:.2f}\n"
+        f"  skip      : {new_params['skip_assets']}\n"
+        f"  prefer    : {new_params['prefer_assets']}\n"
+        f"  max_secs  : {new_params['max_secs_in']}\n"
+        f"  reasoning : {reasoning}\n"
+        f"{'='*60}"
     )
     return new_params

@@ -92,8 +92,10 @@ class PolymarketBot:
         self._price_feed = BinanceWSFeed()
         self._sim = SimPortfolio()
 
-        # Simulation queue — pending dry-run trades waiting for synthetic fill
-        self._sim_queue: list[dict] = []
+        # Simulation queue — pending dry-run trades waiting for oracle settlement
+        # Persisted to disk so it survives restarts.
+        self._sim_queue_path = Path("data/sim_queue.json")
+        self._sim_queue: list[dict] = self._load_sim_queue()
 
         signal.signal(signal.SIGINT,  self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
@@ -865,6 +867,7 @@ class PolymarketBot:
             "shares":      shares,
             "close_after": close_after,
         })
+        self._save_sim_queue()
 
     def _process_sim_queue(self) -> None:
         """Resolve pending simulated trades using real settled market prices."""
@@ -945,6 +948,7 @@ class PolymarketBot:
             self._positions.pop(sim["token_id"], None)
 
         self._sim_queue = still_open
+        self._save_sim_queue()
 
     # ------------------------------------------------------------------
     # Dashboard
@@ -1060,6 +1064,25 @@ class PolymarketBot:
     # ------------------------------------------------------------------
     # Position persistence
     # ------------------------------------------------------------------
+
+    def _save_sim_queue(self) -> None:
+        try:
+            self._sim_queue_path.parent.mkdir(parents=True, exist_ok=True)
+            self._sim_queue_path.write_text(json.dumps(self._sim_queue, indent=2))
+        except Exception as exc:
+            logger.warning(f"_save_sim_queue failed: {exc}")
+
+    def _load_sim_queue(self) -> list[dict]:
+        if not self._sim_queue_path.exists():
+            return []
+        try:
+            entries = json.loads(self._sim_queue_path.read_text())
+            if entries:
+                logger.info(f"Restored {len(entries)} pending sim trades from disk")
+            return entries
+        except Exception as exc:
+            logger.warning(f"_load_sim_queue failed: {exc}")
+            return []
 
     def _save_positions(self) -> None:
         """Write open positions to disk so they survive a restart."""

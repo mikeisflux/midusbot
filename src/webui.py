@@ -243,9 +243,10 @@ def api_export():
                 pass
         return None
 
-    journal_main = _load_json("data/journal_main.json") or []
-    params_main  = _load_json("data/params_main.json")  or {}
-    trend_state  = _load_json("data/trend_state.json")  or {}
+    journal_main   = _load_json("data/journal_main.json")   or []
+    params_main    = _load_json("data/params_main.json")    or {}
+    trend_state    = _load_json("data/trend_state.json")    or {}
+    analyst_params = _load_json("data/analyst_params.json") or {}
 
     # Compute win/loss breakdown from journals
     def _wl(journal):
@@ -287,6 +288,7 @@ def api_export():
         "journal_stats":   _wl(journal_main),
         "trend_state":     trend_state,
         "learned_params":  params_main,
+        "analyst_params":  analyst_params,
         "equity_curve":    _state.equity_curve if _state else [],
         "trade_journal":   journal_main,
     }
