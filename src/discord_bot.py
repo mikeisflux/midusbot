@@ -311,11 +311,10 @@ class DiscordCommander:
         def _worker() -> None:
             self.send(f"🤖 Claude running: _{prompt[:100]}_")
             try:
-                # Run claude CLI with --print (non-interactive), --dangerously-skip-permissions
-                # so no approval popups block execution.
-                # Inherit full login shell PATH so pm2, git, docker-compose etc. are all found.
+                # Run claude CLI as the 'claude' user (not root).
+                # --dangerously-skip-permissions is blocked when running as root,
+                # so we use sudo -u claude to drop privileges first.
                 env = {**os.environ, "DRY_RUN": os.environ.get("DRY_RUN", "true")}
-                # Ensure common tool paths are in PATH (including claude user's npm bins)
                 extra_paths = [
                     "/usr/local/bin", "/usr/bin", "/bin",
                     "/home/claude/.npm-global/bin",
@@ -325,8 +324,12 @@ class DiscordCommander:
                     "/root/.npm-global/bin",
                 ]
                 env["PATH"] = ":".join(extra_paths + [env.get("PATH", "")])
+
+                # Use sudo -u claude so --dangerously-skip-permissions works
                 result = subprocess.run(
                     [
+                        "sudo", "-u", "claude",
+                        "-E",          # preserve environment (PATH, ANTHROPIC_API_KEY)
                         "claude",
                         "--dangerously-skip-permissions",
                         "--print",
