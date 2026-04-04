@@ -923,10 +923,12 @@ class PolymarketClient:
         side: str,   # "BUY" | "SELL"
         price: float,
         size: float,
+        fok: bool = False,
     ) -> dict | None:
         """
-        Place a GTC limit order.
-        Returns the order dict on success, None on failure.
+        Place a limit order. Default GTC; pass fok=True for Fill-or-Kill.
+        FOK fills immediately at price or cancels — required for 5-min markets
+        where a resting GTC order will expire unfilled when the market resolves.
         price — probability (0–1), e.g. 0.65 means 65 ¢ per share
         size  — number of shares (= USDC spent when buying at `price`)
         """
@@ -953,7 +955,8 @@ class PolymarketClient:
                     side=side,   # "BUY" or "SELL" string — py_clob_client accepts both
                 )
                 signed_order = self._clob_client.create_order(order_args)
-                resp = self._clob_client.post_order(signed_order, OrderType.GTC)
+                order_type   = OrderType.FOK if fok else OrderType.GTC
+                resp = self._clob_client.post_order(signed_order, order_type)
                 logger.info(f"Order placed: {resp}")
                 return resp
             except Exception as exc:

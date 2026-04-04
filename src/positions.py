@@ -422,17 +422,26 @@ class PositionsMixin:
                 )
                 return False
 
-        # Limit order price optimization: try to post at mid or best_bid+0.01 to avoid paying spread.
-        # This saves ~1-2 cents per trade vs taking the ask.
-        if sig.side == "YES" and sig.best_bid is not None and sig.best_ask is not None:
+        # For 5-minute markets, always take liquidity — use ask price + FOK order type
+        # so the order fills immediately or cancels. Never post maker orders on short windows:
+        # GTC at bid+0.01 will sit on the book and expire when the market resolves (unfilled).
+        # The tiny spread saving (~1-2¢) is not worth the risk of zero fill on a 5-min window.
+        if sig.best_ask is not None and sig.win_mins <= 5:
+            limit_price = sig.best_ask  # cross the spread, fill immediately
+            use_fok = True
+        elif sig.side == "YES" and sig.best_bid is not None and sig.best_ask is not None:
+            # Longer windows: maker order at mid is fine
             _mid = (sig.best_bid + sig.best_ask) / 2
             _maker_price = round(max(sig.best_bid + 0.01, _mid), 2)
-            if _maker_price < limit_price:  # only use maker price if it saves us money
+            if _maker_price < limit_price:
                 logger.debug(
                     f"[LIMIT-OPT] Using maker price {_maker_price:.3f} vs taker "
                     f"{limit_price:.3f} (saves {limit_price - _maker_price:.3f}/share)"
                 )
                 limit_price = _maker_price
+            use_fok = False
+        else:
+            use_fok = False
 
         _order_start = time.time()
         resp = self._client.place_limit_order(
@@ -440,6 +449,7 @@ class PositionsMixin:
             side="BUY",
             price=limit_price,
             size=shares,
+            fok=use_fok,
         )
         _order_ms  = int((time.time() - _order_start) * 1000)
         _total_ms  = int((time.time() - _exec_start)  * 1000)
