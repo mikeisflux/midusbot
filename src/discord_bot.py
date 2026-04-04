@@ -315,9 +315,11 @@ class DiscordCommander:
                 # so no approval popups block execution.
                 # Inherit full login shell PATH so pm2, git, docker-compose etc. are all found.
                 env = {**os.environ, "DRY_RUN": os.environ.get("DRY_RUN", "true")}
-                # Ensure common tool paths are in PATH
+                # Ensure common tool paths are in PATH (including claude user's npm bins)
                 extra_paths = [
                     "/usr/local/bin", "/usr/bin", "/bin",
+                    "/home/claude/.npm-global/bin",
+                    "/home/claude/.local/bin",
                     os.path.expanduser("~/.npm-global/bin"),
                     os.path.expanduser("~/.local/bin"),
                     "/root/.npm-global/bin",
