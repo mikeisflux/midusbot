@@ -723,6 +723,13 @@ class PositionsMixin:
                 logger.debug(f"  Skipping already-redeemed token: {token_id[:16]}…")
                 continue
 
+            # Skip positions whose market was already claimed/closed (market_id check)
+            _early_market_id = str(raw.get("conditionId") or raw.get("market_id") or "")
+            if _early_market_id and _early_market_id in self._closed_market_ids:
+                logger.debug(f"  Skipping already-closed market: {_early_market_id[:16]}…")
+                self._redeemed_tokens.add(token_id)  # cross-populate so token check works next time
+                continue
+
             if token_id in self._positions:
                 if not self._positions[token_id].is_external:
                     self._positions[token_id].is_external = True
