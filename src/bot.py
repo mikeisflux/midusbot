@@ -149,7 +149,8 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
 
         self._running = False
         self._last_mode_switch: float = 0.0
-        self._closed_market_ids: set[str] = set()
+        from src.positions import _load_closed_market_ids
+        self._closed_market_ids: set[str] = _load_closed_market_ids()
 
         self._price_feed = BinanceWSFeed()
         self._sim = SimPortfolio()

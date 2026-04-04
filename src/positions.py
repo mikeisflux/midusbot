@@ -14,8 +14,25 @@ from loguru import logger
 from src.strategy import _detect_updown_market, _updown_window_mins
 import config
 
-_POSITIONS_FILE = Path("data/positions.json")
-_REDEEMED_FILE  = Path("data/redeemed_tokens.json")
+_POSITIONS_FILE      = Path("data/positions.json")
+_REDEEMED_FILE       = Path("data/redeemed_tokens.json")
+_CLOSED_MARKETS_FILE = Path("data/closed_market_ids.json")
+
+
+def _load_closed_market_ids() -> set[str]:
+    try:
+        if _CLOSED_MARKETS_FILE.exists():
+            return set(json.loads(_CLOSED_MARKETS_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+
+def _save_closed_market_ids(ids: set[str]) -> None:
+    try:
+        _CLOSED_MARKETS_FILE.write_text(json.dumps(sorted(ids), indent=2))
+    except Exception as exc:
+        logger.warning(f"Could not save closed_market_ids: {exc}")
 
 
 def _load_redeemed() -> set[str]:
@@ -102,7 +119,7 @@ class PositionsMixin:
                         )
                     self._risk.record_close()
                     if pos.market_id:
-                        self._closed_market_ids.add(pos.market_id)
+                        self._mark_market_closed(pos.market_id)
                     del self._positions[token_id]
                     self._save_positions()
                     continue
@@ -138,7 +155,7 @@ class PositionsMixin:
                             direction_bet = "UP" if pos.side == "YES" else "DOWN"
                             self._trend_tracker.record_result(symbol, direction_bet, won=True)
                         if pos.market_id:
-                            self._closed_market_ids.add(pos.market_id)
+                            self._mark_market_closed(pos.market_id)
                         del self._positions[token_id]
                         self._save_positions()
                         logger.info(
@@ -310,7 +327,7 @@ class PositionsMixin:
                     self._trend_tracker.record_result(symbol, direction_bet, won=False)
 
             if pos.market_id:
-                self._closed_market_ids.add(pos.market_id)
+                self._mark_market_closed(pos.market_id)
             del self._positions[token_id]
             self._save_positions()
             logger.info(
@@ -612,6 +629,12 @@ class PositionsMixin:
             return True
 
         return False
+
+    def _mark_market_closed(self, market_id: str) -> None:
+        """Add market to closed set and persist to disk so restarts don't re-process."""
+        if market_id:
+            self._closed_market_ids.add(market_id)
+            _save_closed_market_ids(self._closed_market_ids)
 
     def _already_positioned(self, market, token_id: str | None = None) -> bool:
         if token_id:
