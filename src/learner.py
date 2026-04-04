@@ -49,6 +49,27 @@ from loguru import logger
 from src.utils import atomic_json_write
 
 # ---------------------------------------------------------------------------
+# Asset symbol extractor (mirrors analyst._asset, no circular import)
+# ---------------------------------------------------------------------------
+
+_ASSET_KEYS = {
+    "BTC":  ["BITCOIN", "BTC"],
+    "ETH":  ["ETHEREUM", "ETH"],
+    "SOL":  ["SOLANA", "SOL"],
+    "DOGE": ["DOGECOIN", "DOGE"],
+    "XRP":  ["RIPPLE", "XRP"],
+    "BNB":  ["BNB"],
+    "HYPE": ["HYPERLIQUID", "HYPE"],
+}
+
+def _asset_symbol(question: str) -> str:
+    q = question.upper()
+    for sym, keys in _ASSET_KEYS.items():
+        if any(k in q for k in keys):
+            return sym
+    return "UNKNOWN"
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -355,7 +376,50 @@ class AdaptiveLearner:
             f"TP={self.risk_params.take_profit_pct:.0%}"
         )
 
-        # ── 5. LLM analysis (non-blocking) ────────────────────────────
+        # ── 5. Per-asset threshold adaptation ────────────────────────────
+        # Independently adjust per-asset signal thresholds in analyst_params.json
+        # based on per-asset win rates. Runs every adaptation cycle without
+        # waiting for the LLM.
+        try:
+            from src.analyst import load_params as _load_ap, save_params as _save_ap
+            _FLOOR = 0.0005   # never go below 0.05%
+            _CEIL  = 0.005    # never go above 0.50%
+
+            ap             = _load_ap()
+            asset_thresh   = dict(ap.get("asset_thresholds", {}))
+            global_thresh  = float(ap.get("signal_threshold", 0.0008))
+
+            # Group recent closed trades by asset
+            asset_groups: dict[str, list] = {}
+            for r in closed:
+                a = _asset_symbol(r.question)
+                if a != "UNKNOWN":
+                    asset_groups.setdefault(a, []).append(r)
+
+            changed = []
+            for asset, trades in asset_groups.items():
+                if len(trades) < 3:   # need at least 3 per asset to act
+                    continue
+                wr  = mean([1.0 if r.pnl_usdc > 0 else 0.0 for r in trades])
+                cur = asset_thresh.get(asset, global_thresh)
+                if wr < 0.45:
+                    new_t = min(_CEIL,  cur * 1.10)  # +10% — losing too much
+                elif wr > 0.60:
+                    new_t = max(_FLOOR, cur * 0.97)  # -3%  — winning, loosen
+                else:
+                    continue
+                if abs(new_t - cur) > 1e-8:
+                    asset_thresh[asset] = round(new_t, 6)
+                    changed.append(f"{asset}: {cur:.5f}→{new_t:.5f} (wr={wr:.0%})")
+
+            if changed:
+                ap["asset_thresholds"] = asset_thresh
+                _save_ap(ap)
+                logger.info(f"[Learner] Per-asset thresholds: {', '.join(changed)}")
+        except Exception as _e:
+            logger.debug(f"[Learner] Per-asset threshold update skipped: {_e}")
+
+        # ── 6. LLM analysis (non-blocking) ────────────────────────────
         # Run in a daemon thread so the bot loop never stalls waiting for
         # the LLM. The analyst writes analyst_params.json when done; the
         # strategy picks them up on the next loop automatically.
