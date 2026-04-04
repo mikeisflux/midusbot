@@ -29,7 +29,7 @@ from src.utils import atomic_json_write
 if TYPE_CHECKING:
     from src.learner import AdaptiveLearner
 
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-opus-4-6"
 TIMEOUT_SEC  = 60
 DATA_DIR    = Path("data")
 
@@ -654,7 +654,7 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
         t0      = time.time()
         message = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=2048,
+            max_tokens=8096,
             system=_SYSTEM_PROMPT,
             messages=[
                 {"role": "user",      "content": prompt},
