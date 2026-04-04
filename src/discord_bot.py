@@ -315,6 +315,7 @@ class DiscordCommander:
                 # --dangerously-skip-permissions is blocked when running as root,
                 # so we use sudo -u claude to drop privileges first.
                 env = {**os.environ, "DRY_RUN": os.environ.get("DRY_RUN", "true")}
+                # Ensure common tool paths are in PATH (including claude user's npm bins)
                 extra_paths = [
                     "/usr/local/bin", "/usr/bin", "/bin",
                     "/home/claude/.npm-global/bin",
