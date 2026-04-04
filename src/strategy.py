@@ -67,6 +67,7 @@ class TradeSignal:
     is_news_arb: bool = False
     secs_into_window: float = 0.0
     rel_strength: float = 0.0   # |window_return| / threshold — used for best-signal ranking
+    win_mins: int = 5            # window duration in minutes (5 or 15)
 
     def __str__(self) -> str:
         return (
@@ -586,6 +587,7 @@ class UpDownMomentumStrategy:
             is_latency_arb=False,
             secs_into_window=float(secs_in),
             rel_strength=rel_strength,
+            win_mins=window_mins,
         )
 
 
