@@ -72,3 +72,38 @@ TELEGRAM_CHAT_ID:   str = os.getenv("TELEGRAM_CHAT_ID", "")
 DISCORD_WEBHOOK_URL: str  = os.getenv("DISCORD_WEBHOOK_URL", "")
 DISCORD_BOT_TOKEN:   str  = os.getenv("DISCORD_BOT_TOKEN",   "")
 DISCORD_CHANNEL_ID:  str  = os.getenv("DISCORD_CHANNEL_ID",  "")
+
+# ── Centralized tunable strategy constants ────────────────────────────────────
+# Previously scattered across multiple files — consolidated here so tuning
+# is a single-file change. Override any via env var.
+
+# Entry guard: skip markets where YES price has moved beyond this (oracle lag gone)
+ENTRY_PRICE_GUARD:   float = float(os.getenv("ENTRY_PRICE_GUARD",   "0.54"))  # src/strategy.py
+
+# Early exit thresholds: exit positions at these price extremes mid-window
+EARLY_EXIT_LOSS_THRESHOLD:   float = float(os.getenv("EARLY_EXIT_LOSS_THRESHOLD",   "0.20"))
+EARLY_EXIT_GAIN_THRESHOLD:   float = float(os.getenv("EARLY_EXIT_GAIN_THRESHOLD",   "0.78"))
+
+# Order book thinness: skip if YES spread < this (MMs repricing aggressively)
+OB_MIN_SPREAD:      float = float(os.getenv("OB_MIN_SPREAD", "0.005"))
+
+# Wallet replenishment alert threshold (USDC)
+WALLET_REPLENISH_ALERT: float = float(os.getenv("WALLET_REPLENISH_ALERT", "25.0"))
+
+# Conviction filter: minimum trade-rate ratio vs rolling average (0 = disabled)
+MIN_TRADE_RATE_RATIO: float = float(os.getenv("MIN_TRADE_RATE_RATIO", "0.5"))
+
+# Correlation cooldown between bets on correlated assets (seconds)
+COOLDOWN_SECS:      int = int(os.getenv("COOLDOWN_SECS", "300"))
+
+# Group exposure cap for correlated assets (fraction of wallet)
+GROUP_CAP_PCT:      float = float(os.getenv("GROUP_CAP_PCT", "0.25"))
+
+# Bankroll-proportional position sizing (fraction of wallet per trade)
+POSITION_WALLET_PCT: float = float(os.getenv("POSITION_WALLET_PCT", "0.12"))
+
+# Polymarket win fee (2% on winnings — adjusts Kelly payout ratio)
+POLY_WIN_FEE:       float = float(os.getenv("POLY_WIN_FEE", "0.02"))
+
+# Pre-window entry: allow entering this many seconds before window fully opens
+PRE_WINDOW_ENTRY_SECS: int = int(os.getenv("PRE_WINDOW_ENTRY_SECS", "2"))

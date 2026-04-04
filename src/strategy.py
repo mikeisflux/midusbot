@@ -30,6 +30,12 @@ from src.signals import (
     _exchange_pressure,
     _price_acceleration,
     _multitf_consensus,
+    _get_trade_rate,
+    _get_avg_trade_rate,
+    _market_regime,
+    _get_funding_rate,
+    _get_oi_delta,
+    _cross_exchange_divergence,
 )
 from src.fair_value import compute_updown_fair_value, compute_trendfollow_fair_value
 import config
@@ -278,8 +284,11 @@ class UpDownMomentumStrategy:
         _max_secs_in = int(_ap.get("max_secs_in", 240))
         if secs_in is None or secs_in < 5:
             return None
-        if secs_in > _max_secs_in:
-            logger.debug(f"[UPDOWN] {symbol} skipped — {secs_in:.0f}s into window (max {_max_secs_in}s)")
+        window_mins = _updown_window_mins(market.question) or 5
+        # For longer windows, scale max_secs_in proportionally (80% of window duration)
+        effective_max_secs = _max_secs_in if window_mins == 5 else int(window_mins * 60 * 0.80)
+        if secs_in > effective_max_secs:
+            logger.debug(f"[UPDOWN] {symbol} skipped — {secs_in:.0f}s into {window_mins}min window (max {effective_max_secs}s)")
             return None
 
         # Time-of-day skip (UTC hours the LLM decided are bad)
@@ -358,6 +367,62 @@ class UpDownMomentumStrategy:
             logger.debug(f"[UPDOWN] {symbol} skipped — win_ret={window_return:+.4%} below thresh {_sig_thresh:.4%}")
             return None
 
+        # ── CONVICTION FILTER: Binance trade count vs rolling average ────────────
+        # Low trade count = one big order, no follow-through. Only trade when
+        # trade rate is elevated (>= 1.5× rolling average). Skip if < 0.5× avg.
+        _rate_30s = _get_trade_rate(symbol, window_secs=30)
+        _rate_avg = _get_avg_trade_rate(symbol)
+        if _rate_avg > 0 and _rate_30s > 0:
+            _rate_ratio = _rate_30s / _rate_avg
+            if _rate_ratio < 0.5:
+                logger.debug(
+                    f"[CONVICTION] {symbol} skipped — trade rate {_rate_30s:.2f}/s "
+                    f"is {_rate_ratio:.2f}× avg ({_rate_avg:.2f}/s) — low conviction"
+                )
+                return None
+
+        # ── MARKET REGIME FILTER ──────────────────────────────────────────────
+        # Skip signals in choppy/ranging markets where momentum accuracy ~50%
+        regime = _market_regime(symbol)
+        signal_dir = "UP" if window_return > 0 else "DOWN"
+        if regime == "CHOPPY":
+            logger.debug(f"[REGIME] {symbol} skipped — choppy market, momentum unreliable")
+            return None
+        if regime == "TRENDING_UP" and signal_dir == "DOWN":
+            logger.debug(f"[REGIME] {symbol} skipped — TRENDING_UP regime contradicts DOWN signal")
+            return None
+        if regime == "TRENDING_DOWN" and signal_dir == "UP":
+            logger.debug(f"[REGIME] {symbol} skipped — TRENDING_DOWN regime contradicts UP signal")
+            return None
+
+        # ── MEAN REVERSION CHECK ──────────────────────────────────────────────
+        # When window_return is extreme (>0.3%), reversion probability increases.
+        # Log it; analyst can use to tune. For now: downgrade to LOW confidence.
+        _is_extreme_move = abs(window_return) >= 0.003  # 0.3%
+
+        # ── FUNDING RATE CONFIRMATION (optional) ─────────────────────────────
+        # Positive funding = market leans bullish; negative = bearish.
+        # Use as a soft tiebreaker when other signals are borderline.
+        _funding = _get_funding_rate(symbol)
+        if _funding is not None:
+            _funding_dir = "UP" if _funding > 0 else "DOWN"
+            if abs(_funding) > 0.0001 and _funding_dir != signal_dir:
+                logger.debug(
+                    f"[FUNDING] {symbol} funding_rate={_funding:.6f} contradicts {signal_dir} — "
+                    f"confidence downgraded"
+                )
+                # Don't block, just note for confidence scoring below
+
+        # ── OI DELTA CONFIRMATION (optional) ─────────────────────────────────
+        # Rising OI + price move = conviction; falling OI = possible exhaustion
+        _oi_delta = _get_oi_delta(symbol)
+        _oi_confirms = _oi_delta is not None and _oi_delta > 0.001
+
+        # ── CROSS-EXCHANGE DIVERGENCE ─────────────────────────────────────────
+        # Coinbase higher than Binance → arb pressure pushes Binance up
+        _ce_div = _cross_exchange_divergence(symbol)
+        _ce_confirms = abs(_ce_div) > 0.0002 and ((_ce_div > 0) == (window_return > 0))
+
         # ── CONFIRMATION 0: momentum must be accelerating (not decelerating) ──
         # If the trend is slowing down 45+ seconds in, mean reversion is likely.
         # We skip — a fading move at 0.25% is still likely to revert by resolution.
@@ -424,11 +489,23 @@ class UpDownMomentumStrategy:
         if edge < config.MIN_EDGE:
             return None
 
-        # HIGH if strong window return OR trend strongly agrees
-        confidence = (
-            "HIGH" if abs(window_return) >= 0.003 or (trend_score is not None and abs(trend_score) >= 0.75)
-            else "MEDIUM"
-        )
+        # Confidence scoring: HIGH requires multiple confirmations
+        _confirmations = sum([
+            abs(window_return) >= 0.003,                                      # strong move
+            trend_score is not None and abs(trend_score) >= 0.75,            # strong trend
+            _oi_confirms,                                                      # OI rising
+            _ce_confirms,                                                      # cross-exchange confirms
+            _funding is not None and ((_funding > 0) == (window_return > 0)), # funding aligns
+        ])
+        # Downgrade if this looks like an extreme mean-reversion candidate
+        if _is_extreme_move and _confirmations < 3:
+            confidence = "MEDIUM"
+        elif _confirmations >= 3:
+            confidence = "HIGH"
+        elif _confirmations >= 1:
+            confidence = "MEDIUM"
+        else:
+            confidence = "LOW"
         pressure = _exchange_pressure(symbol)
 
         # Relative strength: how much does this signal exceed its own threshold?
@@ -436,6 +513,16 @@ class UpDownMomentumStrategy:
         # SOL at 0.04% with 0.080% threshold = 0.50×  (weaker relative signal)
         # This is the sort key used to pick the single best trade per loop.
         rel_strength = abs(window_return) / _sig_thresh if _sig_thresh > 0 else 0.0
+
+        # Consecutive window persistence: if 4+ of last 5 windows went same direction, boost rel_strength
+        if trend_score is not None and abs(trend_score) >= 0.6:
+            persistence_boost = 1.0 + abs(trend_score) * 0.5  # up to 1.5× boost at score=1.0
+            rel_strength *= persistence_boost
+
+        # prefer_assets boost: LLM-preferred assets get higher relative strength so they win the ranking
+        if symbol.upper() in [s.upper() for s in _ap.get("prefer_assets", [])]:
+            rel_strength *= 1.5
+            logger.debug(f"[UPDOWN] {symbol} prefer_assets boost → rel_strength={rel_strength:.2f}×")
 
         logger.info(
             f"[UPDOWN] {symbol} {direction}  "

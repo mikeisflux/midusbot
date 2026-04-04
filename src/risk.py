@@ -74,6 +74,25 @@ class RiskManager:
             logger.warning(f"Daily loss cap hit ({daily_pnl_pct:.1%}) — no new trades until reset.")
             return 0.0
 
+        # Multi-asset correlated exposure cap: limit total exposure across BTC/ETH/BNB/SOL/XRP/DOGE/HYPE.
+        # These assets are 90%+ correlated — simultaneous exposure multiplies directional risk.
+        _CORRELATED_GROUP = {"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "HYPE"}
+        _GROUP_CAP_PCT = 0.25  # max 25% of wallet in correlated crypto bets at once
+        if self._wallet_balance > 0:
+            _group_cap = self._wallet_balance * _GROUP_CAP_PCT
+        else:
+            _group_cap = config.MAX_TOTAL_EXPOSURE_USDC * 0.5
+
+        from src.strategy import _detect_updown_market
+        _signal_sym = _detect_updown_market(getattr(signal, "question", ""))
+        if _signal_sym and _signal_sym.upper() in _CORRELATED_GROUP:
+            if self._open_exposure >= _group_cap:
+                logger.debug(
+                    f"[GROUP-CAP] Correlated asset cap reached "
+                    f"(open={self._open_exposure:.2f} >= cap={_group_cap:.2f}) — skip"
+                )
+                return 0.0
+
         usdc = self._kelly_size(signal)
         if usdc <= 0:
             return 0.0
@@ -177,9 +196,35 @@ class RiskManager:
         if b <= 0:
             return 0.0
 
+        # Polymarket charges 2% fee on winnings — adjust payout ratio.
+        # True payout = (1/mkt - 1) * (1 - 0.02) = b * 0.98
+        # This makes the breakeven accuracy ~51.5% instead of 50%.
+        POLY_FEE = 0.02  # 2% fee on winnings
+        b = b * (1.0 - POLY_FEE)
+
         kelly_fraction = (b * p - q) / b
         if kelly_fraction <= 0:
             return 0.0
+
+        # Per-asset Kelly scaling from session tracker accuracy.
+        # Kelly = 2 * signal_accuracy - 1 (full Kelly formula for binary bets).
+        # Blend calculated Kelly with session-based Kelly when >= 30 windows seen.
+        try:
+            from src.session_tracker import get_asset_stats
+            from src.strategy import _detect_updown_market
+            _sym = _detect_updown_market(getattr(signal, "question", ""))
+            if _sym:
+                _stats = get_asset_stats(_sym, lookback=60)
+                if _stats and _stats.get("signal_windows", 0) >= 30:
+                    _acc = _stats.get("signal_accuracy", 0.5)
+                    _session_kelly = max(0.0, 2 * _acc - 1)
+                    # Blend: 50% calculated Kelly, 50% session-based Kelly
+                    kelly_fraction = (kelly_fraction + _session_kelly) / 2
+                    logger.debug(
+                        f"[KELLY] {_sym} session_acc={_acc:.1%} → blend kelly={kelly_fraction:.3f}"
+                    )
+        except Exception:
+            pass
 
         # Allow LLM analyst to override kelly fraction
         try:
@@ -197,3 +242,35 @@ class RiskManager:
             * self._kelly_mult
             * config.MAX_TOTAL_EXPOSURE_USDC
         )
+
+    def risk_of_ruin(self, win_rate: float, kelly_fraction: float, n_bets: int = 100) -> float:
+        """
+        Compute approximate probability of ruin (losing all capital) using
+        the gambler's ruin formula for fixed-fraction betting.
+
+        win_rate: probability of winning each bet (0.0-1.0)
+        kelly_fraction: fraction of bankroll bet each time
+        n_bets: number of bets to simulate over
+
+        Returns probability of ruin (0.0-1.0).
+        """
+        if win_rate <= 0 or win_rate >= 1:
+            return 1.0 if win_rate <= 0 else 0.0
+        if kelly_fraction <= 0:
+            return 0.0
+        # Monte Carlo approximation (1000 paths)
+        import random
+        ruins = 0
+        n_sims = 1000
+        for _ in range(n_sims):
+            bankroll = 1.0
+            for _ in range(n_bets):
+                bet = bankroll * kelly_fraction
+                if random.random() < win_rate:
+                    bankroll += bet  # win
+                else:
+                    bankroll -= bet  # loss
+                if bankroll <= 0.1:  # ruined (< 10% of start)
+                    ruins += 1
+                    break
+        return ruins / n_sims

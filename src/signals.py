@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading as _threading
 import time
+from collections import deque as _deque
 
 import requests
 from loguru import logger
@@ -386,3 +387,282 @@ def _multitf_consensus(symbol: str) -> tuple[float, str]:
         conf = "NONE"
 
     return consensus, conf
+
+
+# ---------------------------------------------------------------------------
+# Trade-count conviction filter
+# ---------------------------------------------------------------------------
+
+# Trade rate tracking — fed by BinanceWSFeed aggTrade handler
+_TRADE_TIMES: dict[str, _deque] = {}   # symbol → deque of timestamps (last 10 min)
+_TRADE_RATE_WINDOW = 600   # seconds of history to keep
+_TRADE_RATE_AVG_WINDOW = 30  # seconds for rate calculation
+
+
+def record_trade_tick(symbol: str) -> None:
+    """Call from BinanceWSFeed for every aggTrade message received."""
+    sym = symbol.upper()
+    now = time.time()
+    with _PRICE_LOCK:
+        dq = _TRADE_TIMES.setdefault(sym, _deque())
+        dq.append(now)
+        cutoff = now - _TRADE_RATE_WINDOW
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+
+
+def _get_trade_rate(symbol: str, window_secs: int = 30) -> float:
+    """Returns trades/sec in the last window_secs for symbol. 0.0 if no data."""
+    sym = symbol.upper()
+    with _PRICE_LOCK:
+        dq = _TRADE_TIMES.get(sym)
+        if not dq:
+            return 0.0
+        cutoff = time.time() - window_secs
+        count = sum(1 for t in dq if t >= cutoff)
+    return count / window_secs
+
+
+def _get_avg_trade_rate(symbol: str) -> float:
+    """Rolling 10-min average trade rate for baseline comparison."""
+    return _get_trade_rate(symbol, window_secs=_TRADE_RATE_WINDOW)
+
+
+# ---------------------------------------------------------------------------
+# Binance funding rate signal
+# ---------------------------------------------------------------------------
+
+_FUNDING_CACHE: dict[str, tuple[float, float]] = {}  # symbol → (rate, ts)
+_FUNDING_TTL = 60.0
+
+
+def _get_funding_rate(symbol: str) -> float | None:
+    """
+    Returns the current perpetual futures funding rate for symbol.
+    Positive = longs pay shorts (market leans bullish).
+    Negative = shorts pay longs (market leans bearish).
+    Cached for 60s. Returns None if unavailable.
+    """
+    sym = symbol.upper()
+    binance_sym = sym + "USDT"
+    cached = _FUNDING_CACHE.get(sym)
+    now = time.time()
+    if cached and (now - cached[1]) < _FUNDING_TTL:
+        return cached[0]
+    try:
+        r = requests.get(
+            f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={binance_sym}",
+            timeout=3,
+        )
+        r.raise_for_status()
+        rate = float(r.json()["lastFundingRate"])
+        _FUNDING_CACHE[sym] = (rate, now)
+        return rate
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Binance open interest delta
+# ---------------------------------------------------------------------------
+
+_OI_CACHE: dict[str, list[tuple[float, float]]] = {}  # symbol → [(oi, ts), ...]
+_OI_TTL = 30.0
+
+
+def _get_oi_delta(symbol: str) -> float | None:
+    """
+    Returns % change in open interest over last 2 readings.
+    Positive = OI rising (conviction), negative = OI falling (exhaustion).
+    None if unavailable.
+    """
+    sym = symbol.upper()
+    binance_sym = sym + "USDT"
+    now = time.time()
+    history = _OI_CACHE.setdefault(sym, [])
+    if not history or (now - history[-1][1]) >= _OI_TTL:
+        try:
+            r = requests.get(
+                f"https://fapi.binance.com/fapi/v1/openInterest?symbol={binance_sym}",
+                timeout=3,
+            )
+            r.raise_for_status()
+            oi = float(r.json()["openInterest"])
+            history.append((oi, now))
+            if len(history) > 20:
+                history[:] = history[-20:]
+        except Exception:
+            return None
+    if len(history) < 2:
+        return None
+    old_oi, new_oi = history[-2][0], history[-1][0]
+    if old_oi <= 0:
+        return None
+    return (new_oi - old_oi) / old_oi
+
+
+# ---------------------------------------------------------------------------
+# Coinbase price divergence
+# ---------------------------------------------------------------------------
+
+_COINBASE_CACHE: dict[str, tuple[float, float]] = {}  # symbol → (price, ts)
+_COINBASE_TTL = 10.0
+_COINBASE_SYMS = {"BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"}
+
+
+def _get_coinbase_price(symbol: str) -> float | None:
+    """Fetch spot price from Coinbase. Returns None if unavailable."""
+    sym = symbol.upper()
+    if sym not in _COINBASE_SYMS:
+        return None
+    cached = _COINBASE_CACHE.get(sym)
+    now = time.time()
+    if cached and (now - cached[1]) < _COINBASE_TTL:
+        return cached[0]
+    try:
+        r = requests.get(
+            f"https://api.coinbase.com/v2/prices/{sym}-USD/spot",
+            timeout=3,
+        )
+        r.raise_for_status()
+        price = float(r.json()["data"]["amount"])
+        _COINBASE_CACHE[sym] = (price, now)
+        return price
+    except Exception:
+        return None
+
+
+def _cross_exchange_divergence(symbol: str) -> float:
+    """
+    Returns (coinbase_price - binance_price) / binance_price.
+    Positive = Coinbase higher = upward arbitrage pressure on Binance.
+    0.0 if data unavailable.
+    """
+    sym = symbol.upper()
+    binance = _PRICE_CACHE.get(sym)
+    if not binance or binance[0] <= 0:
+        return 0.0
+    coinbase = _get_coinbase_price(sym)
+    if coinbase is None or coinbase <= 0:
+        return 0.0
+    return (coinbase - binance[0]) / binance[0]
+
+
+# ---------------------------------------------------------------------------
+# Fear & Greed index
+# ---------------------------------------------------------------------------
+
+_FNG_CACHE: tuple[int, str, float] | None = None  # (value, classification, ts)
+_FNG_TTL = 3600.0  # 1 hour (it changes once daily)
+
+
+def _get_fear_greed() -> tuple[int, str] | None:
+    """
+    Returns (value, classification) from alternative.me Fear & Greed Index.
+    value: 0-100 (0=extreme fear, 100=extreme greed)
+    classification: "Extreme Fear" | "Fear" | "Neutral" | "Greed" | "Extreme Greed"
+    Cached for 1 hour. Returns None if unavailable.
+    """
+    global _FNG_CACHE
+    now = time.time()
+    if _FNG_CACHE and (now - _FNG_CACHE[2]) < _FNG_TTL:
+        return _FNG_CACHE[0], _FNG_CACHE[1]
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
+        r.raise_for_status()
+        d = r.json()["data"][0]
+        value = int(d["value"])
+        classification = d["value_classification"]
+        _FNG_CACHE = (value, classification, now)
+        return value, classification
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Market regime detection
+# ---------------------------------------------------------------------------
+
+def _market_regime(symbol: str) -> str:
+    """
+    Detects whether the market is trending or choppy based on recent price history.
+    Returns: "TRENDING_UP" | "TRENDING_DOWN" | "CHOPPY" | "UNKNOWN"
+
+    Logic:
+    - Trending: consistent direction across 30s, 60s, 5m momentum + consecutive windows agree
+    - Choppy: timeframes conflict or momentum magnitude is very low
+    """
+    sym = symbol.upper()
+    m30 = _price_momentum(sym, 30)
+    m60 = _price_momentum(sym, 60)
+    m5m = _price_momentum(sym, 300)
+    cw  = _consecutive_window_trend(sym)
+
+    available = [x for x in [m30, m60, m5m] if x is not None]
+    if len(available) < 2:
+        return "UNKNOWN"
+
+    # Directions
+    dirs = [1 if x > 0 else -1 for x in available]
+    if cw is not None:
+        dirs.append(1 if cw > 0 else -1)
+
+    n_up   = sum(1 for d in dirs if d > 0)
+    n_down = sum(1 for d in dirs if d < 0)
+    total  = len(dirs)
+
+    # Strong trend: 3/4 or better agreement + meaningful magnitude
+    magnitude = sum(abs(x) for x in available) / len(available)
+    if n_up / total >= 0.75 and magnitude > 0.001:
+        return "TRENDING_UP"
+    if n_down / total >= 0.75 and magnitude > 0.001:
+        return "TRENDING_DOWN"
+
+    # Choppy: timeframes conflict
+    if n_up > 0 and n_down > 0:
+        return "CHOPPY"
+
+    return "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# Alpha decay detection
+# ---------------------------------------------------------------------------
+
+def _alpha_decay_score(symbol: str | None = None) -> float:
+    """
+    Reads session_log.jsonl to compute rolling signal accuracy trend.
+    Returns a score from -1.0 (decaying) to +1.0 (improving).
+    0.0 = stable or insufficient data.
+    """
+    try:
+        from src.session_tracker import get_asset_stats, get_all_stats
+        if symbol:
+            stats = get_asset_stats(symbol, lookback=30)
+            recent = get_asset_stats(symbol, lookback=10)
+        else:
+            # Aggregate across all assets
+            all_stats = get_all_stats(lookback=30)
+            all_recent = get_all_stats(lookback=10)
+            if not all_stats:
+                return 0.0
+            # Weighted average by signal_windows
+            def _wavg(stats_dict):
+                total_w = sum(s.get("signal_windows", 0) for s in stats_dict.values())
+                if total_w == 0:
+                    return 0.0
+                return sum(
+                    s.get("signal_accuracy", 0) * s.get("signal_windows", 0)
+                    for s in stats_dict.values()
+                ) / total_w
+            acc_30 = _wavg(all_stats)
+            acc_10 = _wavg(all_recent)
+            return acc_10 - acc_30  # positive = improving, negative = decaying
+
+        if not stats or not recent:
+            return 0.0
+        acc_30 = stats.get("signal_accuracy", 0)
+        acc_10 = recent.get("signal_accuracy", 0)
+        return acc_10 - acc_30
+    except Exception:
+        return 0.0

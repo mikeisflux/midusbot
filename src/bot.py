@@ -42,6 +42,57 @@ import config
 import src.webui as webui
 
 
+def _check_clock_sync() -> None:
+    """
+    Verify server clock is within 500ms of NTP time.
+    Window boundary detection is wrong if clock is off — this causes us to
+    enter markets at the wrong time or miss the oracle lag window entirely.
+    """
+    try:
+        import requests as _req
+        # Use Binance server time as reference (no external NTP library needed)
+        t0 = time.time()
+        resp = _req.get("https://api.binance.com/api/v3/time", timeout=3)
+        rtt  = time.time() - t0
+        server_ms = resp.json()["serverTime"]
+        server_ts = server_ms / 1000.0
+        local_ts  = t0 + rtt / 2   # adjust for network RTT
+        drift_ms  = abs(local_ts - server_ts) * 1000
+        if drift_ms > 500:
+            logger.warning(
+                f"[CLOCK] Server clock drift {drift_ms:.0f}ms vs Binance NTP — "
+                f"window boundary detection may be off! Check system NTP sync."
+            )
+        else:
+            logger.info(f"[CLOCK] Clock sync OK — drift {drift_ms:.0f}ms vs Binance")
+    except Exception as exc:
+        logger.debug(f"[CLOCK] Clock check failed: {exc}")
+
+
+def _audit_api_latency() -> None:
+    """
+    Measure round-trip latency to Binance and Polymarket APIs.
+    Log a warning if > 200ms (suggests server location may be suboptimal).
+    """
+    import requests as _req
+    endpoints = [
+        ("Binance",     "https://api.binance.com/api/v3/ping"),
+        ("Poly-Gamma",  "https://gamma-api.polymarket.com/markets?limit=1"),
+        ("Poly-CLOB",   "https://clob.polymarket.com/"),
+    ]
+    for name, url in endpoints:
+        try:
+            t0  = time.time()
+            _req.get(url, timeout=5)
+            rtt = int((time.time() - t0) * 1000)
+            if rtt > 200:
+                logger.warning(f"[LATENCY-AUDIT] {name} RTT={rtt}ms — consider server relocation closer to APIs")
+            else:
+                logger.info(f"[LATENCY-AUDIT] {name} RTT={rtt}ms ✓")
+        except Exception as exc:
+            logger.debug(f"[LATENCY-AUDIT] {name} unreachable: {exc}")
+
+
 def _seed_analyst_params() -> None:
     """
     Write history-informed defaults to analyst_params.json if the file is
@@ -112,6 +163,10 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
     def run(self) -> None:
         # Auto-seed analyst_params.json with history-informed defaults if missing/empty
         _seed_analyst_params()
+
+        # Clock sync + geographic latency audit on startup
+        _check_clock_sync()
+        _audit_api_latency()
 
         mode = "[DRY-RUN]" if config.DRY_RUN else "[LIVE]"
         logger.info(f"Polymarket bot starting — {mode}")

@@ -159,6 +159,7 @@ class BinanceWSFeed:
                 try:
                     import src.signals as _sig
                     _sig._LAST_WS_TICK[symbol] = time.time()
+                    _sig.record_trade_tick(symbol)
                 except Exception:
                     pass
 

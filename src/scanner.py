@@ -140,6 +140,9 @@ class ScannerMixin:
 
         secs_to_boundary = self._secs_until_next_window(5)
 
+        if secs_to_boundary <= 30:
+            logger.debug(f"[PRE-WINDOW] {secs_to_boundary:.1f}s to next window — watching for pre-entry signal")
+
         if secs_to_boundary <= BURST_LEAD_SECS:
             wait = max(0.05, secs_to_boundary - 0.1)
             logger.debug(
@@ -186,8 +189,22 @@ class ScannerMixin:
         self._process_sim_queue()
         self._manage_positions()
 
-        for sym in ("BTC", "XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE"):
-            _fetch_price(sym)
+        # Retrain ML classifier every 24h (non-blocking)
+        if self._dash_state.loop_count % 3600 == 0:
+            try:
+                from src.ml_classifier import get_classifier
+                get_classifier()  # triggers retrain if stale
+            except Exception:
+                pass
+
+        # Async parallel price fetching — scan all assets concurrently instead of
+        # sequentially (was: asset 7 signal was 3-5s stale by the time we got to it)
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        _ASSETS_TO_FETCH = ("BTC", "XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE")
+        with ThreadPoolExecutor(max_workers=len(_ASSETS_TO_FETCH), thread_name_prefix="pricefetch") as _pool:
+            _futures = {_pool.submit(_fetch_price, sym): sym for sym in _ASSETS_TO_FETCH}
+            for _fut in _as_completed(_futures):
+                _fut.result()  # surface exceptions if any
 
         if self._dash_state.loop_count % 4 == 1:
             from src.signals import _PRICE_CACHE, _PRICE_HISTORY, _LAST_WS_TICK
@@ -215,6 +232,11 @@ class ScannerMixin:
             logger.info("Feed: " + "  ".join(parts))
             if silent_assets:
                 logger.warning(f"Feed: WS silent for {silent_assets} — using REST/stale fallback")
+            if len(silent_assets) >= 5:
+                logger.warning(
+                    f"Feed: {len(silent_assets)}/7 assets silent — WS may be down. "
+                    f"Consider restarting WebSocket connection."
+                )
 
         self._dash_state.add_exec_log("scan",
             f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '...'} markets")
@@ -274,7 +296,8 @@ class ScannerMixin:
             if _asset is None:
                 continue
 
-            if _updown_window_mins(market.question) != 5:
+            _win_mins = _updown_window_mins(market.question)
+            if _win_mins not in (5, 15):  # support 5-min and 15-min windows
                 continue
 
             if self._already_positioned(market):
@@ -290,10 +313,25 @@ class ScannerMixin:
                 continue
 
             _secs = _market_seconds_into_window(market)
-            if _secs is None or _secs < 5 or _secs > 240:
+            if _secs is None or _secs < 2 or _secs > 240:
                 continue
 
             ob = self._client.get_order_book(market.yes_token.token_id)
+
+            # Skip markets with completely empty order books (MMs absent AND price is stale)
+            if ob is None or (not ob.bids and not ob.asks):
+                logger.debug(f"[STALE] {market.question[:40]} — empty order book, skipping")
+                continue
+
+            # Competing bot indicator: if mid is already repriced within 5s of window open
+            if _secs < 5 and ob:
+                _mid = ob.mid
+                if _mid > 0.54 or _mid < 0.46:
+                    logger.debug(
+                        f"[BOT-DETECT] {market.question[:40]} — mid={_mid:.3f} "
+                        f"repriced in <5s: competing bots active"
+                    )
+                    continue
 
             try:
                 sig = self._trend.analyse(market, ob)
@@ -336,6 +374,15 @@ class ScannerMixin:
                         sig.no_best_ask = no_ob.best_ask
                 except Exception:
                     pass
+
+            # Multi-window lookahead: boost rel_strength for markets with >3 min remaining
+            # (more time = more potential price movement before oracle update)
+            if hours_to_close is not None:
+                secs_remaining = hours_to_close * 3600
+                if secs_remaining > 180:   # > 3 minutes left
+                    sig.rel_strength *= 1.2  # 20% boost for time-rich windows
+                elif secs_remaining < 60:   # < 1 minute: urgency penalty
+                    sig.rel_strength *= 0.8
 
             signals_found += 1
             self._dash_state.push_signal(sig)

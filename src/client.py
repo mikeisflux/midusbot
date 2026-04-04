@@ -876,22 +876,42 @@ class PolymarketClient:
             logger.error("CLOB client not available — cannot place order.")
             return None
 
-        try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
+        # Polygon gas spike handling: check if recent orders failed and retry
+        # with small backoff. Polygon congestion causes silent order failures.
+        _retries = 2
+        _delay   = 1.5
+        for _attempt in range(_retries + 1):
+            try:
+                from py_clob_client.clob_types import OrderArgs, OrderType
 
-            order_args = OrderArgs(
-                token_id=token_id,
-                price=price,
-                size=size,
-                side=side,   # "BUY" or "SELL" string — py_clob_client accepts both
-            )
-            signed_order = self._clob_client.create_order(order_args)
-            resp = self._clob_client.post_order(signed_order, OrderType.GTC)
-            logger.info(f"Order placed: {resp}")
-            return resp
-        except Exception as exc:
-            logger.error(f"place_limit_order failed: {exc}")
-            return None
+                order_args = OrderArgs(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,   # "BUY" or "SELL" string — py_clob_client accepts both
+                )
+                signed_order = self._clob_client.create_order(order_args)
+                resp = self._clob_client.post_order(signed_order, OrderType.GTC)
+                logger.info(f"Order placed: {resp}")
+                return resp
+            except Exception as exc:
+                err_str = str(exc).lower()
+                # Detect gas / nonce / network errors specifically
+                is_gas_err = any(k in err_str for k in (
+                    "gas", "nonce", "transaction", "network", "timeout",
+                    "connection", "503", "502", "504", "too many"
+                ))
+                if _attempt < _retries and is_gas_err:
+                    logger.warning(
+                        f"place_limit_order attempt {_attempt + 1} failed (gas/network): {exc} — "
+                        f"retrying in {_delay}s"
+                    )
+                    import time as _t; _t.sleep(_delay)
+                    _delay *= 2   # exponential backoff
+                else:
+                    logger.error(f"place_limit_order failed after {_attempt + 1} attempt(s): {exc}")
+                    return None
+        return None
 
     def cancel_order(self, order_id: str) -> bool:
         if config.DRY_RUN:

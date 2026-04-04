@@ -243,7 +243,122 @@ def _build(s: DashboardState) -> dict:
         "sim": s.sim_stats if s.sim_stats else {},
         "entry_latencies": s.entry_latencies,
         "next_window_secs": round(300 - (time.time() % 300), 1),
+        "session_stats":    _session_stats_data(),
+        "asset_pnl":        _asset_pnl_data(),
+        "risk_of_ruin":     _risk_of_ruin_data(),
     }
+
+
+def _session_stats_data() -> dict:
+    """Per-asset signal accuracy from session_tracker for dashboard panel."""
+    try:
+        from src.session_tracker import get_all_stats
+        return get_all_stats(lookback=100)
+    except Exception:
+        return {}
+
+
+def _asset_pnl_data() -> dict:
+    """Per-asset P&L breakdown from journal."""
+    if _learner is None:
+        return {}
+    try:
+        from src.strategy import _detect_updown_market
+        breakdown: dict[str, dict] = {}
+        for r in getattr(_learner, "_journal", []):
+            if not r.closed:
+                continue
+            sym = _detect_updown_market(r.question) or "OTHER"
+            if sym not in breakdown:
+                breakdown[sym] = {"trades": 0, "wins": 0, "pnl": 0.0}
+            breakdown[sym]["trades"] += 1
+            breakdown[sym]["pnl"]    += r.pnl_usdc
+            if r.pnl_usdc > 0:
+                breakdown[sym]["wins"] += 1
+        for sym, d in breakdown.items():
+            d["win_rate"] = round(d["wins"] / d["trades"], 3) if d["trades"] else 0.0
+            d["pnl"]      = round(d["pnl"], 4)
+        return breakdown
+    except Exception:
+        return {}
+
+
+def _risk_of_ruin_data() -> dict:
+    """Compute risk of ruin for current performance parameters."""
+    if _state is None or _learner is None:
+        return {}
+    try:
+        wr = _state.win_rate
+        if wr <= 0 or _state.total_trades < 5:
+            return {}
+        kelly = config.KELLY_FRACTION
+        ror = _learner.risk_params  # has kelly_multiplier
+        effective_kelly = kelly * getattr(ror, "kelly_multiplier", 1.0) * 0.12
+        from src.risk import RiskManager
+        rm = RiskManager()
+        prob = rm.risk_of_ruin(wr, effective_kelly, n_bets=200)
+        return {"win_rate": round(wr, 3), "kelly_fraction": round(effective_kelly, 4), "ruin_prob": round(prob, 3)}
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# New API routes for session stats, analyst history, asset P&L
+# ---------------------------------------------------------------------------
+
+@app.route("/api/session_stats")
+def api_session_stats():
+    return jsonify(_session_stats_data())
+
+
+@app.route("/api/asset_pnl")
+def api_asset_pnl():
+    return jsonify(_asset_pnl_data())
+
+
+@app.route("/api/analyst_history")
+def api_analyst_history():
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        hist_file = _Path("data/analyst_history.json")
+        if hist_file.exists():
+            return jsonify(_json.loads(hist_file.read_text())[-20:])
+        return jsonify([])
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/timing_accuracy")
+def api_timing_accuracy():
+    """Per-asset signal accuracy by seconds-into-window."""
+    try:
+        from src.session_tracker import get_timing_accuracy
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]
+        return jsonify({a: get_timing_accuracy(a, lookback=200) for a in assets})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/alpha_decay")
+def api_alpha_decay():
+    if _learner is None:
+        return jsonify({})
+    try:
+        return jsonify(_learner.alpha_decay_report())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/feature_importance")
+def api_feature_importance():
+    if _learner is None:
+        return jsonify({})
+    try:
+        return jsonify(_learner.feature_importance())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
 
 # ---------------------------------------------------------------------------
 # Start helper

@@ -473,6 +473,83 @@ class AdaptiveLearner:
         self._save_params()
 
     # ------------------------------------------------------------------
+    # Alpha decay detection
+    # ------------------------------------------------------------------
+
+    def alpha_decay_report(self) -> dict:
+        """
+        Detect if the edge is shrinking over time by comparing win rate
+        across rolling windows. Returns a report dict.
+        """
+        closed = [r for r in self._journal if r.closed]
+        if len(closed) < 20:
+            return {"status": "insufficient_data", "trades": len(closed)}
+
+        # Split into thirds: early / mid / recent
+        n = len(closed)
+        early  = closed[:n // 3]
+        mid    = closed[n // 3: 2 * n // 3]
+        recent = closed[2 * n // 3:]
+
+        def _wr(trades):
+            if not trades:
+                return 0.0
+            return sum(1 for t in trades if t.pnl_usdc > 0) / len(trades)
+
+        wr_early  = _wr(early)
+        wr_mid    = _wr(mid)
+        wr_recent = _wr(recent)
+        trend     = wr_recent - wr_early   # positive = improving, negative = decaying
+
+        report = {
+            "wr_early":  round(wr_early, 3),
+            "wr_mid":    round(wr_mid,   3),
+            "wr_recent": round(wr_recent, 3),
+            "trend":     round(trend, 3),
+            "decaying":  trend < -0.10,   # > 10% drop = meaningful decay
+            "trades":    n,
+        }
+        if report["decaying"]:
+            logger.warning(
+                f"[ALPHA-DECAY] Win rate declining: "
+                f"{wr_early:.1%} → {wr_mid:.1%} → {wr_recent:.1%} "
+                f"(Δ={trend:+.1%}). Edge may be eroding — analyst review recommended."
+            )
+        return report
+
+    # ------------------------------------------------------------------
+    # Feature importance analysis
+    # ------------------------------------------------------------------
+
+    def feature_importance(self) -> dict:
+        """
+        Measure which input signals correlate most with trade outcomes.
+        Uses closed trades in the journal; requires >= 10 closed trades.
+        Returns correlation coefficients for each signal.
+        """
+        closed = [r for r in self._journal if r.closed]
+        if len(closed) < 10:
+            return {}
+
+        outcomes = np.array([1.0 if r.pnl_usdc > 0 else 0.0 for r in closed])
+        features = {
+            "momentum_signal":  np.array([getattr(r, "momentum_signal",  0.0) for r in closed]),
+            "imbalance_signal": np.array([getattr(r, "imbalance_signal", 0.0) for r in closed]),
+            "composite_signal": np.array([getattr(r, "composite_signal", 0.0) for r in closed]),
+            "rel_strength":     np.array([getattr(r, "rel_strength",     0.0) for r in closed]),
+            "entry_price":      np.array([r.entry_price for r in closed]),
+        }
+        result = {}
+        for name, vals in features.items():
+            if vals.std() == 0:
+                result[name] = 0.0
+                continue
+            corr_matrix = np.corrcoef(vals, outcomes)
+            result[name] = round(float(corr_matrix[0, 1]), 4)
+        logger.info(f"[FEATURE-IMPORTANCE] {result}")
+        return result
+
+    # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
 

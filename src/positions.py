@@ -99,6 +99,38 @@ class PositionsMixin:
 
             position_snapshots.append((pos, current_price))
 
+            # Early exit / loss cut — heuristic exits based on current price extremes.
+            # Exits early to redeploy capital or lock in gains before potential revert.
+            if current_price is not None and not pos.is_external:
+                if pos.side == "YES" and current_price < 0.20:
+                    to_close.append((token_id, current_price))
+                    logger.info(
+                        f"[EARLY-EXIT] Cutting losing YES position at {current_price:.3f} "
+                        f"({pnl_pct:+.1%}) — {pos.question[:40]}"
+                    )
+                    continue
+                if pos.side == "NO" and current_price > 0.80:
+                    to_close.append((token_id, current_price))
+                    logger.info(
+                        f"[EARLY-EXIT] Cutting losing NO position at {current_price:.3f} "
+                        f"({pnl_pct:+.1%}) — {pos.question[:40]}"
+                    )
+                    continue
+                if pos.side == "YES" and current_price > 0.78:
+                    to_close.append((token_id, current_price))
+                    logger.info(
+                        f"[EARLY-EXIT] Locking in YES gain at {current_price:.3f} "
+                        f"({pnl_pct:+.1%}) — {pos.question[:40]}"
+                    )
+                    continue
+                if pos.side == "NO" and current_price < 0.22:
+                    to_close.append((token_id, current_price))
+                    logger.info(
+                        f"[EARLY-EXIT] Locking in NO gain at {current_price:.3f} "
+                        f"({pnl_pct:+.1%}) — {pos.question[:40]}"
+                    )
+                    continue
+
             if not pos.is_external:
                 if self._risk.should_stop_loss(pnl_pct):
                     logger.warning(f"STOP-LOSS {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
@@ -213,6 +245,42 @@ class PositionsMixin:
                 f"{'[SIM] ' if config.DRY_RUN else ''}Closed: {pos.side} {pos.question[:40]}  "
                 f"P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}"
             )
+
+            # Log outcome to historical database for offline analysis (A5)
+            try:
+                import json as _json
+                _outcome_log = Path("data/polymarket_outcomes.jsonl")
+                _outcome_log.parent.mkdir(parents=True, exist_ok=True)
+                with _outcome_log.open("a") as _fh:
+                    _fh.write(_json.dumps({
+                        "ts": time.time(),
+                        "market_id": pos.market_id,
+                        "question": pos.question,
+                        "token_id": token_id,
+                        "side": pos.side,
+                        "entry_price": pos.entry_price,
+                        "exit_price": exit_price,
+                        "shares": pos.shares,
+                        "pnl_usdc": exit_usdc - pos.cost_usdc,
+                        "dry_run": config.DRY_RUN,
+                    }) + "\n")
+            except Exception:
+                pass
+
+            # Adverse selection tracking log (A6)
+            try:
+                import json as _json
+                _adv_log = Path("data/adverse_selection.jsonl")
+                _adv_log.parent.mkdir(parents=True, exist_ok=True)
+                with _adv_log.open("a") as _fh:
+                    _fh.write(_json.dumps({
+                        "ts": time.time(),
+                        "question": pos.question[:60],
+                        "pnl_usdc": exit_usdc - pos.cost_usdc,
+                    }) + "\n")
+            except Exception:
+                pass
+
             return True
 
         if manual:
@@ -313,6 +381,30 @@ class PositionsMixin:
             logger.debug(f"Skipping — wallet ${wallet:.2f} too low for ${usdc:.2f} order")
             return False
 
+        # Order book thinness filter: thick books mean MMs are active and have repriced.
+        # Thin books (wide spread) = MMs absent = maximum oracle lag edge.
+        # Skip if spread is very tight — means aggressive MMs are dominating the book.
+        if sig.best_ask is not None and sig.best_bid is not None and sig.best_bid > 0:
+            _spread = sig.best_ask - sig.best_bid
+            if _spread < 0.005:  # < 0.5 cent spread means MMs are aggressive — edge likely gone
+                logger.debug(
+                    f"[OB-THINNESS] {sig.question[:40]} — "
+                    f"spread={_spread:.3f} very tight, MMs repricing fast — skip"
+                )
+                return False
+
+        # Limit order price optimization: try to post at mid or best_bid+0.01 to avoid paying spread.
+        # This saves ~1-2 cents per trade vs taking the ask.
+        if sig.side == "YES" and sig.best_bid is not None and sig.best_ask is not None:
+            _mid = (sig.best_bid + sig.best_ask) / 2
+            _maker_price = round(max(sig.best_bid + 0.01, _mid), 2)
+            if _maker_price < limit_price:  # only use maker price if it saves us money
+                logger.debug(
+                    f"[LIMIT-OPT] Using maker price {_maker_price:.3f} vs taker "
+                    f"{limit_price:.3f} (saves {limit_price - _maker_price:.3f}/share)"
+                )
+                limit_price = _maker_price
+
         _order_start = time.time()
         resp = self._client.place_limit_order(
             token_id=sig.token_id,
@@ -322,6 +414,8 @@ class PositionsMixin:
         )
         _order_ms  = int((time.time() - _order_start) * 1000)
         _total_ms  = int((time.time() - _exec_start)  * 1000)
+        if _total_ms < 500:
+            logger.debug(f"[ADVERSE-SEL] Fast fill ({_total_ms}ms) — watch for adverse selection")
         self._dash_state.add_exec_log("exec",
             f"EXEC ${limit_price:.2f} → \"{sig.question[:38]}\" "
             f"// order={_order_ms}ms total={_total_ms}ms"
@@ -578,6 +672,27 @@ class PositionsMixin:
             self._risk.set_wallet_balance(balance)
         else:
             logger.debug("Wallet balance unavailable (no auth or dry-run)")
+
+        self._check_wallet_replenishment()
+
+    def _check_wallet_replenishment(self) -> None:
+        """Alert when wallet balance drops below $25 — needs USDC top-up."""
+        balance = self._dash_state.wallet_balance
+        if balance <= 0:
+            return
+        _REPLENISH_THRESHOLD = 25.0
+        if not hasattr(self, "_replenish_alerted"):
+            self._replenish_alerted = False
+        if balance < _REPLENISH_THRESHOLD and not self._replenish_alerted:
+            from src.utils import alerter
+            alerter.send(
+                f"⚠️ Wallet balance ${balance:.2f} USDC — below $25 threshold. "
+                f"Please bridge USDC to Polygon to continue trading.",
+                level="warning",
+            )
+            self._replenish_alerted = True
+        elif balance >= _REPLENISH_THRESHOLD:
+            self._replenish_alerted = False  # reset once topped up
 
     def _check_daily_loss_alert(self) -> None:
         from src.utils import alerter

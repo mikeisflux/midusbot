@@ -602,6 +602,28 @@ def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> s
     p.append(f"\nSession tracker (signal direction accuracy per 5-min window — ground truth, not trade-filtered):\n{_session_stats_str()}")
     p.append(f"\nLast 10 trades:\n{json.dumps(rows[-10:], indent=2)}")
     p.append(f"\nCurrent parameters:\n{json.dumps({k: v for k, v in params.items() if not k.startswith('_') and k not in ('analysis_strategy','ww_mrd_action','trades_at_last_run','wins_at_last_run')}, indent=2)}")
+
+    # Additional market context: Fear & Greed, alpha decay, backtest summary
+    _extra = []
+    try:
+        from src.signals import _get_fear_greed
+        fng = _get_fear_greed()
+        if fng:
+            _extra.append(f"Fear & Greed Index: {fng[0]} ({fng[1]})")
+    except Exception:
+        pass
+    try:
+        from src.backtest import BacktestEngine
+        _bt = BacktestEngine().run(lookback_days=3)
+        if _bt.n_trades >= 5:
+            _extra.append(
+                f"3-day backtest (all sessions): {_bt.n_trades}t  WR={_bt.win_rate:.1%}  PnL=${_bt.total_pnl:+.2f}"
+            )
+    except Exception:
+        pass
+    if _extra:
+        p.append(f"\nMarket context:\n" + "\n".join(_extra))
+
     p.append("")
     p.append("Now apply WW_MRD: what ONE THING will make real difference? Do it.")
 
