@@ -313,7 +313,16 @@ class DiscordCommander:
             try:
                 # Run claude CLI with --print (non-interactive), --dangerously-skip-permissions
                 # so no approval popups block execution.
+                # Inherit full login shell PATH so pm2, git, docker-compose etc. are all found.
                 env = {**os.environ, "DRY_RUN": os.environ.get("DRY_RUN", "true")}
+                # Ensure common tool paths are in PATH
+                extra_paths = [
+                    "/usr/local/bin", "/usr/bin", "/bin",
+                    os.path.expanduser("~/.npm-global/bin"),
+                    os.path.expanduser("~/.local/bin"),
+                    "/root/.npm-global/bin",
+                ]
+                env["PATH"] = ":".join(extra_paths + [env.get("PATH", "")])
                 result = subprocess.run(
                     [
                         "claude",
