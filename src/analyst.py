@@ -460,10 +460,12 @@ Also: consecutive_window_trend = fraction of last 4 windows same direction.
 Win = your token settles at 1.00. Loss = settles at 0.00.
 
 PARAMETERS YOU CAN SET:
-- signal_threshold (0.0005–0.0015): FALLBACK ONLY — only applies to assets
-  NOT listed in asset_thresholds. Since you always set all assets in
-  asset_thresholds, this parameter has NO effect in practice. Leave it at
-  0.0008. DO NOT change it. Focus on asset_thresholds instead.
+- signal_threshold (0.0005–0.0015): global fallback minimum price move required
+  to enter. LOWER value = bot trades MORE often (smaller moves qualify).
+  HIGHER value = bot trades LESS often (only bigger moves qualify).
+  WARNING: setting this ABOVE 0.0015 is hard-blocked by code.
+  Default 0.0008. Only change if per-asset thresholds are not sufficient.
+  Example: set 0.0006 to trade more, set 0.0012 to be more selective.
 - min_trend_score (0.0–0.75): require trend alignment (0.5 = 3/4 windows).
 - skip_assets: ["BTC","ETH",...] — stop trading these entirely.
 - prefer_assets: ["BTC",...] — prioritise these assets.
@@ -704,9 +706,9 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
             logger.debug(f"[ANALYST] Invalid {key!r} from LLM: {val!r}")
             return fallback
 
-    # signal_threshold is intentionally NOT applied here — it's a no-op fallback
-    # that only fires for assets not in asset_thresholds (which is never the case).
-    # The LLM consistently misunderstands its direction so we discard it entirely.
+    # signal_threshold: clamp to 0.0005–0.0015 — LLM cannot exceed 0.15%
+    if _f("signal_threshold", 0.0005, 0.0015) is not None:
+        new["signal_threshold"] = _f("signal_threshold", 0.0005, 0.0015)
     if _f("min_trend_score", 0.0, 0.75) is not None:
         new["min_trend_score"] = _f("min_trend_score", 0.0, 0.75)
     if "skip_assets" in payload and isinstance(payload["skip_assets"], list):
