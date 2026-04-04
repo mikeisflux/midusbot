@@ -616,7 +616,18 @@ class UpDownMomentumStrategy:
         if symbol.upper() in [s.upper() for s in _ap.get("skip_assets", [])]:
             return None
 
-        window_return = _window_return(symbol, int(secs_in))
+        # Use the oldest available price tick as reference if the window opened
+        # before the bot started (common after restarts). We cap secs_in to what
+        # we actually have so _window_return finds a tick within tolerance.
+        with _PRICE_LOCK:
+            _hist_now = list(_PRICE_HISTORY.get(symbol.upper(), []))
+        if len(_hist_now) >= 2:
+            _available_span = _hist_now[-1][1] - _hist_now[0][1]
+            _effective_secs = min(int(secs_in), max(15, int(_available_span) - 2))
+        else:
+            _effective_secs = int(secs_in)
+
+        window_return = _window_return(symbol, _effective_secs)
         # Per-asset threshold overrides take priority over global threshold
         _asset_thresholds = _ap.get("asset_thresholds", {})
         _sig_thresh = float(
@@ -628,7 +639,7 @@ class UpDownMomentumStrategy:
         # window returns are typically 0.02-0.1% in the first 30-60s.
         _sig_thresh = min(_sig_thresh, _MIN_WINDOW_RETURN_PCT)
         if window_return is None:
-            logger.debug(f"[UPDOWN] {symbol} skipped — window_return unavailable (no price at t-{secs_in:.0f}s)")
+            logger.debug(f"[UPDOWN] {symbol} skipped — window_return unavailable (lookback={_effective_secs}s, hist={int(_available_span if len(_hist_now)>=2 else 0)}s)")
             return None
         if abs(window_return) < _sig_thresh:
             logger.debug(f"[UPDOWN] {symbol} skipped — win_ret={window_return:+.4%} below thresh {_sig_thresh:.4%}")

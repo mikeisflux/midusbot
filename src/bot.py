@@ -1133,7 +1133,7 @@ class PolymarketBot:
                         if secs_left > win_secs:
                             # Window hasn't started — skip silently
                             continue
-                        if secs_left < 120:   # 2-min buffer — burst entry fires up to 90s after boundary
+                        if secs_left < 90:   # 90s buffer — don't enter in final 1.5 min
                             n_toosoon += 1; n_ud_toosoon += 1; continue
                     else:
                         effective_min_secs = min_minutes * 60
