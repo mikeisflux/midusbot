@@ -467,13 +467,14 @@ class PositionsMixin:
         else:
             use_fok = False
 
-        # Polymarket CLOB requires: maker amount (shares) max 2 decimals,
-        # taker amount (USDC = shares × price) max 4 decimals.
-        # Round price to 2 decimals and recalculate shares from final price.
+        # Polymarket CLOB: maker=USDC (max 2 decimals), taker=shares (max 4 decimals).
+        # USDC = shares × price. With fractional shares, 5.10 × 0.51 = 2.601 → rejected.
+        # Integer shares × any 2-decimal price always produces a 2-decimal USDC amount.
+        import math as _math
         limit_price = round(limit_price, 2)
-        shares = round(shares, 2)
+        shares = float(_math.floor(shares))   # floor to integer — guarantees clean USDC
         if shares < config.MIN_ORDER_SHARES:
-            logger.info(f"[SIZE] Skipping after price round — {shares:.2f} shares < {config.MIN_ORDER_SHARES}")
+            logger.info(f"[SIZE] Skipping after floor — {shares:.0f} shares < {config.MIN_ORDER_SHARES}")
             return False
 
         _order_start = time.time()
