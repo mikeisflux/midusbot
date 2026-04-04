@@ -392,11 +392,22 @@ class ScannerMixin:
         # A signal that exceeds its own threshold by 2× beats one that barely
         # exceeds a lower threshold — ensures per-asset calibration is respected.
         pending_signals.sort(key=lambda x: x[0].rel_strength, reverse=True)
-        for sig, _asset in pending_signals[:1]:
-            if self._execute_signal(sig):
-                trades_placed += 1
-                # Record bet time for cross-window cooldown
-                self._asset_last_bet[_asset] = time.time()
+
+        # One trade per 5-minute window across all assets.
+        # Track the current window by its epoch bucket (floor to 300s).
+        _current_window = int(time.time() // 300) * 300
+        if not hasattr(self, "_last_traded_window"):
+            self._last_traded_window: int = 0
+        _already_traded_this_window = (self._last_traded_window == _current_window)
+
+        if _already_traded_this_window:
+            logger.debug(f"[WINDOW-LOCK] Already traded this window — holding remaining {len(pending_signals)} signal(s)")
+        else:
+            for sig, _asset in pending_signals[:1]:
+                if self._execute_signal(sig):
+                    trades_placed += 1
+                    self._last_traded_window = _current_window
+                    self._asset_last_bet[_asset] = time.time()
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure        = self._risk.total_exposure()
