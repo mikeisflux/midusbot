@@ -10,10 +10,13 @@ Fair-value computation lives in src.fair_value.
 """
 from __future__ import annotations
 
+import json as _json
 import re as _re
+import threading as _threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path as _Path
 
 import numpy as np
 from loguru import logger
@@ -173,6 +176,187 @@ _ASSET_THRESHOLD_FLOORS: dict[str, float] = {
     "WIF":  0.00080,
     "TRUMP":0.00100,
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Advanced probability / statistics signal modifiers
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Four modifiers, all reading data/session_log.jsonl (written by session_tracker):
+#
+#  1. _bayesian_win_rate_mult  — Beta(2,2) posterior win rate per asset
+#  2. _normal_vol_mult         — Normal distribution z-score vs historical volatility
+#  3. _markov_persistence_mult — P(same dir next window | same dir last window)
+#  4. _binomial_streak_confidence — P(k consecutive wins | p=0.5) significance gate
+#
+# All functions fall back to neutral (1.0 or unchanged confidence) when
+# session_log.jsonl doesn't exist or has fewer than 10 windows — so a fresh
+# bot behaves identically to before until data accumulates.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_PROB_CACHE: dict[str, tuple[dict, float]] = {}
+_PROB_LOCK   = _threading.Lock()
+_PROB_CACHE_TTL = 60.0   # re-read log at most once per minute per asset
+
+
+def _load_prob_stats(symbol: str, lookback: int = 100) -> dict:
+    """
+    Read session_log.jsonl once per minute per asset.
+    Returns a pre-computed stats dict consumed by all four modifiers.
+    """
+    sym = symbol.upper()
+    now = time.time()
+    with _PROB_LOCK:
+        cached = _PROB_CACHE.get(sym)
+        if cached and now - cached[1] < _PROB_CACHE_TTL:
+            return cached[0]
+
+    entries: list[dict] = []
+    log_path = _Path("data/session_log.jsonl")
+    if log_path.exists():
+        try:
+            with log_path.open() as fh:
+                for line in fh:
+                    try:
+                        e = _json.loads(line)
+                        if e.get("symbol") == sym:
+                            entries.append(e)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    recent = entries[-lookback:]
+
+    # Bayesian: signal win/loss counts
+    signaled = [e for e in recent if e.get("signal_direction") is not None]
+    wins     = sum(1 for e in signaled if e.get("signal_correct"))
+    losses   = len(signaled) - wins
+
+    # Normal vol: distribution of |pct_change| per 5-min window
+    moves    = [abs(e["pct_change"]) for e in recent if e.get("pct_change") is not None]
+    vol_mean = float(np.mean(moves)) if len(moves) >= 15 else None
+    vol_std  = float(np.std(moves))  if len(moves) >= 15 else None
+
+    # Markov: sequence of actual_direction outcomes
+    directions = [e["actual_direction"] for e in recent if e.get("actual_direction")]
+
+    stats: dict = {
+        "bayes_wins":   wins,
+        "bayes_losses": losses,
+        "n_signaled":   len(signaled),
+        "vol_mean":     vol_mean,
+        "vol_std":      vol_std,
+        "n_moves":      len(moves),
+        "directions":   directions,
+    }
+    with _PROB_LOCK:
+        _PROB_CACHE[sym] = (stats, now)
+    return stats
+
+
+def _bayesian_win_rate_mult(symbol: str) -> float:
+    """
+    1. Bayesian win-rate multiplier.
+
+    Uses a Beta(2, 2) prior (weakly centred at 0.5) updated with
+    observed signal_correct counts from session_log.
+
+      posterior_mean = (2 + wins) / (4 + wins + losses)
+      multiplier     = 1.0 + (posterior_mean − 0.5) × 1.5
+      clamped to [0.5, 1.5]
+
+    At posterior 0.5 (no data / 50-50) → ×1.0 (neutral).
+    At posterior 0.7 (good accuracy)   → ×1.3 (boost).
+    At posterior 0.3 (bad accuracy)    → ×0.7 (penalise).
+    """
+    s      = _load_prob_stats(symbol)
+    wins   = s["bayes_wins"]
+    losses = s["bayes_losses"]
+    posterior_mean = (2.0 + wins) / (4.0 + wins + losses)
+    mult = 1.0 + (posterior_mean - 0.5) * 1.5
+    return float(np.clip(mult, 0.5, 1.5))
+
+
+def _normal_vol_mult(symbol: str, window_return: float) -> float:
+    """
+    2. Normal distribution volatility z-score multiplier.
+
+    Models |pct_change| per 5-min window as Normal(μ, σ) from session_log.
+
+      z = (|signal| − μ) / σ
+      multiplier = 1.0 + (z − 1.5) × 0.2
+      clamped to [0.5, 1.8]
+
+    z = 1.5 → breakeven (×1.0).
+    z = 2.0 → signal is 0.5σ above breakeven → ×1.1 boost.
+    z = 0.5 → signal is within typical noise band → ×0.8 penalty.
+
+    Falls back to 1.0 when fewer than 15 windows are logged.
+    """
+    s = _load_prob_stats(symbol)
+    vol_mean = s["vol_mean"]
+    vol_std  = s["vol_std"]
+    if vol_mean is None or vol_std is None or vol_std < 1e-8:
+        return 1.0
+    z    = (abs(window_return) - vol_mean) / vol_std
+    mult = 1.0 + (z - 1.5) * 0.2
+    return float(np.clip(mult, 0.5, 1.8))
+
+
+def _markov_persistence_mult(symbol: str, signal_dir: str) -> float:
+    """
+    3. Markov chain persistence multiplier.
+
+    Estimates P(window_t+1 = signal_dir | window_t = signal_dir) from the
+    last 50 window outcomes in session_log using Laplace smoothing (+1/+2).
+
+      P > 0.5 → trend-following asset → boost (up to ×1.4)
+      P = 0.5 → random walk           → neutral (×1.0)
+      P < 0.5 → mean-reverting asset  → penalise (down to ×0.6)
+
+    Falls back to 1.0 if fewer than 5 same-direction transitions observed.
+    """
+    s          = _load_prob_stats(symbol)
+    directions = s["directions"][-50:]
+    if len(directions) < 10:
+        return 1.0
+
+    same = total = 0
+    for i in range(1, len(directions)):
+        if directions[i - 1] == signal_dir:
+            total += 1
+            if directions[i] == signal_dir:
+                same += 1
+
+    if total < 5:
+        return 1.0
+
+    persistence = (same + 1) / (total + 2)   # Laplace smoothing
+    mult = 0.6 + persistence * 0.8            # 0.6→1.4 as persistence 0→1
+    return float(np.clip(mult, 0.6, 1.4))
+
+
+def _binomial_streak_confidence(streak: int) -> str:
+    """
+    4. Binomial significance gate for win-streak confidence.
+
+    P(k consecutive wins | p=0.5) = 0.5^k (assuming independence).
+
+      k ≥ 5  → p < 0.031 → HIGH   (statistically significant at 5% level)
+      k = 3–4 → p < 0.125 → MEDIUM (borderline; 3-streak is 12.5% luck)
+      k ≤ 2  → p ≥ 0.25  → LOW    (easily due to chance)
+
+    Replaces the former "streak ≥ 3 = HIGH" heuristic, which rated a
+    12.5%-chance run as a strong signal.
+    """
+    p_value = 0.5 ** streak
+    if p_value < 0.05:    # streak ≥ 5
+        return "HIGH"
+    elif p_value < 0.25:  # streak 3–4
+        return "MEDIUM"
+    else:                  # streak 1–2
+        return "LOW"
 
 
 def _detect_updown_market(question: str) -> str | None:
@@ -561,6 +745,22 @@ class UpDownMomentumStrategy:
             rel_strength *= 1.5
             logger.debug(f"[UPDOWN] {symbol} prefer_assets boost → rel_strength={rel_strength:.2f}×")
 
+        # ── Advanced probability modifiers ────────────────────────────────────
+        # 1. Bayesian: boost/penalise based on historical signal accuracy for this asset
+        _bayes_mult  = _bayesian_win_rate_mult(symbol)
+        # 2. Normal vol: boost if signal is unusually strong vs historical window volatility
+        _vol_mult    = _normal_vol_mult(symbol, window_return)
+        # 3. Markov: boost if this direction has been persistent for this asset
+        _markov_mult = _markov_persistence_mult(symbol, direction)
+        _prob_mult   = _bayes_mult * _vol_mult * _markov_mult
+        rel_strength *= _prob_mult
+        if abs(_prob_mult - 1.0) > 0.05:
+            logger.debug(
+                f"[PROB] {symbol} bayes={_bayes_mult:.2f}×  vol={_vol_mult:.2f}×  "
+                f"markov={_markov_mult:.2f}×  → combined={_prob_mult:.2f}×  "
+                f"rel_strength={rel_strength:.2f}"
+            )
+
         logger.info(
             f"[UPDOWN] {symbol} {direction}  "
             f"win_ret={window_return:+.4%}  thresh={_sig_thresh:.4%}  rel={rel_strength:.2f}×  "
@@ -677,16 +877,28 @@ class TrendFollowStrategy:
         if edge < config.MIN_EDGE:
             return None
 
-        # Streak 1 = LOW, require meaningful window return to trade LOW streaks
-        confidence = "HIGH" if streak >= 3 else "MEDIUM" if streak >= 2 else "LOW"
+        # 4. Binomial significance gate: streak must be statistically improbable
+        #    to rate HIGH. Replaces "streak ≥ 3 = HIGH" (which is only 12.5% luck).
+        #      P(k wins | p=0.5) = 0.5^k
+        #      k ≥ 5 → p < 3.1% → HIGH  |  k = 3–4 → MEDIUM  |  k ≤ 2 → LOW
+        confidence = _binomial_streak_confidence(streak)
         if confidence == "LOW" and abs(window_return) < _MIN_WINDOW_RETURN_PCT * 2:
             return None   # fresh direction flip + weak window signal — too risky
+
+        # 1 & 3. Bayesian win rate + Markov persistence multipliers for ranking
+        _tf_bayes  = _bayesian_win_rate_mult(symbol)
+        _tf_markov = _markov_persistence_mult(symbol, direction)
+        _tf_prob   = _tf_bayes * _tf_markov
+        # rel_strength: edge × streak significance × probability multipliers
+        # (edge / MIN_EDGE) normalises so a 2× MIN_EDGE signal = 2.0 base)
+        _tf_rel_strength = (edge / config.MIN_EDGE) * (1.0 + streak * 0.1) * _tf_prob
 
         _cw_str = f"{cw_trend:+.2f}" if cw_trend is not None else "N/A"
         logger.info(
             f"[TREND-FOLLOW] {symbol} {direction}  streak={streak}  cw={_cw_str}  "
             f"win_ret={window_return:+.4%}  "
             f"fair={fair_value:.2f}  mkt={mkt_price:.2f}  edge={edge:+.2f}  "
+            f"bayes={_tf_bayes:.2f}×  markov={_tf_markov:.2f}×  "
             f"t={secs_in:.0f}s  [{confidence}]  \"{market.question[:45]}\""
         )
 
@@ -703,4 +915,5 @@ class TrendFollowStrategy:
             momentum_signal=float(streak),
             imbalance_signal=float(combined),
             is_latency_arb=False,
+            rel_strength=_tf_rel_strength,
         )
