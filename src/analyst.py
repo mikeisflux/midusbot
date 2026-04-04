@@ -460,21 +460,26 @@ Also: consecutive_window_trend = fraction of last 4 windows same direction.
 Win = your token settles at 1.00. Loss = settles at 0.00.
 
 PARAMETERS YOU CAN SET:
-- signal_threshold (0.0005–0.005): min |window_return|. Raise to filter noise.
+- signal_threshold (0.0005–0.0015): FALLBACK ONLY — only applies to assets
+  NOT listed in asset_thresholds. Since you always set all assets in
+  asset_thresholds, this parameter has NO effect in practice. Leave it at
+  0.0008. DO NOT change it. Focus on asset_thresholds instead.
 - min_trend_score (0.0–0.75): require trend alignment (0.5 = 3/4 windows).
 - skip_assets: ["BTC","ETH",...] — stop trading these entirely.
 - prefer_assets: ["BTC",...] — prioritise these assets.
 - max_secs_in (120–240): stop entering this late into the window.
 - kelly_override (0.05–0.5 or null): override position sizing fraction.
 - time_of_day_skip: [0,1,2,...] UTC hours to not trade at all.
-- asset_thresholds: per-asset window_return thresholds. These OVERRIDE the
-  global signal_threshold for that specific asset. Always set ALL assets to
-  keep control. Current history-informed baselines:
+- asset_thresholds: per-asset window_return thresholds (THIS is what controls
+  trading). LOWER threshold = trade MORE often (requires smaller move).
+  HIGHER threshold = trade LESS often (requires bigger move to enter).
+  Always set ALL assets. Current history-informed baselines:
     SOL=0.00035 (only winner, 25% wr), BTC=0.00035, ETH=0.0004, BNB=0.0004,
     XRP=0.0008 (0/2 hard losses), DOGE=0.001 (0/5 systematic losses), HYPE=0.0008.
-  Raise an asset's threshold if its win rate is below 45%.
-  Lower an asset's threshold if its win rate is above 60% (more trades).
-  Range: 0.0001–0.005 per asset.
+  Lower an asset's threshold (e.g. 0.0003) if its win rate is ABOVE 60% (trade more).
+  Raise an asset's threshold (e.g. 0.0012) if its win rate is BELOW 45% (filter noise).
+  HARD LIMITS enforced by code: floor=0.00025 (BTC/ETH/SOL), ceil=0.0012 (BTC).
+  Range: 0.0002–0.003 per asset.
 - min_price_history_s (60–300): require this many seconds of price feed
   before entering (avoids trading on stale data after feed gaps).
 
