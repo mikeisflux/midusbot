@@ -216,6 +216,11 @@ class PolymarketBot:
 
         try:
             while self._running:
+                # Sleep through off-hours (no UpDown markets overnight)
+                self._check_trading_hours()
+                if not self._running:
+                    break
+
                 try:
                     self._loop_once()
                 except Exception as exc:
@@ -1457,6 +1462,49 @@ class PolymarketBot:
             )
         elif loss_pct >= 0:
             self._daily_loss_alerted = False   # reset for next day
+
+    _off_hours_alerted: bool = False
+
+    def _check_trading_hours(self) -> None:
+        """
+        Sleep until TRADING_HOUR_START if the current local time is outside
+        [TRADING_HOUR_START, TRADING_HOUR_END).  Polymarket 5-min UpDown markets
+        only exist during US business hours — scanning overnight just burns API quota.
+        Sends a Discord alert on first entry into off-hours and on wake-up.
+        """
+        from datetime import datetime as _dt
+        now   = _dt.now()
+        hour  = now.hour
+        start = config.TRADING_HOUR_START
+        end   = config.TRADING_HOUR_END
+
+        if start <= hour < end:
+            if self._off_hours_alerted:
+                # Just woke up
+                logger.info(f"[HOURS] Trading window open ({start:02d}:00 – {end:02d}:00). Resuming.")
+                alerter.send(f"Trading hours resumed ({start}:00 – {end}:00 CT). Scanning markets.", level="info")
+                self._off_hours_alerted = False
+            return
+
+        # First time entering off-hours — alert once
+        if not self._off_hours_alerted:
+            wake_time = now.replace(hour=start, minute=0, second=0, microsecond=0)
+            if hour >= end:
+                from datetime import timedelta as _td
+                wake_time += _td(days=1)
+            logger.info(
+                f"[HOURS] Off-hours ({hour:02d}:xx). No 5-min markets until {start:02d}:00. "
+                f"Sleeping until {wake_time.strftime('%H:%M')}."
+            )
+            alerter.send(
+                f"Off-hours ({hour}:{now.minute:02d} CT) — no 5-min markets. "
+                f"Sleeping until {start}:00 CT.",
+                level="info",
+            )
+            self._off_hours_alerted = True
+
+        # Sleep in 60-second chunks so we can still be stopped cleanly
+        time.sleep(60)
 
     @staticmethod
     def _secs_until_next_window(window_mins: int = 5) -> float:
