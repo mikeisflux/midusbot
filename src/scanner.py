@@ -393,11 +393,11 @@ class ScannerMixin:
         # exceeds a lower threshold — ensures per-asset calibration is respected.
         pending_signals.sort(key=lambda x: x[0].rel_strength, reverse=True)
 
-        # Max 2 trades per 5-minute window across all assets.
-        # After any trade fires, enforce a 2-window cooldown (10 min) before
-        # trading again — avoids entering into sudden reversals.
-        _MAX_TRADES_PER_WINDOW = 2
-        _POST_TRADE_COOLDOWN_WINDOWS = 2  # windows to skip after a trade
+        # One trade per 5-minute window — take the best signal, then wait.
+        # After any trade fires, enforce a 3-window cooldown (15 min) before
+        # trading again — let the dust settle before the next entry.
+        _MAX_TRADES_PER_WINDOW = 1
+        _POST_TRADE_COOLDOWN_WINDOWS = 3  # windows to skip after a trade
         _current_window = int(time.time() // 300) * 300
         if not hasattr(self, "_last_traded_window"):
             self._last_traded_window: int = 0
@@ -415,7 +415,7 @@ class ScannerMixin:
             _windows_remaining = (_cooldown_until_window - _current_window) // 300
             logger.debug(f"[WINDOW-LOCK] Post-trade cooldown — {_windows_remaining} window(s) remaining, holding {len(pending_signals)} signal(s)")
         elif _slots_left <= 0:
-            logger.debug(f"[WINDOW-LOCK] {_MAX_TRADES_PER_WINDOW} trades placed this window — holding remaining {len(pending_signals)} signal(s)")
+            logger.debug(f"[WINDOW-LOCK] Trade placed this window — holding remaining {len(pending_signals)} signal(s)")
         else:
             for sig, _asset in pending_signals[:_slots_left]:
                 if self._execute_signal(sig):
