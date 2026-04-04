@@ -73,14 +73,28 @@ class RedeemMixin:
         # ── Path 1: Gasless relayer ────────────────────────────────────────────
         if config.RELAYER_API_KEY and config.RELAYER_API_KEY_ADDRESS:
             try:
+                import inspect
                 from polymarket_apis.clients.web3_client import PolymarketGaslessWeb3Client
-                web3_client = PolymarketGaslessWeb3Client(
-                    private_key=config.PRIVATE_KEY,
-                    relayer_api_key=config.RELAYER_API_KEY,
-                    relayer_api_key_address=config.RELAYER_API_KEY_ADDRESS,
-                    signature_type=config.SIGNATURE_TYPE,
-                    funder=config.FUNDER_ADDRESS,
-                )
+                # Probe actual constructor params — different package versions use
+                # different kwarg names (relayer_api_key_address vs api_key_address etc.)
+                _sig    = inspect.signature(PolymarketGaslessWeb3Client.__init__)
+                _params = set(_sig.parameters.keys())
+                _kwargs: dict = {"private_key": config.PRIVATE_KEY}
+                # Map our config to whichever param names the installed version uses
+                for _rk in ("relayer_api_key", "api_key", "relayer_key"):
+                    if _rk in _params:
+                        _kwargs[_rk] = config.RELAYER_API_KEY
+                        break
+                for _ra in ("relayer_api_key_address", "api_key_address", "relayer_address"):
+                    if _ra in _params:
+                        _kwargs[_ra] = config.RELAYER_API_KEY_ADDRESS
+                        break
+                if "signature_type" in _params:
+                    _kwargs["signature_type"] = config.SIGNATURE_TYPE
+                if "funder" in _params:
+                    _kwargs["funder"] = config.FUNDER_ADDRESS
+                logger.debug(f"[RELAYER] init with params: {list(_kwargs.keys())}")
+                web3_client = PolymarketGaslessWeb3Client(**_kwargs)
                 for attempt in range(1, 4):
                     try:
                         receipt = web3_client.redeem_position(
@@ -112,7 +126,8 @@ class RedeemMixin:
         """Direct on-chain redemption via web3.py + CTF contract."""
         rpc_url = getattr(config, "POLYGON_RPC_URL", "") or ""
         if not rpc_url:
-            rpc_url = "https://polygon-rpc.com"  # public fallback
+            # polygon-rpc.com now requires auth; use free public alternatives
+            rpc_url = "https://rpc.ankr.com/polygon"
 
         if not config.PRIVATE_KEY:
             logger.warning("_redeem_via_web3: PRIVATE_KEY not set — cannot redeem")
