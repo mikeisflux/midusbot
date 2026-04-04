@@ -60,8 +60,8 @@ LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "15"))  # fa
 # ── Trading hours (local server time, 24-hour) ────────────────────────────────
 # Polymarket 5-min UpDown markets run ~8 AM–11 PM US Central.
 # Bot sleeps outside this window to avoid burning API quota on empty scans.
-TRADING_HOUR_START: int = int(os.getenv("TRADING_HOUR_START", "8"))   # 8 AM CT
-TRADING_HOUR_END:   int = int(os.getenv("TRADING_HOUR_END",   "23"))  # 11 PM CT
+TRADING_HOUR_START: int = int(os.getenv("TRADING_HOUR_START", "0"))   # default: always on
+TRADING_HOUR_END:   int = int(os.getenv("TRADING_HOUR_END",   "24"))  # set in .env to restrict hours
 
 # ── Alerts ───────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")

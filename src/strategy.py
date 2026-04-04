@@ -573,29 +573,37 @@ class UpDownMomentumStrategy:
             _ap = {}
 
         _max_secs_in = int(_ap.get("max_secs_in", 240))
-        if secs_in is None or secs_in < 5 or secs_in > _max_secs_in:
+        if secs_in is None or secs_in < 5:
+            return None
+        if secs_in > _max_secs_in:
+            logger.debug(f"[UPDOWN] {symbol} skipped — {secs_in:.0f}s into window (max {_max_secs_in}s)")
             return None
 
         # Time-of-day skip (UTC hours the LLM decided are bad)
         _tod_skip = _ap.get("time_of_day_skip", [])
         if _tod_skip and time.gmtime().tm_hour in _tod_skip:
+            logger.debug(f"[UPDOWN] {symbol} skipped — time-of-day block (UTC hour {time.gmtime().tm_hour})")
             return None
 
         # Warm up price history — require minimum seconds of feed data
-        _min_hist = int(_ap.get("min_price_history_s", 120))
+        _min_hist = int(_ap.get("min_price_history_s", 30))   # 30s default (was 120 — far too long)
         live_price = _fetch_price(symbol)
         if live_price is None:
+            logger.debug(f"[UPDOWN] {symbol} skipped — no live price from feed")
             return None
         hist = _PRICE_HISTORY.get(symbol.upper(), [])
         if len(hist) < 2:
+            logger.debug(f"[UPDOWN] {symbol} skipped — price history empty")
             return None
         hist_span = hist[-1][1] - hist[0][1]
         if hist_span < _min_hist:
+            logger.debug(f"[UPDOWN] {symbol} skipped — only {hist_span:.0f}s of price history (need {_min_hist}s)")
             return None
 
         # ── Guard 2: Entry price must still be near 0.50 ─────────────────────
         mid = order_book.mid if order_book else market.yes_price
         if mid > 0.62 or mid < 0.38:
+            logger.debug(f"[UPDOWN] {symbol} skipped — mid={mid:.3f} already priced away from 50/50")
             return None
 
         # ── PRIMARY SIGNAL: window-relative return ────────────────────────────
@@ -619,7 +627,11 @@ class UpDownMomentumStrategy:
         # default (0.08%). Higher values silence almost all UpDown signals since
         # window returns are typically 0.02-0.1% in the first 30-60s.
         _sig_thresh = min(_sig_thresh, _MIN_WINDOW_RETURN_PCT)
-        if window_return is None or abs(window_return) < _sig_thresh:
+        if window_return is None:
+            logger.debug(f"[UPDOWN] {symbol} skipped — window_return unavailable (no price at t-{secs_in:.0f}s)")
+            return None
+        if abs(window_return) < _sig_thresh:
+            logger.debug(f"[UPDOWN] {symbol} skipped — win_ret={window_return:+.4%} below thresh {_sig_thresh:.4%}")
             return None
 
         # ── CONFIRMATION 1: consecutive window trend ─────────────────────────
