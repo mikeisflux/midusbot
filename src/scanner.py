@@ -233,10 +233,10 @@ class ScannerMixin:
             if sym:
                 _updown_assets_held.add(sym)
 
-        # Collect all valid signals first, then execute only the single best.
-        # This prevents simultaneous bets on correlated assets (BTC/ETH/SOL/DOGE
-        # are 90%+ correlated — betting all at once = 6× leverage on one outcome).
-        pending_signals: list[tuple] = []  # (sig, ob, market)
+        # Collect all valid signals, then execute only the single best.
+        # BTC/ETH/SOL/XRP/DOGE/BNB are 90%+ correlated — betting all at once
+        # is 6× leverage on one direction, not diversification.
+        pending_signals: list[tuple] = []  # (sig, _asset)
 
         for market in candidates:
             if not self._running:
@@ -309,8 +309,7 @@ class ScannerMixin:
             self._dash_state.push_signal(sig)
             pending_signals.append((sig, _asset))
 
-        # Sort by edge descending and execute only the SINGLE strongest signal.
-        # One high-conviction bet beats many weak correlated bets every time.
+        # Sort by edge descending — take only the single strongest signal per loop
         pending_signals.sort(key=lambda x: x[0].edge, reverse=True)
         for sig, _asset in pending_signals[:1]:
             if self._execute_signal(sig):
