@@ -29,10 +29,8 @@ from src.utils import atomic_json_write
 if TYPE_CHECKING:
     from src.learner import AdaptiveLearner
 
-OLLAMA_URL  = "http://localhost:11434"
-MODEL       = "qwen2.5-coder:3b"
-_OLD_MODELS = ["qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5-coder:1.5b", "qwen2.5-coder:7b"]  # delete these if present
-TIMEOUT_SEC = 180         # 3B on good CPU; ~60-80s on cax41 or dedicated cores
+CLAUDE_MODEL = "claude-sonnet-4-6"
+TIMEOUT_SEC  = 60
 DATA_DIR    = Path("data")
 
 # ---------------------------------------------------------------------------
@@ -190,46 +188,9 @@ def _append_history(entry: dict) -> None:
 # Ollama helpers
 # ---------------------------------------------------------------------------
 
-def _ollama_available() -> bool:
-    try:
-        return requests.get(f"{OLLAMA_URL}/api/tags", timeout=3).status_code == 200
-    except Exception:
-        return False
-
-
-def _ensure_model() -> bool:
-    try:
-        r     = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-        names = [m.get("name", "") for m in r.json().get("models", [])]
-
-        # Pull target model if not present
-        if not any(MODEL in n for n in names):
-            logger.info(f"[ANALYST] Pulling {MODEL}…")
-            ok = requests.post(
-                f"{OLLAMA_URL}/api/pull",
-                json={"name": MODEL, "stream": False},
-                timeout=300,
-            ).status_code == 200
-            if not ok:
-                return False
-
-        # Delete old/superseded models to reclaim disk space
-        for old in _OLD_MODELS:
-            if any(old in n for n in names):
-                try:
-                    requests.delete(
-                        f"{OLLAMA_URL}/api/delete",
-                        json={"name": old},
-                        timeout=30,
-                    )
-                    logger.info(f"[ANALYST] Deleted old model {old!r} to free space")
-                except Exception as e:
-                    logger.warning(f"[ANALYST] Could not delete {old!r}: {e}")
-
-        return True
-    except Exception as exc:
-        logger.warning(f"[ANALYST] Model check failed: {exc}")
-        return False
+def _anthropic_available() -> bool:
+    """Check that the Anthropic API key is configured."""
+    return bool(os.getenv("ANTHROPIC_API_KEY", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -671,11 +632,8 @@ def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> s
 
 def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
     """Run self-improving LLM analysis. Returns new params or None if skipped."""
-    if not _ollama_available():
-        logger.debug("[ANALYST] Ollama not running")
-        return None
-    if not _ensure_model():
-        logger.warning(f"[ANALYST] Model {MODEL} unavailable")
+    if not _anthropic_available():
+        logger.warning("[ANALYST] ANTHROPIC_API_KEY not set — skipping analysis")
         return None
 
     rows = _format_journal(learner)
@@ -687,29 +645,23 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
     stats      = _asset_stats(rows)
     hours      = _hour_stats(rows)
     delta      = _perf_delta(rows, params)
-    memory_ctx = _memory_context(n_recent=10)   # last 10 memory entries (keep prompt small)
+    memory_ctx = _memory_context(n_recent=10)
     prompt     = _build_prompt(rows, stats, hours, params, delta, memory_ctx)
 
     try:
-        t0   = time.time()
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model":   MODEL,
-                "system":  _SYSTEM_PROMPT,
-                "prompt":  prompt,
-                "stream":  False,
-                "options": {
-                    "temperature":  0.3,
-                    "num_predict":  400,   # 3B @ ~6-8 tok/s on cax41 = ~50-65s
-                },
-            },
-            timeout=TIMEOUT_SEC,
+        import anthropic
+        client  = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        t0      = time.time()
+        message = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
         )
         elapsed = time.time() - t0
-        raw = resp.json().get("response", "")
+        raw     = message.content[0].text
     except Exception as exc:
-        logger.warning(f"[ANALYST] LLM call failed: {exc}")
+        logger.warning(f"[ANALYST] Claude API call failed: {exc}")
         return None
 
     try:
