@@ -654,12 +654,16 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
         t0      = time.time()
         message = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=1024,
+            max_tokens=2048,
             system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "user",      "content": prompt},
+                {"role": "assistant", "content": "{"},   # force JSON-only output
+            ],
         )
         elapsed = time.time() - t0
-        raw     = message.content[0].text
+        # Prepend the "{" we injected as the assistant prefill
+        raw = "{" + message.content[0].text
     except Exception as exc:
         logger.warning(f"[ANALYST] Claude API call failed: {exc}")
         return None
