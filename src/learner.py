@@ -47,6 +47,7 @@ from typing import Any
 import numpy as np
 from loguru import logger
 from src.utils import atomic_json_write
+import config
 
 # ---------------------------------------------------------------------------
 # Asset symbol extractor (mirrors analyst._asset, no circular import)
