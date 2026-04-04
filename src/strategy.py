@@ -140,6 +140,20 @@ _DEFAULT_ASSET_THRESHOLDS: dict[str, float] = {
     "HYPE": 0.0008,   # 0.08%  — insufficient data; conservative
 }
 
+# Hard minimums — analyst/LLM can NEVER lower thresholds below these.
+# These exist because low thresholds cause the bot to trade on noise ticks.
+_ASSET_THRESHOLD_FLOORS: dict[str, float] = {
+    "BTC":  0.00025,  # never below 0.025%
+    "ETH":  0.00025,
+    "BNB":  0.00035,  # never below 0.035%
+    "XRP":  0.00060,  # never below 0.06%
+    "SOL":  0.00025,
+    "DOGE": 0.00080,  # never below 0.08%
+    "HYPE": 0.00060,
+    "WIF":  0.00080,
+    "TRUMP":0.00100,
+}
+
 
 def _detect_updown_market(question: str) -> str | None:
     """
@@ -351,8 +365,10 @@ class UpDownMomentumStrategy:
         _asset_thresholds = _ap.get("asset_thresholds", {})
         _sym = symbol.upper()
         if _sym in _asset_thresholds:
-            # Explicit per-asset value — respect it directly (tiny sanity floor only)
-            _sig_thresh = float(max(0.0001, _asset_thresholds[_sym]))
+            # Explicit per-asset value — floor at hard minimum to prevent
+            # analyst from lowering thresholds to noise level
+            _hard_floor = _ASSET_THRESHOLD_FLOORS.get(_sym, 0.00025)
+            _sig_thresh = float(max(_hard_floor, _asset_thresholds[_sym]))
         else:
             # Fall back to per-asset default or global, whichever is available
             _global = float(max(

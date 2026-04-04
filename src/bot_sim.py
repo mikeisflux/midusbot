@@ -102,7 +102,10 @@ class SimMixin:
                     f"SLIPPED ${net_pnl:.2f} (fee ${fee:.3f}) // adverse fill  \"{sim['question'][:38]}\"")
 
             _sim_tid = sim["token_id"]
-            if not self._learner.has_open(token_id=_sim_tid):
+            # In DRY_RUN, write sim journal entry if not already tracked.
+            # In live mode, the real trade already recorded itself — skip to avoid
+            # polluting the journal with dry_run=True phantom entries.
+            if config.DRY_RUN and not self._learner.has_open(token_id=_sim_tid):
                 self._learner.record_open(
                     market_id=sim.get("market_id", ""),
                     token_id=_sim_tid,
@@ -118,7 +121,8 @@ class SimMixin:
                     dry_run=True,
                 )
             sim_cost = sim.get("shares", 0.0) * sim.get("entry", 0.5)
-            self._learner.record_close(_sim_tid, exit_price)
+            if config.DRY_RUN:
+                self._learner.record_close(_sim_tid, exit_price)
             self._risk.record_close(pnl_usdc=net_pnl, cost_usdc=sim_cost)
             self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
