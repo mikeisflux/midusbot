@@ -15,11 +15,30 @@ from src.strategy import _detect_updown_market, _updown_window_mins
 import config
 
 _POSITIONS_FILE = Path("data/positions.json")
+_REDEEMED_FILE  = Path("data/redeemed_tokens.json")
+
+
+def _load_redeemed() -> set[str]:
+    """Load persisted set of already-redeemed token IDs."""
+    try:
+        if _REDEEMED_FILE.exists():
+            return set(json.loads(_REDEEMED_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+
+def _save_redeemed(redeemed: set[str]) -> None:
+    try:
+        _REDEEMED_FILE.write_text(json.dumps(sorted(redeemed), indent=2))
+    except Exception as exc:
+        logger.warning(f"Could not save redeemed_tokens: {exc}")
 
 
 class PositionsMixin:
     _DAILY_LOSS_ALERT_PCT: float = 0.10
     _daily_loss_alerted:   bool  = False
+    _redeemed_tokens:      set   = None  # type: ignore[assignment]  — initialised lazily
 
     # ------------------------------------------------------------------
     # Position monitoring
@@ -601,6 +620,10 @@ class PositionsMixin:
             logger.warning(f"_load_positions failed: {exc}")
 
     def _reconcile_positions(self) -> None:
+        # Lazy-load the persistent redeemed-tokens set
+        if self._redeemed_tokens is None:
+            self._redeemed_tokens = _load_redeemed()
+
         try:
             raw_positions = self._client.get_positions()
         except Exception as exc:
@@ -631,6 +654,11 @@ class PositionsMixin:
                 continue
 
             if not token_id or size <= 0:
+                continue
+
+            # Skip tokens already successfully redeemed (persisted across restarts)
+            if token_id in self._redeemed_tokens:
+                logger.debug(f"  Skipping already-redeemed token: {token_id[:16]}…")
                 continue
 
             if token_id in self._positions:
@@ -672,7 +700,11 @@ class PositionsMixin:
                     neg_risk = bool(mkt.get("neg_risk", False)) if mkt else False
                 except Exception:
                     neg_risk = False
-                self._client.redeem_position(market_id, neg_risk=neg_risk)
+                redeemed_ok = self._client.redeem_position(market_id, neg_risk=neg_risk)
+                # Always mark as redeemed regardless of outcome — on-chain it's
+                # either paid out or already empty; retrying wastes gas either way.
+                self._redeemed_tokens.add(token_id)
+                _save_redeemed(self._redeemed_tokens)
                 continue
 
             if cur_price <= 0.03:
