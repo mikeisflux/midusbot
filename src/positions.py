@@ -72,10 +72,39 @@ class PositionsMixin:
             if not config.DRY_RUN:
                 if current_price >= 0.97:
                     logger.info(
-                        f"AUTO-CLAIM: resolved YES @ ${current_price:.3f} "
+                        f"AUTO-CLAIM: resolved WIN @ {current_price:.3f} "
                         f"({pos.shares:.2f} shares)  {pos.question[:50]}"
                     )
-                    self._close_position(token_id, current_price=current_price, manual=True)
+                    # Go straight to redeem — no order book on resolved markets
+                    try:
+                        mkt = self._client.get_clob_market(pos.market_id) if pos.market_id else None
+                        neg_risk = bool(mkt.get("neg_risk", False)) if mkt else False
+                    except Exception:
+                        neg_risk = False
+                    redeemed = self._client.redeem_position(pos.market_id, neg_risk=neg_risk)
+                    if redeemed:
+                        exit_price = current_price
+                        exit_usdc  = exit_price * pos.shares
+                        pnl = self._learner.record_close(token_id, exit_price)
+                        cost = pos.cost_usdc if not pos.is_external else 0.0
+                        fee  = self._risk.trade_fee(cost, exit_usdc)
+                        self._risk.record_close(pnl_usdc=pnl - fee, cost_usdc=cost)
+                        self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
+                        symbol = _detect_updown_market(pos.question)
+                        if symbol:
+                            direction_bet = "UP" if pos.side == "YES" else "DOWN"
+                            self._trend_tracker.record_result(symbol, direction_bet, won=True)
+                        if pos.market_id:
+                            self._closed_market_ids.add(pos.market_id)
+                        del self._positions[token_id]
+                        self._save_positions()
+                        logger.info(
+                            f"CLAIMED: {pos.side} {pos.question[:40]}  "
+                            f"P&L=${pnl:+.2f}  net=${pnl - fee:+.2f}"
+                        )
+                    else:
+                        # Redeem failed — fall back to close via order
+                        self._close_position(token_id, current_price=current_price, manual=True)
                     continue
 
                 if current_price <= 0.03:
@@ -621,9 +650,25 @@ class PositionsMixin:
                 cur_price = ob.mid
             else:
                 cur_price = avg_price
-            if cur_price >= 0.97 or cur_price <= 0.03:
-                logger.info(f"  Skipping resolved position (price={cur_price:.2f}): {question[:55]}")
+
+            if cur_price >= 0.97 and not config.DRY_RUN:
+                # Winning position — redeem immediately instead of skipping
+                logger.info(
+                    f"  AUTO-REDEEM: resolved WIN (price={cur_price:.2f}) "
+                    f"{size:.2f} shares — {question[:50]}"
+                )
+                try:
+                    mkt = self._client.get_clob_market(market_id) if market_id else None
+                    neg_risk = bool(mkt.get("neg_risk", False)) if mkt else False
+                except Exception:
+                    neg_risk = False
+                self._client.redeem_position(market_id, neg_risk=neg_risk)
                 continue
+
+            if cur_price <= 0.03:
+                logger.info(f"  Skipping resolved loss (price={cur_price:.2f}): {question[:55]}")
+                continue
+
 
             cost_usdc = avg_price * size
             self._positions[token_id] = OpenPosition(
