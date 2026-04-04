@@ -282,7 +282,7 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
             _fetch_price(sym)
 
         if self._dash_state.loop_count % 4 == 1:
-            from src.strategy import _PRICE_CACHE, _PRICE_HISTORY
+            from src.signals import _PRICE_CACHE, _PRICE_HISTORY
             import time as _time
             _now = _time.time()
             parts = []
