@@ -615,10 +615,10 @@ class UpDownMomentumStrategy:
             _asset_thresholds.get(symbol.upper(),
             _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT))
         )
-        # Hard cap: never let the LLM raise signal_threshold above 0.001 (0.1%).
-        # UpDown window returns are typically 0.02-0.1% — a higher cap silences
-        # almost all signals and produces 2 trades per 6 hours instead of 10+.
-        _sig_thresh = min(_sig_thresh, 0.001)
+        # Hard cap: LLM analyst must not raise signal_threshold above the calibrated
+        # default (0.08%). Higher values silence almost all UpDown signals since
+        # window returns are typically 0.02-0.1% in the first 30-60s.
+        _sig_thresh = min(_sig_thresh, _MIN_WINDOW_RETURN_PCT)
         if window_return is None or abs(window_return) < _sig_thresh:
             return None
 
