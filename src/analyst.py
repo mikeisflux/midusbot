@@ -11,13 +11,8 @@ action space so it can actually execute its best idea, not just suggest it.
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
-import shutil
-import signal
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,25 +35,6 @@ DATA_DIR    = Path("data")
 _PARAMS_FILE  = DATA_DIR / "analyst_params.json"
 _MEMORY_FILE  = DATA_DIR / "analyst_memory.json"   # append-only, unlimited
 _HISTORY_FILE = DATA_DIR / "analyst_history.json"  # one entry per run
-_PATCH_FILE   = DATA_DIR / "analyst_patch.py"      # LLM-proposed code patch
-_PATCH_BACKUP = DATA_DIR / "analyst_patch_backup"  # backups before applying
-
-# Source files the LLM is allowed to read and patch
-_READABLE_SOURCES = [
-    "src/strategy.py",
-    "src/bot.py",
-    "src/risk.py",
-    "src/sim.py",
-    "src/feeds.py",
-    "src/learner.py",
-    "src/analyst.py",
-    "src/client.py",
-    "src/trend.py",
-    "src/dashboard.py",
-    "src/webui.py",
-    "config.py",
-    "main.py",
-]
 
 # ---------------------------------------------------------------------------
 # Default trading + self-improvement params
@@ -294,110 +270,6 @@ def _recent_errors(n: int = 20) -> str:
         return "(none)"
 
 
-def _apply_patch(patch_code: str) -> bool:
-    """
-    Safely apply a Python patch proposed by the LLM.
-    The patch must be a standalone Python file that:
-      - imports only stdlib and project modules
-      - writes its changes by calling helper functions or modifying data files
-      - does NOT directly exec() or eval() arbitrary strings
-    Returns True if patch applied successfully.
-    """
-    if not patch_code or not patch_code.strip():
-        return False
-
-    # Safety: must parse as valid Python
-    try:
-        ast.parse(patch_code)
-    except SyntaxError as e:
-        logger.warning(f"[ANALYST] Patch rejected — syntax error: {e}")
-        return False
-
-    # Safety: block dangerous patterns
-    forbidden = ["exec(", "eval(", "__import__", "os.system",
-                 "shutil.rmtree", "rmdir", "unlink"]
-    for f in forbidden:
-        if f in patch_code:
-            logger.warning(f"[ANALYST] Patch rejected — forbidden pattern: {f!r}")
-            return False
-
-    # Must parse as valid Python before we touch any files
-    try:
-        ast.parse(patch_code)
-    except SyntaxError as e:
-        logger.warning(f"[ANALYST] Patch rejected — syntax error after re-check: {e}")
-        return False
-
-    # Back up all patchable source files before applying
-    _PATCH_BACKUP.mkdir(parents=True, exist_ok=True)
-    ts = int(time.time())
-    for path in _READABLE_SOURCES:
-        p = Path(path)
-        if p.exists():
-            shutil.copy2(p, _PATCH_BACKUP / f"{p.name}.{ts}.bak")
-
-    # Write and execute the patch using the same Python interpreter as the bot
-    _PATCH_FILE.write_text(patch_code)
-    try:
-        result = subprocess.run(
-            [sys.executable, str(_PATCH_FILE)],
-            capture_output=True, text=True, timeout=60,
-            cwd=Path(__file__).parent.parent,  # run from project root
-        )
-        if result.returncode != 0:
-            logger.warning(
-                f"[ANALYST] Patch failed (exit {result.returncode}):\n"
-                f"{result.stderr[:800]}"
-            )
-            # Restore backups on failure
-            for path in _READABLE_SOURCES:
-                bak = _PATCH_BACKUP / f"{Path(path).name}.{ts}.bak"
-                if bak.exists():
-                    shutil.copy2(bak, path)
-            return False
-        logger.warning(f"[ANALYST] Patch applied:\n{result.stdout[:500]}")
-
-        # Smoke-test: import all patched source files to catch subtle syntax/import errors
-        smoke_errors = []
-        for path in _READABLE_SOURCES:
-            if not path.endswith(".py"):
-                continue
-            check = subprocess.run(
-                [sys.executable, "-c", f"import py_compile; py_compile.compile('{path}', doraise=True)"],
-                capture_output=True, text=True, timeout=10,
-                cwd=Path(__file__).parent.parent,
-            )
-            if check.returncode != 0:
-                smoke_errors.append(f"{path}: {check.stderr[:200]}")
-        if smoke_errors:
-            logger.warning(f"[ANALYST] Smoke test failed — restoring backups:\n" + "\n".join(smoke_errors))
-            for path in _READABLE_SOURCES:
-                bak = _PATCH_BACKUP / f"{Path(path).name}.{ts}.bak"
-                if bak.exists():
-                    shutil.copy2(bak, path)
-            return False
-
-        # Git-commit the change so there's a human-readable history
-        try:
-            subprocess.run(
-                ["git", "add"] + _READABLE_SOURCES,
-                timeout=15, cwd=Path(__file__).parent.parent,
-            )
-            subprocess.run(
-                ["git", "commit", "-m",
-                 f"[ANALYST] auto-patch run #{ts} — {result.stdout[:80].strip()}"],
-                timeout=15, cwd=Path(__file__).parent.parent,
-            )
-        except Exception as git_exc:
-            logger.debug(f"[ANALYST] Git commit skipped: {git_exc}")
-
-        return True
-    except subprocess.TimeoutExpired:
-        logger.warning("[ANALYST] Patch timed out after 60s — skipped")
-        return False
-    except Exception as exc:
-        logger.warning(f"[ANALYST] Patch execution error: {exc}")
-        return False
 
 
 def _perf_delta(rows: list[dict], params: dict) -> dict:
@@ -433,10 +305,7 @@ This overrides timid adjustments.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 YOUR GOALS (in order):
-0. FIX CRASHES — if RECENT RUNTIME ERRORS contains errors, fix them via
-   code_patch immediately. A crashed bot earns nothing. This is always the
-   highest-priority WW_MRD action.
-1. PROTECT CAPITAL — a trade not taken beats a losing trade
+0. PROTECT CAPITAL — a trade not taken beats a losing trade
 2. GROW PROFIT — increase win rate toward 60%+
 3. REMEMBER & IMPROVE — write useful memory entries each run; your future
    self depends on what you write today
@@ -483,27 +352,6 @@ MEMORY:
   Update it if you've found a better approach.
 - ww_mrd_action: the ONE highest-impact thing you are doing this run.
 
-CODE PATCH (use whenever parameters alone can't make real difference):
-- code_patch: a complete, executable Python script that directly rewrites
-  source files. After it runs, the bot restarts automatically so changes
-  take effect immediately. Use this for any structural improvement —
-  new signals, better filters, bug fixes, algorithm changes.
-  The script runs from the project root with full filesystem access.
-  Source files you can read and rewrite (ALL project files):
-    src/strategy.py, src/bot.py, src/risk.py, src/sim.py,
-    src/feeds.py, src/learner.py, src/analyst.py, src/client.py,
-    src/trend.py, src/dashboard.py, src/webui.py, config.py, main.py
-  HOW TO PATCH: your script runs from the project root. Read files first,
-  modify, then write back. Example:
-    with open('src/strategy.py') as f: code = f.read()
-    code = code.replace('OLD_LINE', 'NEW_LINE')
-    with open('src/strategy.py', 'w') as f: f.write(code)
-    print("Changed X to Y in strategy.py")
-  You MUST read the file inside your patch script — source code is NOT
-  provided in this prompt to save tokens. Use open() to read any file.
-  RULES: no exec(), no eval(), no __import__, no deleting files.
-  Leave as "" if parameters are sufficient.
-
 OUTPUT — respond ONLY with valid JSON, no extra text:
 {
   "signal_threshold": <float>,
@@ -518,8 +366,7 @@ OUTPUT — respond ONLY with valid JSON, no extra text:
   "reasoning": "<what you found and what you changed>",
   "ww_mrd_action": "<the ONE thing that will make real difference>",
   "memory_entry": "<one specific new observation to store permanently>",
-  "analysis_strategy": "<your current analytical method>",
-  "code_patch": "<executable Python script or empty string>"
+  "analysis_strategy": "<your current analytical method>"
 }"""
 
 
@@ -587,8 +434,6 @@ def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> s
 
     p.append("━━━ RECENT RUNTIME ERRORS ━━━")
     p.append(_recent_errors(20))
-    p.append("If you see errors above: use code_patch to fix them. Fixing crashes")
-    p.append("is always the highest-priority WW_MRD action — a crashed bot earns nothing.")
     p.append("")
 
     p.append("━━━ CURRENT DATA ━━━")
@@ -747,16 +592,6 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
     new["wins_at_last_run"]   = sum(1 for r in rows if r["win"])
 
     save_params(new)
-
-    # ── Apply code patch if proposed ──────────────────────────────────────
-    code_patch = str(payload.get("code_patch", "")).strip()
-    if code_patch:
-        patched = _apply_patch(code_patch)
-        if patched:
-            # Restart the bot process so the new code takes effect.
-            # pm2 will automatically relaunch it.
-            logger.warning("[ANALYST] Code patch applied — restarting bot to load new code…")
-            os.kill(os.getpid(), signal.SIGTERM)
 
     # ── Append to unlimited memory ─────────────────────────────────────────
     if mem_entry:
