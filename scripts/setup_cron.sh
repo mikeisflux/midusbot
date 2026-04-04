@@ -10,7 +10,7 @@ chmod +x "$SCRIPT"
 # Add cron job: runs every 4 hours
 # Adjust the schedule as needed:
 #   */4 = every 4 hours  |  0 * = every hour  |  0 */2 = every 2 hours
-CRON_LINE="0 */4 * * * $SCRIPT >> $REPO_DIR/logs/cron.log 2>&1"
+CRON_LINE="0 * * * * $SCRIPT >> $REPO_DIR/logs/cron.log 2>&1"
 
 # Check if already installed
 if crontab -l 2>/dev/null | grep -q "auto_improve.sh"; then
