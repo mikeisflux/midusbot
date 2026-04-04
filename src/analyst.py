@@ -732,10 +732,14 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
         except (ValueError, TypeError):
             pass
     if "asset_thresholds" in payload and isinstance(payload["asset_thresholds"], dict):
+        from src.strategy import _ASSET_THRESHOLD_FLOORS, _ASSET_THRESHOLD_CEILS
         cleaned = {}
         for k, v in payload["asset_thresholds"].items():
+            sym = str(k).upper()
             try:
-                cleaned[str(k).upper()] = float(max(0.00005, min(0.005, float(v))))
+                floor = _ASSET_THRESHOLD_FLOORS.get(sym, 0.00025)
+                ceil  = _ASSET_THRESHOLD_CEILS.get(sym, 0.00200)
+                cleaned[sym] = float(max(floor, min(ceil, float(v))))
             except (ValueError, TypeError):
                 pass
         new["asset_thresholds"] = cleaned

@@ -148,15 +148,15 @@ _GLOBAL_THRESHOLD_CEIL: float = 0.0015
 # Hard ceiling on per-asset thresholds — analyst can raise thresholds to
 # filter noise but cannot set them so high that the asset never trades.
 _ASSET_THRESHOLD_CEILS: dict[str, float] = {
-    "BTC":  0.00120,  # never above 0.12%
-    "ETH":  0.00150,
-    "BNB":  0.00150,
-    "XRP":  0.00200,
-    "SOL":  0.00150,
-    "DOGE": 0.00250,
-    "HYPE": 0.00200,
-    "WIF":  0.00300,
-    "TRUMP":0.00300,
+    "BTC":  0.00070,  # never above 0.07% (2× default 0.035%)
+    "ETH":  0.00080,  # never above 0.08% (2× default 0.040%)
+    "BNB":  0.00080,  # never above 0.08% (2× default 0.040%)
+    "XRP":  0.00160,  # never above 0.16% (2× default 0.080%)
+    "SOL":  0.00070,  # never above 0.07% (2× default 0.035%)
+    "DOGE": 0.00200,  # never above 0.20% (2× default 0.100%)
+    "HYPE": 0.00160,  # never above 0.16% (2× default 0.080%)
+    "WIF":  0.00240,  # never above 0.24% (2× default 0.120%)
+    "TRUMP":0.00300,  # never above 0.30% (2× default 0.150%)
 }
 
 # Hard minimums — analyst/LLM can NEVER lower thresholds below these.
