@@ -1,6 +1,6 @@
 """
 REST API endpoints for the web dashboard.
-Registered on the shared Flask `app` instance from src.webui.
+Registered on the shared Flask `app` instance from src.webui via register().
 """
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from flask import jsonify, Response, request, current_app
+from flask import jsonify, Response, request
 
 import config
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from src.learner import AdaptiveLearner
 
 
-def register_api_routes(app, get_state, get_learner, get_close_fn):
+def register(app, get_state, get_learner, get_close_fn):
     """
     Register all /api/* routes on `app`.
 
@@ -131,9 +131,9 @@ def register_api_routes(app, get_state, get_learner, get_close_fn):
                     pass
             return None
 
-        journal_main   = _load_json("data/journal_main.json")   or []
-        params_main    = _load_json("data/params_main.json")    or {}
-        trend_state    = _load_json("data/trend_state.json")    or {}
+        journal_main    = _load_json("data/journal_main.json")   or []
+        params_main     = _load_json("data/params_main.json")    or {}
+        trend_state     = _load_json("data/trend_state.json")    or {}
         analyst_params  = _load_json("data/analyst_params.json")  or {}
         analyst_history = _load_json("data/analyst_history.json") or []
 

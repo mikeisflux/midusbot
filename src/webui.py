@@ -13,14 +13,12 @@ Auto-refreshes every 2 seconds.
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
-from datetime import datetime
 from typing import TYPE_CHECKING
 
-from flask import Flask, jsonify, Response, request, current_app
+from flask import Flask, jsonify, current_app
 
 import config
 
@@ -37,7 +35,7 @@ _close_position_fn = None   # injected by bot: fn(token_id) -> bool
 _sim: "SimPortfolio | None" = None
 
 # ---------------------------------------------------------------------------
-# Routes
+# Main page routes
 # ---------------------------------------------------------------------------
 
 @app.route("/")
@@ -53,56 +51,6 @@ def mobile():
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     return resp
-
-@app.route("/api/state")
-def api_state():
-    if _state is None:
-        return jsonify({"status": "starting"})
-    return jsonify(_build(  _state))
-
-@app.route("/api/toggle_mode", methods=["POST"])
-def api_toggle_mode():
-    """Toggle between DRY_RUN (sandbox) and live mode. Updates .env and in-process config."""
-    from pathlib import Path
-    new_dry_run = not config.DRY_RUN
-    config.DRY_RUN = new_dry_run
-
-    # Persist to .env so it survives a restart
-    env_path = Path(".env")
-    if env_path.exists():
-        lines = env_path.read_text().splitlines()
-        found = False
-        new_lines = []
-        for line in lines:
-            if line.startswith("DRY_RUN="):
-                new_lines.append(f"DRY_RUN={'false' if not new_dry_run else 'true'}")
-                found = True
-            else:
-                new_lines.append(line)
-        if not found:
-            new_lines.append(f"DRY_RUN={'false' if not new_dry_run else 'true'}")
-        env_path.write_text("\n".join(new_lines) + "\n")
-
-    mode = "SANDBOX" if new_dry_run else "LIVE"
-    if _state:
-        _state.add_exec_log("info", f"Mode switched to {mode}")
-        # When switching to LIVE, reset the equity curve seed to the actual
-        # wallet balance so P&L is relative to real starting funds, not the
-        # DRY_RUN simulation baseline.
-        if not new_dry_run and _state.wallet_balance > 0:
-            _state._seed        = _state.wallet_balance
-            _state.total_pnl    = 0.0
-            _state.total_trades = 0
-            _state.wins         = 0
-            _state.total_fees   = 0.0
-            _state.daily_pnl    = 0.0
-            _state.pnl_history  = []
-            _state.equity_curve = []
-            _state.add_equity_point()
-            _state.add_exec_log("info",
-                f"P&L reset — baseline set to wallet: ${_state.wallet_balance:.2f} USDC")
-    return jsonify({"ok": True, "dry_run": new_dry_run, "mode": mode})
-
 
 @app.route("/positions")
 def positions_page():
@@ -196,119 +144,6 @@ scheduleReload();
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
 
-
-@app.route("/api/close_position", methods=["POST"])
-def api_close_position():
-    """Manually close (sell) an open position by token_id."""
-    if _close_position_fn is None:
-        return jsonify({"ok": False, "error": "close_position not wired"})
-    data = request.get_json(silent=True) or {}
-    token_id = data.get("token_id", "").strip()
-    if not token_id:
-        return jsonify({"ok": False, "error": "token_id required"})
-    try:
-        ok = _close_position_fn(token_id, manual=True)
-        return jsonify({"ok": bool(ok)})
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)})
-
-
-@app.route("/api/clear_logs", methods=["POST"])
-def api_clear_logs():
-    """Clear the in-memory execution log shown in the right panel."""
-    if _state is not None:
-        _state.exec_log = []
-    return jsonify({"ok": True})
-
-
-@app.route("/api/reset_training", methods=["POST"])
-def api_reset_training():
-    """
-    Wipe trade journal + learned params (files + in-memory).
-    Performance stats on the dashboard are also zeroed.
-    Logs are kept intact.
-    """
-    if _learner is not None:
-        _learner.reset()
-    if _state is not None:
-        _state.reset_training_stats()
-    return jsonify({"ok": True, "message": "Training data cleared. Learner reset to factory defaults."})
-
-
-@app.route("/api/export")
-def api_export():
-    """Download full training data as a JSON file for analysis."""
-    from pathlib import Path
-
-    def _load_json(path):
-        p = Path(path)
-        if p.exists():
-            try:
-                with open(p) as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        return None
-
-    journal_main   = _load_json("data/journal_main.json")   or []
-    params_main    = _load_json("data/params_main.json")    or {}
-    trend_state    = _load_json("data/trend_state.json")    or {}
-    analyst_params  = _load_json("data/analyst_params.json")  or {}
-    analyst_history = _load_json("data/analyst_history.json") or []
-
-    # Compute win/loss breakdown from journals
-    def _wl(journal):
-        closed = [r for r in journal if r.get("closed")]
-        wins   = [r for r in closed  if r.get("pnl_usdc", 0) > 0]
-        losses = [r for r in closed  if r.get("pnl_usdc", 0) <= 0]
-        total_pnl = sum(r.get("pnl_usdc", 0) for r in closed)
-        return {
-            "total": len(closed),
-            "wins":  len(wins),
-            "losses": len(losses),
-            "win_rate": len(wins) / len(closed) if closed else 0,
-            "total_pnl_usdc": round(total_pnl, 4),
-            "best_trade":  round(max((r.get("pnl_usdc",0) for r in closed), default=0), 4),
-            "worst_trade": round(min((r.get("pnl_usdc",0) for r in closed), default=0), 4),
-            "avg_pnl":     round(total_pnl / len(closed), 4) if closed else 0,
-        }
-
-    payload = {
-        "exported_at": datetime.utcnow().isoformat() + "Z",
-        "mode":        "DRY_RUN" if config.DRY_RUN else "LIVE",
-        "config": {
-            "dry_run":            config.DRY_RUN,
-            "max_position_usdc":  config.MAX_POSITION_USDC,
-            "max_total_exposure": config.MAX_TOTAL_EXPOSURE_USDC,
-            "kelly_fraction":     config.KELLY_FRACTION,
-            "min_edge":           config.MIN_EDGE,
-        },
-        "performance": {
-            "total_trades": _state.total_trades if _state else 0,
-            "wins":         _state.wins         if _state else 0,
-            "losses":       (_state.total_trades - _state.wins) if _state else 0,
-            "total_pnl":    _state.total_pnl    if _state else 0,
-            "total_fees":   _state.total_fees   if _state else 0,
-            "win_rate":     _state.win_rate      if _state else 0,
-            "best_trade":   _state.best_trade    if _state else 0,
-            "worst_trade":  _state.worst_trade   if _state else 0,
-        },
-        "journal_stats":   _wl(journal_main),
-        "trend_state":     trend_state,
-        "learned_params":  params_main,
-        "analyst_params":  analyst_params,
-        "analyst_history": analyst_history[-10:],
-        "equity_curve":    _state.equity_curve if _state else [],
-        "trade_journal":   journal_main,
-    }
-
-    blob = json.dumps(payload, indent=2)
-    return Response(
-        blob,
-        mimetype="application/json",
-        headers={"Content-Disposition": "attachment; filename=midusbot_export.json"},
-    )
-
 # ---------------------------------------------------------------------------
 # State serialiser
 # ---------------------------------------------------------------------------
@@ -327,13 +162,10 @@ def _learning_progress() -> dict:
     adapted = _learner._adaptation_count
     wr      = _state.win_rate
 
-    # "Ready to go live" = at least 20 dry-run trades and win rate >= 60%
-    # (matches _DRY_RECOVER_WIN_RATE and _DRY_MIN_TRADES in bot.py)
     MIN_TRADES = 20
     MIN_WIN_RATE = 0.60
     ready = total >= MIN_TRADES and wr >= MIN_WIN_RATE
 
-    # Overall progress toward going live (0-100)
     trade_pct = min(total / MIN_TRADES * 100, 100)
     wr_pct    = min(wr / MIN_WIN_RATE * 100, 100) if total > 0 else 0
     overall   = (trade_pct + wr_pct) / 2
@@ -423,6 +255,11 @@ def start(state: DashboardState, port: int = 8080, learner: AdaptiveLearner | No
     _learner            = learner
     _close_position_fn  = close_position_fn
     _sim                = sim
+
+    # Register API routes from webui_api
+    import src.webui_api as _api
+    _api.register(app, lambda: _state, lambda: _learner, lambda: _close_position_fn)
+
     t = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False),
         daemon=True,
