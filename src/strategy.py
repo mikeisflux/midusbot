@@ -397,10 +397,10 @@ class UpDownMomentumStrategy:
             ))
             _sig_thresh = float(_DEFAULT_ASSET_THRESHOLDS.get(_sym, _global))
         if window_return is None:
-            logger.debug(f"[UPDOWN] {symbol} skipped — window_return unavailable (lookback={_effective_secs}s, hist={int(_available_span if len(_hist_now)>=2 else 0)}s)")
+            logger.info(f"[UPDOWN] {symbol} skipped — window_return unavailable (lookback={_effective_secs}s, hist={int(_available_span if len(_hist_now)>=2 else 0)}s)")
             return None
         if abs(window_return) < _sig_thresh:
-            logger.debug(f"[UPDOWN] {symbol} skipped — win_ret={window_return:+.4%} below thresh {_sig_thresh:.4%}")
+            logger.info(f"[UPDOWN] {symbol} skipped — win_ret={window_return:+.4%} below thresh {_sig_thresh:.4%}")
             return None
 
         # ── CONVICTION FILTER: Binance trade count vs rolling average ────────────
@@ -411,7 +411,7 @@ class UpDownMomentumStrategy:
         if _rate_avg > 0 and _rate_30s > 0:
             _rate_ratio = _rate_30s / _rate_avg
             if _rate_ratio < 0.5:
-                logger.debug(
+                logger.info(
                     f"[CONVICTION] {symbol} skipped — trade rate {_rate_30s:.2f}/s "
                     f"is {_rate_ratio:.2f}× avg ({_rate_avg:.2f}/s) — low conviction"
                 )
@@ -422,13 +422,13 @@ class UpDownMomentumStrategy:
         regime = _market_regime(symbol)
         signal_dir = "UP" if window_return > 0 else "DOWN"
         if regime == "CHOPPY":
-            logger.debug(f"[REGIME] {symbol} skipped — choppy market, momentum unreliable")
+            logger.info(f"[REGIME] {symbol} skipped — choppy market, momentum unreliable")
             return None
         if regime == "TRENDING_UP" and signal_dir == "DOWN":
-            logger.debug(f"[REGIME] {symbol} skipped — TRENDING_UP regime contradicts DOWN signal")
+            logger.info(f"[REGIME] {symbol} skipped — TRENDING_UP regime contradicts DOWN signal")
             return None
         if regime == "TRENDING_DOWN" and signal_dir == "UP":
-            logger.debug(f"[REGIME] {symbol} skipped — TRENDING_DOWN regime contradicts UP signal")
+            logger.info(f"[REGIME] {symbol} skipped — TRENDING_DOWN regime contradicts UP signal")
             return None
 
         # ── MEAN REVERSION CHECK ──────────────────────────────────────────────
@@ -465,7 +465,7 @@ class UpDownMomentumStrategy:
         if secs_in >= 45:
             accel = _price_acceleration(symbol)
             if accel is not None and (accel > 0) != (window_return > 0):
-                logger.debug(
+                logger.info(
                     f"[UPDOWN] {symbol} skipped — momentum decelerating "
                     f"(win_ret={window_return:+.4%}, accel={accel:+.4%})"
                 )
@@ -479,7 +479,7 @@ class UpDownMomentumStrategy:
             consensus_dir = "UP" if consensus_score > 0 else "DOWN"
             signal_dir    = "UP" if window_return > 0 else "DOWN"
             if consensus_dir != signal_dir:
-                logger.debug(
+                logger.info(
                     f"[UPDOWN] {symbol} skipped — multitf consensus {consensus_dir} "
                     f"contradicts signal {signal_dir} (conf={consensus_conf})"
                 )
