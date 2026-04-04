@@ -682,8 +682,9 @@ class TrendFollowStrategy:
         if confidence == "LOW" and abs(window_return) < _MIN_WINDOW_RETURN_PCT * 2:
             return None   # fresh direction flip + weak window signal — too risky
 
+        _cw_str = f"{cw_trend:+.2f}" if cw_trend is not None else "N/A"
         logger.info(
-            f"[TREND-FOLLOW] {symbol} {direction}  streak={streak}  cw={cw_trend:+.2f}  "
+            f"[TREND-FOLLOW] {symbol} {direction}  streak={streak}  cw={_cw_str}  "
             f"win_ret={window_return:+.4%}  "
             f"fair={fair_value:.2f}  mkt={mkt_price:.2f}  edge={edge:+.2f}  "
             f"t={secs_in:.0f}s  [{confidence}]  \"{market.question[:45]}\""
