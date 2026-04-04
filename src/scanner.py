@@ -393,20 +393,26 @@ class ScannerMixin:
         # exceeds a lower threshold — ensures per-asset calibration is respected.
         pending_signals.sort(key=lambda x: x[0].rel_strength, reverse=True)
 
-        # One trade per 5-minute window across all assets.
+        # Max 2 trades per 5-minute window across all assets.
         # Track the current window by its epoch bucket (floor to 300s).
+        _MAX_TRADES_PER_WINDOW = 2
         _current_window = int(time.time() // 300) * 300
         if not hasattr(self, "_last_traded_window"):
             self._last_traded_window: int = 0
-        _already_traded_this_window = (self._last_traded_window == _current_window)
+        if not hasattr(self, "_window_trade_count"):
+            self._window_trade_count: int = 0
+        if self._last_traded_window != _current_window:
+            self._window_trade_count = 0
+        _slots_left = _MAX_TRADES_PER_WINDOW - self._window_trade_count
 
-        if _already_traded_this_window:
-            logger.debug(f"[WINDOW-LOCK] Already traded this window — holding remaining {len(pending_signals)} signal(s)")
+        if _slots_left <= 0:
+            logger.debug(f"[WINDOW-LOCK] {_MAX_TRADES_PER_WINDOW} trades placed this window — holding remaining {len(pending_signals)} signal(s)")
         else:
-            for sig, _asset in pending_signals[:1]:
+            for sig, _asset in pending_signals[:_slots_left]:
                 if self._execute_signal(sig):
                     trades_placed += 1
                     self._last_traded_window = _current_window
+                    self._window_trade_count += 1
                     self._asset_last_bet[_asset] = time.time()
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
