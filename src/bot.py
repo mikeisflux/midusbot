@@ -1168,7 +1168,7 @@ class PolymarketBot:
         """
         if token_id:
             return token_id in self._positions
-        if market.market_id in self._closed_market_ids:
+        if market.id in self._closed_market_ids:
             return True   # already traded + closed this session
         return (
             market.yes_token.token_id in self._positions
