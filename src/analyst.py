@@ -329,6 +329,20 @@ PARAMETERS YOU CAN SET:
 - prefer_assets: ["BTC",...] — prioritise these assets.
 - max_secs_in (120–240): stop entering this late into the window.
 - kelly_override (0.05–0.5 or null): override position sizing fraction.
+  ⚠️ CRITICAL — MINIMUM ORDER SIZE CONSTRAINT ⚠️
+  Polymarket requires a minimum of 5 shares per order. At a typical entry
+  price of $0.50/share, the minimum USDC per trade is $2.50.
+  Position size formula: kelly_fraction × kelly_override × $100 (bankroll).
+  kelly_fraction from the Kelly formula for a given edge:
+    edge=4%  → kelly_fraction≈0.068  → need kelly_override≥0.37 to get ≥$2.50
+    edge=8%  → kelly_fraction≈0.14   → need kelly_override≥0.18 to get ≥$2.50
+    edge=12% → kelly_fraction≈0.21   → need kelly_override≥0.12 to get ≥$2.50
+    edge=16% → kelly_fraction≈0.29   → need kelly_override≥0.09 to get ≥$2.50
+  IF you set kelly_override too low, position size falls below $2.50 → trade
+  is SILENTLY BLOCKED. This is why 0 trades fire even when signals are found.
+  kelly_override=0.05 at 4% edge = $0.34 position = 0.67 shares = BLOCKED.
+  kelly_override=null uses config default (0.25) — RECOMMENDED unless you
+  specifically need to size up. Never set below 0.15 or trades will stop.
 - time_of_day_skip: [0,1,2,...] UTC hours to not trade at all.
 - asset_thresholds: per-asset window_return thresholds (THIS is what controls
   trading). LOWER threshold = trade MORE often (requires smaller move).
@@ -464,6 +478,40 @@ def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> s
         pass
     if _extra:
         p.append(f"\nMarket context:\n" + "\n".join(_extra))
+
+    # Always show live Kelly sizing so the analyst knows what position sizes
+    # its kelly_override suggestion will actually produce
+    try:
+        import config as _cfg
+        _ko = params.get("kelly_override")
+        _kf = float(_ko) if _ko is not None else _cfg.KELLY_FRACTION
+        _min_shares = _cfg.MIN_ORDER_SHARES
+        _bankroll   = _cfg.MAX_TOTAL_EXPOSURE_USDC
+        _sizing_lines = [
+            f"\n━━━ POSITION SIZING (READ THIS BEFORE TOUCHING kelly_override) ━━━",
+            f"Polymarket minimum order: {_min_shares:.0f} shares × ~$0.50 = ~${_min_shares*0.50:.2f} USDC",
+            f"Current kelly_override: {_ko} → effective fraction: {_kf:.2f}",
+            f"Bankroll reference: ${_bankroll:.0f}  (MAX_TOTAL_EXPOSURE_USDC)",
+            f"Position size = kelly_fraction × {_kf:.2f} × ${_bankroll:.0f}",
+            f"kelly_fraction by signal edge:",
+        ]
+        for edge_pct, kelly_f in [(0.03, 0.045), (0.05, 0.078), (0.08, 0.132), (0.12, 0.207), (0.16, 0.287)]:
+            usdc   = kelly_f * _kf * _bankroll
+            shares = usdc / 0.50
+            status = "✓ TRADES" if shares >= _min_shares else "✗ BLOCKED (below minimum)"
+            _sizing_lines.append(
+                f"  edge={edge_pct:.0%}  kelly_f={kelly_f:.3f}  "
+                f"→ ${usdc:.2f} → {shares:.1f} shares  {status}"
+            )
+        _sizing_lines.append(
+            f"To ALWAYS trade with current kelly_override={_ko}: "
+            f"signal edge must exceed {(_min_shares*0.50/(_kf*_bankroll) if _kf>0 else 999):.0%} "
+            f"(kelly_f>{_min_shares*0.50/(_kf*_bankroll):.2f})." if _kf > 0 else
+            f"kelly_override is null — using config default {_cfg.KELLY_FRACTION}"
+        )
+        p.append("\n".join(_sizing_lines))
+    except Exception:
+        pass
 
     p.append("")
     p.append("Now apply WW_MRD: what ONE THING will make real difference? Do it.")
