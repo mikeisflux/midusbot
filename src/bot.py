@@ -103,6 +103,9 @@ class PolymarketBot:
         self._running = False
         self._last_mode_switch: float = 0.0
 
+        # Track market_ids closed this session to prevent re-entry on same window
+        self._closed_market_ids: set[str] = set()
+
         # Live data feeds
         self._price_feed = BinanceWSFeed()
         self._sim = SimPortfolio()
@@ -529,6 +532,8 @@ class PolymarketBot:
                         f"{pos.question[:55]}"
                     )
                     self._risk.record_close()
+                    if pos.market_id:
+                        self._closed_market_ids.add(pos.market_id)
                     del self._positions[token_id]
                     self._save_positions()
                     continue
@@ -703,6 +708,8 @@ class PolymarketBot:
             # Always remove from tracking — in DRY_RUN this is simulated, but
             # we still need to delete so stop-loss/take-profit don't re-fire
             # every loop on the same position.
+            if pos.market_id:
+                self._closed_market_ids.add(pos.market_id)
             del self._positions[token_id]
             self._save_positions()
             logger.info(f"{'[SIM] ' if config.DRY_RUN else ''}Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
@@ -1121,7 +1128,7 @@ class PolymarketBot:
                         if secs_left > win_secs:
                             # Window hasn't started — skip silently
                             continue
-                        if secs_left < 60:
+                        if secs_left < 120:   # 2-min buffer — burst entry fires up to 90s after boundary
                             n_toosoon += 1; n_ud_toosoon += 1; continue
                     else:
                         effective_min_secs = min_minutes * 60
@@ -1155,13 +1162,14 @@ class PolymarketBot:
 
     def _already_positioned(self, market: Market, token_id: str | None = None) -> bool:
         """
-        Block re-entry on the SAME token only (not the whole market).
-        This allows holding both Up and Down sides simultaneously —
-        the trader we modelled does this for hedging when signals flip.
-        If token_id is given, only check that specific token.
+        Block re-entry on the SAME token, or on any market already closed this session.
+        This prevents burst-entry from re-buying expired markets that still briefly
+        appear in the API while the oracle is settling them.
         """
         if token_id:
             return token_id in self._positions
+        if market.market_id in self._closed_market_ids:
+            return True   # already traded + closed this session
         return (
             market.yes_token.token_id in self._positions
             or market.no_token.token_id in self._positions
