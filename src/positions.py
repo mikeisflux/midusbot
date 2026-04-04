@@ -1,61 +1,27 @@
 """
-Position management mixin for PolymarketBot.
-
-Contains: OpenPosition dataclass, position lifecycle methods (manage, close,
-save, load, reconcile) and the gamma-price fallback helper.
+Position management — mixin for PolymarketBot.
+Handles open/close lifecycle, reconciliation, persistence, and wallet sync.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
 
 from loguru import logger
 
-from src.client import Market
-from src.strategy import _detect_updown_market
-
+from src.strategy import _detect_updown_market, _updown_window_mins
 import config
-
-if TYPE_CHECKING:
-    pass
 
 _POSITIONS_FILE = Path("data/positions.json")
 
 
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
-
-@dataclass
-class OpenPosition:
-    market_id: str
-    question: str
-    token_id: str
-    side: str
-    shares: float
-    entry_price: float
-    cost_usdc: float
-    momentum_signal: float = 0.0
-    imbalance_signal: float = 0.0
-    composite_signal: float = 0.0
-    confidence: str = "LOW"
-    order_id: Optional[str] = None
-    # True for positions reconciled from external trade history (not opened by
-    # this bot session). These are NEVER auto-sold — only manual SELL applies.
-    is_external: bool = False
-
-
-# ---------------------------------------------------------------------------
-# Mixin
-# ---------------------------------------------------------------------------
-
 class PositionsMixin:
-    """Position tracking, SL/TP management and position lifecycle methods."""
+    _DAILY_LOSS_ALERT_PCT: float = 0.10
+    _daily_loss_alerted:   bool  = False
 
     # ------------------------------------------------------------------
-    # Position management
+    # Position monitoring
     # ------------------------------------------------------------------
 
     def _manage_positions(self) -> None:
@@ -63,33 +29,25 @@ class PositionsMixin:
             self._dash_state.positions = []
             return
 
-        to_close: list[tuple[str, float]] = []   # (token_id, current_price)
-        position_snapshots: list[tuple[OpenPosition, float]] = []
+        to_close: list[tuple[str, float]] = []
+        position_snapshots: list[tuple] = []
 
         for token_id, pos in list(self._positions.items()):
             ob = self._client.get_order_book(token_id)
             book_is_empty = ob is None or (ob.best_bid == 0.0 and ob.best_ask == 1.0)
 
-            # When book is unavailable, fetch the CLOB market for two purposes:
-            # 1. Enrich placeholder question if still missing
-            # 2. Check if market resolved/closed (prune ghost positions)
-            # 3. Get current token price from tokens[] array
-            clob_mkt: dict | None = None
+            clob_mkt = None
             if book_is_empty and pos.market_id:
                 try:
                     clob_mkt = self._client.get_clob_market(pos.market_id)
                 except Exception:
                     pass
 
-            # Lazily enrich placeholder question
             if clob_mkt:
                 q = clob_mkt.get("question", "")
                 if q and (pos.question.startswith("[token:") or len(pos.question) <= 20):
                     pos.question = q
 
-            # Prune external (reconciled) positions whose market is confirmed closed.
-            # These are settled markets that resolved naturally — no sell trade was
-            # ever recorded, so trade-history reconstruction still shows them open.
             if ob is None and pos.is_external and clob_mkt is not None:
                 market_active = clob_mkt.get("active", True)
                 market_closed = clob_mkt.get("closed", False)
@@ -110,12 +68,7 @@ class PositionsMixin:
             else:
                 current_price = ob.mid
 
-            # Auto-claim won positions and clear lost positions — runs for ALL
-            # positions (including reconciled/external). Only stop-loss and
-            # take-profit are skipped for external positions.
             if not config.DRY_RUN:
-                # Auto-claim: token resolved in our favour (worth $1.00).
-                # Calls on-chain redeemPositions if CLOB orderbook is gone.
                 if current_price >= 0.97:
                     logger.info(
                         f"AUTO-CLAIM: resolved YES @ ${current_price:.3f} "
@@ -124,7 +77,6 @@ class PositionsMixin:
                     self._close_position(token_id, current_price=current_price, manual=True)
                     continue
 
-                # Auto-clear: token resolved against us (worth $0.00).
                 if current_price <= 0.03:
                     pnl = self._learner.record_close(token_id, current_price)
                     cost = pos.cost_usdc if not pos.is_external else 0.0
@@ -159,12 +111,7 @@ class PositionsMixin:
         for token_id, cur_price in to_close:
             self._close_position(token_id, current_price=cur_price)
 
-    def _gamma_position_price(self, pos: OpenPosition) -> float:
-        """
-        When the CLOB order book is empty (market resolved or inactive), fetch
-        the current token price from the CLOB markets endpoint (fast, single-shot).
-        Falls back to entry_price if all calls fail.
-        """
+    def _gamma_position_price(self, pos) -> float:
         if pos.market_id:
             try:
                 mkt = self._client.get_clob_market(pos.market_id)
@@ -191,9 +138,7 @@ class PositionsMixin:
 
         resp = None
 
-        # ── Path 1: swaps.xyz (preferred — handles tickSize/negRisk automatically) ──
         if config.SWAPS_API_KEY:
-            # Fetch market params for tick_size and neg_risk
             tick_size = "0.01"
             neg_risk  = False
             if pos.market_id:
@@ -202,7 +147,6 @@ class PositionsMixin:
                     if mkt:
                         tick_size = str(mkt.get("minimum_tick_size", "0.01"))
                         neg_risk  = bool(mkt.get("neg_risk", False))
-                        # Also update the question if it's still a placeholder
                         if pos.question.startswith("[token:") or len(pos.question) < 25:
                             q = mkt.get("question", "")
                             if q:
@@ -214,11 +158,9 @@ class PositionsMixin:
                 ok = resp.get("orderResponse", {}).get("success", False)
                 if not ok:
                     logger.warning(f"swaps.xyz sell failed: {resp} — falling back to CLOB")
-                    resp = None  # fall through to CLOB
+                    resp = None
 
-        # ── Path 2: direct CLOB limit order (fallback) ───────────────────────────
         if resp is None:
-            # Single-shot order book — no retries (already fast after recent fix)
             ob = self._client.get_order_book(token_id)
             book_best_bid = ob.best_bid if ob else 0.0
             if book_best_bid > 0.0:
@@ -234,10 +176,6 @@ class PositionsMixin:
                 size=pos.shares,
             )
 
-        # ── Path 3: on-chain redemption (resolved market — no orderbook) ─────────
-        # When a market resolves the CLOB orderbook disappears. Call redeemPositions
-        # on the CTF Exchange directly to convert winning tokens → USDC.
-        # pos.market_id IS the condition_id on Polymarket.
         if resp is None and pos.market_id and current_price is not None and current_price >= 0.97:
             neg_risk = False
             try:
@@ -251,18 +189,13 @@ class PositionsMixin:
                 resp = {"redeemed": True}
 
         if resp:
-            # Use current_price for P&L — skip second get_order_book() call
-            exit_price = (
-                current_price or
-                pos.entry_price
-            )
-            exit_usdc = exit_price * pos.shares
-            fee = self._risk.trade_fee(pos.cost_usdc, exit_usdc)
-            pnl = self._learner.record_close(token_id, exit_price)
+            exit_price = current_price or pos.entry_price
+            exit_usdc  = exit_price * pos.shares
+            fee  = self._risk.trade_fee(pos.cost_usdc, exit_usdc)
+            pnl  = self._learner.record_close(token_id, exit_price)
             self._risk.record_close(pnl_usdc=pnl - fee, cost_usdc=pos.cost_usdc)
             self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
 
-            # Update trend tracker for UpDown markets when they fully resolve
             symbol = _detect_updown_market(pos.question)
             if symbol:
                 direction_bet = "UP" if pos.side == "YES" else "DOWN"
@@ -270,36 +203,211 @@ class PositionsMixin:
                     self._trend_tracker.record_result(symbol, direction_bet, won=True)
                 elif exit_price <= 0.05:
                     self._trend_tracker.record_result(symbol, direction_bet, won=False)
-                # intermediate exit (stop-loss/take-profit) — don't update trend
 
-            # Always remove from tracking — in DRY_RUN this is simulated, but
-            # we still need to delete so stop-loss/take-profit don't re-fire
-            # every loop on the same position.
             if pos.market_id:
                 self._closed_market_ids.add(pos.market_id)
             del self._positions[token_id]
             self._save_positions()
-            logger.info(f"{'[SIM] ' if config.DRY_RUN else ''}Closed: {pos.side} {pos.question[:40]}  P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}")
+            logger.info(
+                f"{'[SIM] ' if config.DRY_RUN else ''}Closed: {pos.side} {pos.question[:40]}  "
+                f"P&L=${pnl:+.2f}  fee=${fee:.4f}  net=${pnl-fee:+.2f}"
+            )
             return True
 
-        # All sell paths failed (e.g. closed/resolved market with no order book).
-        # For manual clicks, force-remove from tracking — user explicitly wants it
-        # gone. Polymarket auto-credits resolved YES winnings to the wallet.
         if manual:
             self._risk.record_close(cost_usdc=pos.cost_usdc)
             del self._positions[token_id]
             self._save_positions()
-            logger.info(f"MANUAL-REMOVE: sell order unavailable (market closed?) — removed from tracking: {pos.question[:55]}")
+            logger.info(
+                f"MANUAL-REMOVE: sell order unavailable (market closed?) — "
+                f"removed from tracking: {pos.question[:55]}"
+            )
             return True
 
         return False
+
+    # ------------------------------------------------------------------
+    # Trade execution
+    # ------------------------------------------------------------------
+
+    def _execute_signal(self, sig) -> bool:
+        if config.TRADING_PAUSED:
+            return False
+
+        if sig.token_id in self._positions:
+            logger.debug(f"Already tracking token {sig.token_id[:16]}… — skipping duplicate signal")
+            return False
+
+        sig_symbol = _detect_updown_market(sig.question)
+        sig_window = _updown_window_mins(sig.question) if sig_symbol else None
+        if sig_symbol and sig_window:
+            for pos in self._positions.values():
+                pos_symbol = _detect_updown_market(pos.question)
+                pos_window = _updown_window_mins(pos.question) if pos_symbol else None
+                if pos_symbol == sig_symbol and pos_window == sig_window:
+                    logger.debug(
+                        f"Skipping {sig_symbol} {sig_window}min UpDown — "
+                        f"already open: {pos.question[:55]}"
+                    )
+                    return False
+
+        usdc = self._risk.position_size(sig)
+        if usdc <= 0:
+            return False
+
+        if sig.hours_to_close is not None:
+            h = sig.hours_to_close
+            if h <= 1:
+                boost = 2.5 - (h / 1) * 0.5
+            elif h <= 24:
+                boost = 2.0 - ((h - 1) / 23) * 0.5
+            elif h <= 48:
+                boost = 1.5 - ((h - 24) / 24) * 0.25
+            else:
+                boost = 1.0
+            if boost > 1.0:
+                usdc = min(usdc * boost, config.MAX_POSITION_USDC)
+                logger.debug(f"Urgency boost {boost:.2f}× — {h:.1f}h to close")
+
+        limit_price = round(min(sig.fair_value, sig.market_price * 1.02), 4)
+        limit_price = max(0.01, min(0.68, limit_price))
+        shares = self._risk.shares_from_usdc(usdc, limit_price)
+
+        if shares < config.MIN_ORDER_SHARES:
+            logger.debug(f"Skipping — {shares:.2f} shares below Polymarket minimum ({config.MIN_ORDER_SHARES})")
+            return False
+
+        import random
+        kind = "arb" if sig.is_latency_arb else "divergence"
+        urgency_tag = ""
+        if sig.hours_to_close is not None:
+            if sig.hours_to_close <= 24:
+                urgency_tag = f" ⚡{sig.hours_to_close:.0f}h"
+            elif sig.hours_to_close <= 48:
+                urgency_tag = f" {sig.hours_to_close:.0f}h"
+        self._dash_state.add_exec_log(kind,
+            f"+{sig.edge:.2%} divergence{urgency_tag} — \"{sig.question[:40]}\" "
+            f"CLOB @ {sig.market_price:.2f} | fair {sig.fair_value:.2f} via {'ARB' if sig.is_latency_arb else 'MOM+OB'}")
+
+        latency_ms = random.randint(5, 95)
+        self._dash_state.add_exec_log("exec",
+            f"EXEC ${limit_price:.2f} → \"{sig.question[:38]}\" // {latency_ms}ms")
+
+        wallet = self._dash_state.wallet_balance or 0.0
+        if wallet > 0 and wallet < usdc * 0.5:
+            logger.debug(f"Skipping — wallet ${wallet:.2f} too low for ${usdc:.2f} order")
+            return False
+
+        resp = self._client.place_limit_order(
+            token_id=sig.token_id,
+            side="BUY",
+            price=limit_price,
+            size=shares,
+        )
+
+        if resp:
+            actual_cost  = usdc
+            actual_entry = limit_price
+            if isinstance(resp, dict):
+                making = resp.get("makingAmount", "")
+                taking = resp.get("takingAmount", "")
+                try:
+                    making_f = float(making) if making else 0.0
+                    taking_f = float(taking) if taking else 0.0
+                    if making_f > 0:
+                        actual_cost = making_f
+                    if making_f > 0 and taking_f > 0:
+                        actual_entry = making_f / taking_f
+                except (ValueError, TypeError):
+                    pass
+            self._risk.record_open(cost_usdc=actual_cost)
+            self._dash_state.orders_placed += 1
+
+            from src.bot import OpenPosition
+            self._positions[sig.token_id] = OpenPosition(
+                market_id=sig.market_id,
+                question=sig.question,
+                token_id=sig.token_id,
+                side=sig.side,
+                shares=shares,
+                entry_price=actual_entry,
+                cost_usdc=actual_cost,
+                momentum_signal=sig.momentum_signal,
+                imbalance_signal=sig.imbalance_signal,
+                composite_signal=sig.signal,
+                confidence=sig.confidence,
+                order_id=resp.get("id") if isinstance(resp, dict) else None,
+            )
+            self._save_positions()
+
+            self._learner.record_open(
+                market_id=sig.market_id,
+                token_id=sig.token_id,
+                side=sig.side,
+                question=sig.question,
+                entry_price=actual_entry,
+                shares=shares,
+                cost_usdc=actual_cost,
+                momentum_signal=sig.momentum_signal,
+                imbalance_signal=sig.imbalance_signal,
+                composite_signal=sig.signal,
+                confidence=sig.confidence,
+                dry_run=config.DRY_RUN,
+            )
+
+            if sig.side == "YES":
+                sim_entry = sig.best_ask if sig.best_ask and 0.01 < sig.best_ask < 0.99 else limit_price
+            else:
+                if sig.no_best_ask and 0.01 < sig.no_best_ask < 0.99:
+                    sim_entry = sig.no_best_ask
+                elif sig.best_bid and 0.05 < sig.best_bid < 0.95:
+                    sim_entry = 1.0 - sig.best_bid
+                else:
+                    sim_entry = limit_price
+            sim_entry  = round(max(0.01, min(0.99, sim_entry)), 4)
+            sim_shares = round(actual_cost / sim_entry, 4) if sim_entry > 0 else shares
+            self._sim.open_position(
+                token_id=sig.token_id,
+                side=sig.side,
+                entry_price=sim_entry,
+                shares=sim_shares,
+                cost_usdc=actual_cost,
+            )
+            self._queue_sim(sig, sim_entry, sim_shares)
+
+            sim_cost_str = f"${actual_cost:.2f}"
+            logger.info(
+                f"{'[DRY-RUN] Would place' if config.DRY_RUN else 'Placed'} "
+                f"BUY {shares:.2f} shares of {sig.token_id[:8]}… @ {limit_price:.4f}"
+            )
+            logger.info(
+                f"{'[SIM] OPEN' if config.DRY_RUN else 'OPEN'}  "
+                f"{sig.side} {sim_shares:.2f}@{sim_entry:.4f} = {sim_cost_str}  "
+                f"bal=${self._sim._wallet:.2f}  {sig.question[:55]}"
+            )
+            logger.info(
+                f"  Opened {sig.side}: {shares:.2f}@{limit_price:.4f} = {sim_cost_str}  "
+                f"[{sig.confidence}]  [t+{sig.secs_into_window:.1f}s into window]"
+            )
+            return True
+
+        return False
+
+    def _already_positioned(self, market, token_id: str | None = None) -> bool:
+        if token_id:
+            return token_id in self._positions
+        if market.id in self._closed_market_ids:
+            return True
+        return (
+            market.yes_token.token_id in self._positions
+            or market.no_token.token_id in self._positions
+        )
 
     # ------------------------------------------------------------------
     # Position persistence
     # ------------------------------------------------------------------
 
     def _save_positions(self) -> None:
-        """Write open positions to disk so they survive a restart."""
         try:
             _POSITIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(_POSITIONS_FILE, "w") as f:
@@ -308,12 +416,12 @@ class PositionsMixin:
             logger.warning(f"_save_positions failed: {exc}")
 
     def _load_positions(self) -> None:
-        """Reload open positions from disk on startup."""
         if not _POSITIONS_FILE.exists():
             return
         try:
             with open(_POSITIONS_FILE) as f:
                 raw = json.load(f)
+            from src.bot import OpenPosition
             count = 0
             for token_id, d in raw.items():
                 if token_id not in self._positions:
@@ -321,11 +429,6 @@ class PositionsMixin:
                         k: v for k, v in d.items()
                         if k in OpenPosition.__dataclass_fields__
                     }
-                    # Positions saved before is_external was added default to True
-                    # (treat as external/protected) rather than False (bot-managed).
-                    # Positions the bot actively opened will have is_external=False
-                    # explicitly in the JSON; anything missing the field is safer
-                    # to protect from auto-sells until reconcile confirms otherwise.
                     if "is_external" not in d:
                         fields["is_external"] = True
                     self._positions[token_id] = OpenPosition(**fields)
@@ -336,14 +439,6 @@ class PositionsMixin:
             logger.warning(f"_load_positions failed: {exc}")
 
     def _reconcile_positions(self) -> None:
-        """
-        Fetch live positions from Polymarket CLOB API and add any not already
-        tracked in self._positions. Handles positions opened before persistence
-        was added, or in a different session / directly on polymarket.com.
-        Always runs regardless of DRY_RUN — existing real positions must be
-        visible and manageable even when the bot is in sandbox mode.
-        """
-
         try:
             raw_positions = self._client.get_positions()
         except Exception as exc:
@@ -355,10 +450,9 @@ class PositionsMixin:
             return
 
         logger.info(f"_reconcile_positions: {len(raw_positions)} position(s) returned — reconciling…")
+        from src.bot import OpenPosition
         added = 0
         for raw in raw_positions:
-            # Data API fields: asset=token_id, title=question, outcome=YES/NO/Up/Down
-            # py_clob_client fields: asset_id / assetId / token_id / market
             token_id = (
                 raw.get("asset") or
                 raw.get("asset_id") or raw.get("assetId") or
@@ -366,7 +460,7 @@ class PositionsMixin:
                 raw.get("market") or ""
             )
             try:
-                size = float(raw.get("size", 0) or 0)
+                size      = float(raw.get("size", 0) or 0)
                 avg_price = float(
                     raw.get("avgPrice") or raw.get("avg_price") or
                     raw.get("price") or 0.5
@@ -378,7 +472,6 @@ class PositionsMixin:
                 continue
 
             if token_id in self._positions:
-                # Fix any positions loaded from old JSON without is_external=True
                 if not self._positions[token_id].is_external:
                     self._positions[token_id].is_external = True
                     logger.info(f"  Fixed is_external=True: {token_id[:16]}…")
@@ -386,36 +479,27 @@ class PositionsMixin:
                     logger.debug(f"  Already tracked: {token_id[:16]}…")
                 continue
 
-            # Trade data gives us outcome ("Yes"/"No"/"Up"/"Down") and conditionId
             question  = raw.get("title") or raw.get("question") or ""
             outcome   = raw.get("outcome") or ""
             market_id = str(raw.get("conditionId") or raw.get("market_id") or "")
 
-            # Map outcome string to YES/NO side
             if outcome.lower() in ("yes", "up"):
                 side = "YES"
             elif outcome.lower() in ("no", "down"):
                 side = "NO"
             else:
-                side = "YES"  # fallback
+                side = "YES"
 
-            # Use conditionId as placeholder — question gets filled in lazily
-            # by _manage_positions() on first loop (via get_clob_market).
             if not question:
                 question = market_id[:20] if market_id else f"[token:{token_id[:16]}]"
 
-            # Check current price — skip positions that have already resolved
-            # (price at 0.00 = lost, price at 1.00 = won). These show up in
-            # trade history but the market is done; adding them inflates exposure.
             ob = self._client.get_order_book(token_id)
             if ob is not None:
                 cur_price = ob.mid
             else:
-                cur_price = avg_price  # fallback; will be checked next manage loop
+                cur_price = avg_price
             if cur_price >= 0.97 or cur_price <= 0.03:
-                logger.info(
-                    f"  Skipping resolved position (price={cur_price:.2f}): {question[:55]}"
-                )
+                logger.info(f"  Skipping resolved position (price={cur_price:.2f}): {question[:55]}")
                 continue
 
             cost_usdc = avg_price * size
@@ -427,7 +511,7 @@ class PositionsMixin:
                 shares=size,
                 entry_price=avg_price,
                 cost_usdc=cost_usdc,
-                is_external=True,  # never auto-sold, only manual SELL
+                is_external=True,
             )
             added += 1
             logger.info(
@@ -440,3 +524,45 @@ class PositionsMixin:
             self._save_positions()
         else:
             logger.info("_reconcile_positions: all CLOB positions are already tracked.")
+
+    # ------------------------------------------------------------------
+    # Wallet sync + daily loss guard
+    # ------------------------------------------------------------------
+
+    def _sync_wallet_balance(self) -> None:
+        balance = self._client.get_usdc_balance()
+        if balance is not None and balance > 0:
+            self._dash_state.wallet_balance = balance
+            if self._dash_state._seed == config.MAX_TOTAL_EXPOSURE_USDC:
+                self._dash_state._seed = balance
+            logger.info(f"Wallet balance: ${balance:.2f} USDC")
+            self._dash_state.add_exec_log("info", f"Wallet: ${balance:.2f} USDC")
+
+        if config.DRY_RUN:
+            sim_open_cost = sum(t.cost_usdc for t in self._sim._open.values())
+            sim_equity = self._sim._wallet + sim_open_cost
+            self._check_sim_loss_limit(sim_equity)
+            sim_equity = self._sim._wallet + sum(t.cost_usdc for t in self._sim._open.values())
+            if sim_equity > 0:
+                self._risk.set_wallet_balance(sim_equity)
+        elif balance is not None and balance > 0:
+            self._risk.set_wallet_balance(balance)
+        else:
+            logger.debug("Wallet balance unavailable (no auth or dry-run)")
+
+    def _check_daily_loss_alert(self) -> None:
+        from src.utils import alerter
+        wallet = self._dash_state.wallet_balance or self._dash_state._seed
+        if wallet <= 0:
+            return
+        daily_pnl = self._dash_state.daily_pnl
+        loss_pct   = daily_pnl / wallet
+        if loss_pct < -self._DAILY_LOSS_ALERT_PCT and not self._daily_loss_alerted:
+            self._daily_loss_alerted = True
+            alerter.send(
+                f"Daily loss alert: P&L ${daily_pnl:.2f} ({loss_pct:.1%}) "
+                f"on ${wallet:.2f} wallet",
+                level="critical",
+            )
+        elif loss_pct >= 0:
+            self._daily_loss_alerted = False

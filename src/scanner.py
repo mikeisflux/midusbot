@@ -1,0 +1,343 @@
+"""
+Market scanning mixin for PolymarketBot.
+
+Contains: main loop body (_loop_once), market filtering, trading hours check,
+and burst-mode sleep logic (_smart_sleep, _secs_until_next_window).
+"""
+from __future__ import annotations
+
+import time
+
+from loguru import logger
+
+from src.strategy import _detect_updown_market, _updown_window_mins, _market_seconds_into_window
+import config
+
+
+class ScannerMixin:
+    _off_hours_alerted: bool = False
+
+    def _filter_markets(self, markets) -> list:
+        from datetime import datetime, timezone
+        cutoff = config.MAX_DAYS_TO_RESOLUTION
+
+        now = datetime.now(timezone.utc)
+        min_minutes = config.MIN_MINUTES_TO_RESOLUTION
+        filtered = []
+
+        n_inactive = n_price = n_liquidity = n_volume = n_toosoon = n_toolate = n_nodate = n_expired = 0
+        n_updown_seen = n_updown_pass = 0
+        n_ud_expired = n_ud_toosoon = n_ud_price = 0
+
+        for m in markets:
+            if not m.active or m.closed:
+                n_inactive += 1
+                continue
+
+            is_updown = _detect_updown_market(m.question) is not None
+            if is_updown:
+                n_updown_seen += 1
+
+            if is_updown:
+                if not (0.01 <= m.yes_price <= 0.99):
+                    n_price += 1; n_ud_price += 1; continue
+            else:
+                if m.liquidity < config.MIN_LIQUIDITY_USDC:
+                    n_liquidity += 1; continue
+                if not (0.005 <= m.yes_price <= 0.995):
+                    n_price += 1; continue
+
+            hours_left = None
+            if m.end_date:
+                try:
+                    end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
+                    secs_left = (end - now).total_seconds()
+                    if secs_left < -300:
+                        n_expired += 1
+                        if is_updown:
+                            n_ud_expired += 1
+                        continue
+                    if is_updown:
+                        win_secs = (_updown_window_mins(m.question) or 5) * 60
+                        if secs_left > win_secs:
+                            continue
+                        if secs_left < 90:
+                            n_toosoon += 1; n_ud_toosoon += 1; continue
+                    else:
+                        effective_min_secs = min_minutes * 60
+                        if secs_left < effective_min_secs:
+                            n_toosoon += 1
+                            continue
+                    hours_left = secs_left / 3600
+                    day_cap = 999 if is_updown else cutoff
+                    if hours_left > day_cap * 24:
+                        n_toolate += 1; continue
+                except Exception:
+                    n_nodate += 1; continue
+            else:
+                n_nodate += 1; continue
+
+            if is_updown:
+                n_updown_pass += 1
+            filtered.append((m, hours_left if hours_left is not None else 0.25))
+
+        total_dropped = n_inactive + n_price + n_liquidity + n_volume + n_toosoon + n_toolate + n_nodate + n_expired
+        if total_dropped > 0:
+            logger.info(
+                f"Filter drops: inactive={n_inactive} price={n_price} "
+                f"liquidity={n_liquidity} volume={n_volume} "
+                f"too_soon={n_toosoon} too_late={n_toolate} no_date={n_nodate} expired={n_expired}"
+            )
+
+        filtered.sort(key=lambda x: x[1])
+        return [m for m, _ in filtered]
+
+    def _check_trading_hours(self) -> None:
+        from datetime import datetime as _dt
+        now   = _dt.now()
+        hour  = now.hour
+        start = config.TRADING_HOUR_START
+        end   = config.TRADING_HOUR_END
+
+        if start <= hour < end:
+            if self._off_hours_alerted:
+                logger.info(f"[HOURS] Trading window open ({start:02d}:00 – {end:02d}:00). Resuming.")
+                from src.utils import alerter
+                alerter.send(f"Trading hours resumed ({start}:00 – {end}:00 CT). Scanning markets.", level="info")
+                self._off_hours_alerted = False
+            return
+
+        if not self._off_hours_alerted:
+            wake_time = now.replace(hour=start, minute=0, second=0, microsecond=0)
+            if hour >= end:
+                from datetime import timedelta as _td
+                wake_time += _td(days=1)
+            logger.info(
+                f"[HOURS] Off-hours ({hour:02d}:xx). No 5-min markets until {start:02d}:00. "
+                f"Sleeping until {wake_time.strftime('%H:%M')}."
+            )
+            from src.utils import alerter
+            alerter.send(
+                f"Off-hours ({hour}:{now.minute:02d} CT) — no 5-min markets. "
+                f"Sleeping until {start}:00 CT.",
+                level="info",
+            )
+            self._off_hours_alerted = True
+
+        time.sleep(60)
+
+    @staticmethod
+    def _secs_until_next_window(window_mins: int = 5) -> float:
+        now = time.time()
+        window_secs = window_mins * 60
+        return window_secs - (now % window_secs)
+
+    def _smart_sleep(self) -> None:
+        BURST_LEAD_SECS     = 6
+        BURST_LOOPS         = 4
+        BURST_INTERVAL_SECS = 1.5
+
+        secs_to_boundary = self._secs_until_next_window(5)
+
+        if secs_to_boundary <= BURST_LEAD_SECS:
+            wait = max(0.05, secs_to_boundary - 0.1)
+            logger.debug(
+                f"[BURST] Window opens in {secs_to_boundary:.1f}s — "
+                f"sleeping {wait:.1f}s then firing {BURST_LOOPS} rapid loops"
+            )
+            time.sleep(wait)
+            for i in range(BURST_LOOPS):
+                if not self._running:
+                    break
+                try:
+                    self._loop_once()
+                except Exception as exc:
+                    logger.exception(f"Unhandled error in burst loop {i}: {exc}")
+                self._refresh_dashboard()
+                if i < BURST_LOOPS - 1:
+                    time.sleep(BURST_INTERVAL_SECS)
+        else:
+            time.sleep(config.LOOP_INTERVAL_SECONDS)
+
+    def _loop_once(self) -> None:
+        from datetime import datetime
+        from src.strategy import _fetch_price
+
+        self._dash_state.loop_count += 1
+        t0 = time.time()
+        logger.info(f"-- Loop #{self._dash_state.loop_count} --")
+
+        today = datetime.now().date()
+        if not hasattr(self, "_today"):
+            self._today = today
+        if today != self._today:
+            self._today = today
+            self._risk.reset_daily()
+            logger.info("Daily risk reset — new trading day started.")
+
+        if not config.DRY_RUN or self._dash_state.loop_count % 10 == 0:
+            self._sync_wallet_balance()
+
+        if not config.DRY_RUN and self._dash_state.loop_count % 20 == 0:
+            self._reconcile_positions()
+
+        self._process_sim_queue()
+        self._manage_positions()
+
+        for sym in ("BTC", "XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE"):
+            _fetch_price(sym)
+
+        if self._dash_state.loop_count % 4 == 1:
+            from src.signals import _PRICE_CACHE, _PRICE_HISTORY
+            import time as _time
+            _now = _time.time()
+            parts = []
+            for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"):
+                cached = _PRICE_CACHE.get(sym)
+                hist   = _PRICE_HISTORY.get(sym, [])
+                ticks  = len(hist)
+                span   = int(hist[-1][1] - hist[0][1]) if len(hist) >= 2 else 0
+                price_str = f"${cached[0]:,.2f}" if cached else "-"
+                status = f"✓{ticks}t/{span}s" if ticks >= 5 and span >= 90 else f"⏳{ticks}t/{span}s"
+                parts.append(f"{sym}={price_str}({status})")
+            logger.info("Feed: " + "  ".join(parts))
+
+        self._dash_state.add_exec_log("scan",
+            f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '...'} markets")
+
+        markets = self._client.get_markets()
+        updown  = self._client.get_updown_markets()
+
+        seen_ids    = {m.id for m in updown}
+        all_markets = updown + [m for m in markets if m.id not in seen_ids]
+        candidates  = self._filter_markets(all_markets)
+        self._dash_state.markets_scanned = len(all_markets)
+        self._dash_state.candidates = len(candidates)
+        updown_5m = [
+            m for m in candidates
+            if _detect_updown_market(m.question) and _updown_window_mins(m.question) == 5
+        ]
+        logger.info(
+            f"{len(candidates)}/{len(all_markets)} markets pass filters — "
+            f"{len(updown_5m)} tradeable 5-min UpDown."
+        )
+
+        self._dash_state.add_exec_log("scan",
+            f"Evaluating {len(candidates)} candidate markets on CLOB...")
+
+        signals_found = 0
+        trades_placed = 0
+        _updown_assets_held: set[str] = set()
+        for pos in self._positions.values():
+            sym = _detect_updown_market(pos.question)
+            if sym:
+                _updown_assets_held.add(sym)
+
+        # Collect all valid signals first, then execute only the single best.
+        # This prevents simultaneous bets on correlated assets (BTC/ETH/SOL/DOGE
+        # are 90%+ correlated — betting all at once = 6× leverage on one outcome).
+        pending_signals: list[tuple] = []  # (sig, ob, market)
+
+        for market in candidates:
+            if not self._running:
+                break
+
+            _asset = _detect_updown_market(market.question)
+            if _asset is None:
+                continue
+
+            if _updown_window_mins(market.question) != 5:
+                continue
+
+            if self._already_positioned(market):
+                continue
+            if (market.yes_token.token_id in self._positions or
+                    market.no_token.token_id in self._positions):
+                continue
+            if _asset in _updown_assets_held:
+                continue
+
+            _secs = _market_seconds_into_window(market)
+            if _secs is None or _secs < 5 or _secs > 240:
+                continue
+
+            ob = self._client.get_order_book(market.yes_token.token_id)
+
+            try:
+                sig = self._trend.analyse(market, ob)
+            except Exception as _e:
+                logger.warning(f"[BOT] trend.analyse error ({market.question[:40]}): {_e}")
+                _record_error(str(_e))
+                continue
+
+            if sig is None:
+                try:
+                    sig = self._updown.analyse(market, ob)
+                except Exception as _e:
+                    logger.warning(f"[BOT] updown.analyse error ({market.question[:40]}): {_e}")
+                    _record_error(str(_e))
+                    continue
+
+            if sig is None:
+                continue
+
+            if self._already_positioned(market, token_id=sig.token_id):
+                continue
+
+            hours_to_close = None
+            if market.end_date:
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+                    _end  = _dt.fromisoformat(market.end_date.replace("Z", "+00:00"))
+                    _secs = (_end - _dt.now(_tz.utc)).total_seconds()
+                    hours_to_close = max(0.0, _secs / 3600)
+                except Exception:
+                    pass
+            sig.hours_to_close = hours_to_close
+            if ob:
+                sig.best_ask = ob.best_ask
+                sig.best_bid = ob.best_bid
+            if sig.side == "NO" and market.no_token:
+                try:
+                    no_ob = self._client.get_order_book(market.no_token.token_id)
+                    if no_ob and no_ob.best_ask < 0.99:
+                        sig.no_best_ask = no_ob.best_ask
+                except Exception:
+                    pass
+
+            signals_found += 1
+            self._dash_state.push_signal(sig)
+            pending_signals.append((sig, _asset))
+
+        # Sort by edge descending and execute only the SINGLE strongest signal.
+        # One high-conviction bet beats many weak correlated bets every time.
+        pending_signals.sort(key=lambda x: x[0].edge, reverse=True)
+        for sig, _asset in pending_signals[:1]:
+            if self._execute_signal(sig):
+                trades_placed += 1
+
+        self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
+        self._dash_state.exposure        = self._risk.total_exposure()
+
+        if signals_found == 0 and len(candidates) > 0:
+            logger.debug("No trades this loop — signal/edge threshold not met")
+        elif signals_found > 0 and trades_placed == 0:
+            logger.debug("Signals found but cap/guards blocked all trades")
+
+        logger.info(
+            f"-- Loop done — signals={signals_found}  trades={trades_placed}  "
+            f"exposure=${self._risk.total_exposure():.2f} --"
+        )
+
+
+def _record_error(msg: str) -> None:
+    """Append a runtime error to the error log so the analyst can read it."""
+    import json
+    from pathlib import Path
+    _ERROR_LOG = Path("data/bot_errors.jsonl")
+    try:
+        _ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _ERROR_LOG.open("a") as fh:
+            fh.write(json.dumps({"ts": int(time.time()), "error": msg}) + "\n")
+    except Exception:
+        pass

@@ -27,6 +27,8 @@ from src.signals import (
     _consecutive_window_trend,
     _btc_leadership_signal,
     _exchange_pressure,
+    _price_acceleration,
+    _multitf_consensus,
 )
 from src.fair_value import compute_updown_fair_value, compute_trendfollow_fair_value
 import config
@@ -56,6 +58,7 @@ class TradeSignal:
     best_bid: float | None = None
     no_best_ask: float | None = None   # NO token ask (fetched separately for NO trades)
     is_news_arb: bool = False
+    secs_into_window: float = 0.0
 
     def __str__(self) -> str:
         return (
@@ -109,10 +112,12 @@ _UPDOWN_ASSETS = {
 _MIN_MOMENTUM_PCT = 0.0005
 
 # Minimum window-relative return to generate a signal.
-# 0.08% means BTC moved 0.08% from window-start — enough edge to trade.
-# At 30s into a 5-min window, a 0.08% move gives ~60% probability of
-# staying in the same direction at resolution (Brownian bridge estimate).
-_MIN_WINDOW_RETURN_PCT = 0.0008
+# 0.25% means the asset moved 0.25% from window-start — statistically
+# significant momentum (~2-3σ from random walk). Below this, signals are
+# noise and win rate drops to ~50%.
+# The LLM analyst and learner can raise this further via analyst_params;
+# they cannot set it below this floor.
+_MIN_WINDOW_RETURN_PCT = 0.0025
 
 
 def _detect_updown_market(question: str) -> str | None:
@@ -311,22 +316,47 @@ class UpDownMomentumStrategy:
             _effective_secs = int(secs_in)
 
         window_return = _window_return(symbol, _effective_secs)
-        # Per-asset threshold overrides take priority over global threshold
+        # Per-asset threshold overrides take priority over global threshold.
+        # The analyst / learner can raise the threshold; _MIN_WINDOW_RETURN_PCT
+        # is a hard FLOOR — it can never be set below 0.25%.
         _asset_thresholds = _ap.get("asset_thresholds", {})
         _sig_thresh = float(
             _asset_thresholds.get(symbol.upper(),
             _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT))
         )
-        # Hard cap: LLM analyst must not raise signal_threshold above the calibrated
-        # default (0.08%). Higher values silence almost all UpDown signals since
-        # window returns are typically 0.02-0.1% in the first 30-60s.
-        _sig_thresh = min(_sig_thresh, _MIN_WINDOW_RETURN_PCT)
+        _sig_thresh = max(_sig_thresh, _MIN_WINDOW_RETURN_PCT)  # enforce floor
         if window_return is None:
             logger.debug(f"[UPDOWN] {symbol} skipped — window_return unavailable (lookback={_effective_secs}s, hist={int(_available_span if len(_hist_now)>=2 else 0)}s)")
             return None
         if abs(window_return) < _sig_thresh:
             logger.debug(f"[UPDOWN] {symbol} skipped — win_ret={window_return:+.4%} below thresh {_sig_thresh:.4%}")
             return None
+
+        # ── CONFIRMATION 0: momentum must be accelerating (not decelerating) ──
+        # If the trend is slowing down 45+ seconds in, mean reversion is likely.
+        # We skip — a fading move at 0.25% is still likely to revert by resolution.
+        if secs_in >= 45:
+            accel = _price_acceleration(symbol)
+            if accel is not None and (accel > 0) != (window_return > 0):
+                logger.debug(
+                    f"[UPDOWN] {symbol} skipped — momentum decelerating "
+                    f"(win_ret={window_return:+.4%}, accel={accel:+.4%})"
+                )
+                return None
+
+        # ── CONFIRMATION 0b: multi-timeframe consensus must agree ─────────────
+        # Require at least MEDIUM consensus from 30s/60s/5m timeframes.
+        # If all timeframes agree the direction is opposite, skip.
+        consensus_score, consensus_conf = _multitf_consensus(symbol)
+        if consensus_conf not in ("NONE",) and consensus_score != 0.0:
+            consensus_dir = "UP" if consensus_score > 0 else "DOWN"
+            signal_dir    = "UP" if window_return > 0 else "DOWN"
+            if consensus_dir != signal_dir:
+                logger.debug(
+                    f"[UPDOWN] {symbol} skipped — multitf consensus {consensus_dir} "
+                    f"contradicts signal {signal_dir} (conf={consensus_conf})"
+                )
+                return None
 
         # ── CONFIRMATION 1: consecutive window trend ─────────────────────────
         trend_score = _consecutive_window_trend(symbol)  # -1..+1, None = unknown
@@ -395,6 +425,7 @@ class UpDownMomentumStrategy:
             momentum_signal=float(window_return),
             imbalance_signal=float(pressure),
             is_latency_arb=False,
+            secs_into_window=float(secs_in),
         )
 
 
