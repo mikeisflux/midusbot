@@ -127,7 +127,35 @@ def _load_memory() -> list[dict]:
     return []
 
 
+# Phrases that indicate the LLM wrote a wrong memory entry about signal_threshold.
+# These are scrubbed before being fed back in so the bad reasoning doesn't compound.
+_BAD_MEMORY_PHRASES = (
+    "increased the signal threshold",
+    "increase the signal_threshold",
+    "raising signal_threshold",
+    "raised signal threshold",
+    "higher signal threshold",
+    "signal_threshold to allow for more trades",
+    "signal threshold to allow more trades",
+)
+
+
+def _is_bad_memory(observation: str) -> bool:
+    obs_lower = observation.lower()
+    return any(p in obs_lower for p in _BAD_MEMORY_PHRASES)
+
+
 def _append_memory(entry: dict) -> None:
+    obs = entry.get("observation", "")
+    if _is_bad_memory(obs):
+        # Replace the bad entry with a correction so the LLM learns the right direction
+        entry = dict(entry)
+        entry["observation"] = (
+            "CORRECTION: Previously tried raising signal_threshold to get more trades — "
+            "this was WRONG. signal_threshold is a fallback with no effect when all assets "
+            "have per-asset thresholds set. To get more trades, LOWER individual asset "
+            "thresholds (e.g. BTC from 0.00035 to 0.00025). Higher threshold = fewer trades."
+        )
     mem = _load_memory()
     mem.append(entry)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
