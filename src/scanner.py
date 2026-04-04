@@ -412,7 +412,7 @@ class ScannerMixin:
         _slots_left = _MAX_TRADES_PER_WINDOW - self._window_trade_count
 
         if _in_cooldown:
-            _windows_remaining = (_cooldown_until_window - _current_window) // 300
+            _windows_remaining = (self._cooldown_until_window - _current_window) // 300
             logger.debug(f"[WINDOW-LOCK] Post-trade cooldown — {_windows_remaining} window(s) remaining, holding {len(pending_signals)} signal(s)")
         elif _slots_left <= 0:
             logger.debug(f"[WINDOW-LOCK] Trade placed this window — holding remaining {len(pending_signals)} signal(s)")
