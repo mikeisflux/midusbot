@@ -656,14 +656,10 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
             model=CLAUDE_MODEL,
             max_tokens=8096,
             system=_SYSTEM_PROMPT,
-            messages=[
-                {"role": "user",      "content": prompt},
-                {"role": "assistant", "content": "{"},   # force JSON-only output
-            ],
+            messages=[{"role": "user", "content": prompt + "\n\nRespond with ONLY the JSON object. No preamble, no markdown, no explanation. Start your response with { and end with }."}],
         )
         elapsed = time.time() - t0
-        # Prepend the "{" we injected as the assistant prefill
-        raw = "{" + message.content[0].text
+        raw = message.content[0].text
     except Exception as exc:
         logger.warning(f"[ANALYST] Claude API call failed: {exc}")
         return None
