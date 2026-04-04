@@ -140,6 +140,25 @@ _DEFAULT_ASSET_THRESHOLDS: dict[str, float] = {
     "HYPE": 0.0008,   # 0.08%  — insufficient data; conservative
 }
 
+# Hard ceiling on the GLOBAL signal_threshold — analyst can never raise it
+# above this.  0.0015 = 0.15% (3× BTC default).  Above this the bot would
+# see essentially zero signals regardless of market conditions.
+_GLOBAL_THRESHOLD_CEIL: float = 0.0015
+
+# Hard ceiling on per-asset thresholds — analyst can raise thresholds to
+# filter noise but cannot set them so high that the asset never trades.
+_ASSET_THRESHOLD_CEILS: dict[str, float] = {
+    "BTC":  0.00120,  # never above 0.12%
+    "ETH":  0.00150,
+    "BNB":  0.00150,
+    "XRP":  0.00200,
+    "SOL":  0.00150,
+    "DOGE": 0.00250,
+    "HYPE": 0.00200,
+    "WIF":  0.00300,
+    "TRUMP":0.00300,
+}
+
 # Hard minimums — analyst/LLM can NEVER lower thresholds below these.
 # These exist because low thresholds cause the bot to trade on noise ticks.
 _ASSET_THRESHOLD_FLOORS: dict[str, float] = {
@@ -365,15 +384,16 @@ class UpDownMomentumStrategy:
         _asset_thresholds = _ap.get("asset_thresholds", {})
         _sym = symbol.upper()
         if _sym in _asset_thresholds:
-            # Explicit per-asset value — floor at hard minimum to prevent
-            # analyst from lowering thresholds to noise level
+            # Explicit per-asset value — clamp between hard floor and hard ceiling
+            # to prevent analyst from making thresholds noise-level or impossibly high.
             _hard_floor = _ASSET_THRESHOLD_FLOORS.get(_sym, 0.00025)
-            _sig_thresh = float(max(_hard_floor, _asset_thresholds[_sym]))
+            _hard_ceil  = _ASSET_THRESHOLD_CEILS.get(_sym, 0.00300)
+            _sig_thresh = float(max(_hard_floor, min(_hard_ceil, _asset_thresholds[_sym])))
         else:
-            # Fall back to per-asset default or global, whichever is available
+            # Fall back to per-asset default or global, clamped to valid range
             _global = float(max(
                 _MIN_WINDOW_RETURN_PCT,
-                _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT),
+                min(_GLOBAL_THRESHOLD_CEIL, _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT)),
             ))
             _sig_thresh = float(_DEFAULT_ASSET_THRESHOLDS.get(_sym, _global))
         if window_return is None:
