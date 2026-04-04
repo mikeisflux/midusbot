@@ -97,6 +97,13 @@ class RiskManager:
         if usdc <= 0:
             return 0.0
 
+        # Floor: if Kelly produces less than the minimum viable trade size,
+        # bump up to the floor so the signal actually fires. A minimum-size
+        # trade at positive edge is better than no trade.
+        _min_trade = config.MIN_ORDER_SHARES * 0.52  # 5 shares × $0.52 buffer
+        if usdc < _min_trade and signal.edge > 0:
+            usdc = _min_trade
+
         # UpDown HIGH-confidence signals allow larger positions to mirror
         # reference traders (200+ shares). Cap scales with confidence.
         # Bankroll-proportional: effective max = 12% of known wallet balance,

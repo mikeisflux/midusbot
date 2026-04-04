@@ -21,6 +21,9 @@ GAMMA_HOST: str = "https://gamma-api.polymarket.com"
 
 # ── Safety ───────────────────────────────────────────────────────────────────
 DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() != "false"
+# Set ANALYST_ENABLED=true to run the LLM analyst (disabled by default).
+# The analyst reads data/analyst_params.json for thresholds regardless.
+ANALYST_ENABLED: bool = os.getenv("ANALYST_ENABLED", "false").lower() == "true"
 # Set TRADING_PAUSED=true to stop all new buys without stopping the bot.
 # Position management and manual sells via /positions still work normally.
 TRADING_PAUSED: bool = os.getenv("TRADING_PAUSED", "false").lower() == "true"

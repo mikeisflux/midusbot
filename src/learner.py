@@ -290,6 +290,9 @@ class AdaptiveLearner:
         journal = [r for r in self._journal if r.closed]
         if len(journal) < 3:
             return   # not enough data for analyst to make any decision
+        if not config.ANALYST_ENABLED:
+            logger.debug("[Learner] Analyst disabled (ANALYST_ENABLED=false) — skipping timed run")
+            return
         logger.info("[Learner] 4h analyst trigger — running timed LLM analysis")
         self._last_analyst_run = time.time()
         import threading
@@ -460,16 +463,19 @@ class AdaptiveLearner:
         # Run in a daemon thread so the bot loop never stalls waiting for
         # the LLM. The analyst writes analyst_params.json when done; the
         # strategy picks them up on the next loop automatically.
-        import threading
-        self._last_analyst_run = time.time()  # record before thread starts
-        def _run_analyst():
-            try:
-                from src.analyst import analyse_and_update
-                analyse_and_update(self)
-            except Exception as exc:
-                logger.debug(f"[Learner] LLM analysis skipped: {exc}")
-        threading.Thread(target=_run_analyst, daemon=True, name="analyst").start()
-        logger.info("[Learner] LLM analyst started in background thread")
+        if config.ANALYST_ENABLED:
+            import threading
+            self._last_analyst_run = time.time()  # record before thread starts
+            def _run_analyst():
+                try:
+                    from src.analyst import analyse_and_update
+                    analyse_and_update(self)
+                except Exception as exc:
+                    logger.debug(f"[Learner] LLM analysis skipped: {exc}")
+            threading.Thread(target=_run_analyst, daemon=True, name="analyst").start()
+            logger.info("[Learner] LLM analyst started in background thread")
+        else:
+            logger.debug("[Learner] Analyst disabled (ANALYST_ENABLED=false) — skipping")
         self._save_params()
 
     # ------------------------------------------------------------------
