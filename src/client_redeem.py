@@ -120,10 +120,19 @@ class RedeemMixin:
 
         try:
             from web3 import Web3
-            from web3.middleware import geth_poa_middleware
 
             w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
-            w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+            # Polygon is PoA — inject middleware if available (web3 <7) or skip (web3 7+)
+            try:
+                from web3.middleware import geth_poa_middleware
+                w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+            except ImportError:
+                try:
+                    from web3.middleware import ExtraDataToPOAMiddleware
+                    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                except ImportError:
+                    pass  # web3 7.x handles PoA natively; no middleware needed
 
             account = w3.eth.account.from_key(config.PRIVATE_KEY)
             ctf     = w3.eth.contract(
@@ -145,8 +154,10 @@ class RedeemMixin:
                 "gas":   200_000,
             })
 
-            signed = w3.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
-            tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+            signed  = w3.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
+            # web3 7.x uses raw_transaction; 6.x used rawTransaction
+            raw_tx  = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            tx_hash = w3.eth.send_raw_transaction(raw_tx)
             receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
             logger.info(
                 f"[CTF] Redeemed {condition_id[:16]}  "
