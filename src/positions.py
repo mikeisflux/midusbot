@@ -368,10 +368,11 @@ class PositionsMixin:
             sim_shares = round(actual_cost / sim_entry, 4) if sim_entry > 0 else shares
             self._sim.open_position(
                 token_id=sig.token_id,
+                market_id=sig.market_id,
+                question=sig.question,
                 side=sig.side,
                 entry_price=sim_entry,
                 shares=sim_shares,
-                cost_usdc=actual_cost,
             )
             self._queue_sim(sig, sim_entry, sim_shares)
 
