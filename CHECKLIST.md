@@ -115,4 +115,15 @@ Check off each item as it ships to production.
 
 ---
 
-*All 80 items complete — last updated: 2026-04-04 (session 3)*
+## Claude Code Integration
+
+- [x] **CLAUDE.md** — Project memory file: architecture, trading rules, build commands, safety reminders, debugging guide; auto-loaded by Claude Code in every session
+- [x] **`.claude/settings.json`** — Full wildcard permissions (`Bash(*)`, `Read(*)`, `Write(*)`, `Edit(*)`); no approval popups; post-write hook runs `py_compile` automatically
+- [x] **`.claude/hooks/`** — `post_write_audit.sh` runs syntax check on every edited Python file; pre-write/pre-bash hooks available for safety
+- [x] **`.mcp.json` + `src/mcp_server.py`** — Custom MCP server exposes bot state to Claude Code: `bot_state`, `recent_trades`, `session_stats`, `analyst_history`, `alpha_decay`, `feature_importance`, `backtest` tools
+- [x] **`.claude/commands/`** — 6 slash commands: `/status`, `/tune`, `/backtest`, `/risk`, `/deploy`, `/debug`
+- [x] **`!claude` Discord command** — `!claude <prompt>` invokes Claude Code CLI with `--dangerously-skip-permissions` (full authority, no popups); streams response back to Discord channel
+
+---
+
+*All 80 items + Claude Code integration complete — last updated: 2026-04-04 (session 4)*

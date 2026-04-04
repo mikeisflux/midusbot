@@ -20,6 +20,7 @@ Commands:
   !live      — switch to live trading
   !dry       — switch to dry-run
   !refactor <text> — trigger LLM analyst with a custom instruction
+  !claude <prompt> — run Claude Code with full authority (rewrites, server management)
   !help      — list commands
 
 Runs as a daemon thread — never blocks the trading loop.
@@ -27,8 +28,11 @@ Runs as a daemon thread — never blocks the trading loop.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 import requests
@@ -42,6 +46,21 @@ if TYPE_CHECKING:
 
 GATEWAY_URL   = "wss://gateway.discord.gg/?v=10&encoding=json"
 DISCORD_API   = "https://discord.com/api/v10"
+
+
+def _split_discord(text: str, limit: int = 1900) -> list[str]:
+    """Split a long string into chunks that fit within Discord's message limit."""
+    chunks, current = [], []
+    size = 0
+    for line in text.splitlines(keepends=True):
+        if size + len(line) > limit and current:
+            chunks.append("".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line)
+    if current:
+        chunks.append("".join(current))
+    return chunks or [""]
 
 # Gateway intents: GUILD_MESSAGES (1<<9) + MESSAGE_CONTENT (1<<15)
 INTENTS = (1 << 9) | (1 << 15)   # 512 + 32768 = 33280
@@ -261,6 +280,12 @@ class DiscordCommander:
             result = self.do_reset_dry()
             self.send(f"✅ {result}")
 
+        elif cmd == "!claude":
+            if not arg:
+                self.send("Usage: `!claude <prompt>` — e.g. `!claude check alpha decay and tune BTC threshold`")
+                return
+            self._run_claude(arg)
+
         elif cmd == "!help":
             self.send(
                 "**MIDUSBOT Commands**\n"
@@ -270,9 +295,56 @@ class DiscordCommander:
                 "`!stop` — graceful shutdown\n"
                 "`!resetdryrun` — reset sim wallet back to $150\n"
                 "`!refactor <text>` — trigger LLM analyst\n"
+                "`!claude <prompt>` — run Claude Code (full authority: rewrites, tuning, debug)\n"
             )
         else:
             self.send(f"Unknown command `{cmd}`. Type `!help` for a list.")
+
+    # ------------------------------------------------------------------
+
+    def _run_claude(self, prompt: str) -> None:
+        """
+        Run Claude Code CLI with full authority and stream the response back to Discord.
+        Runs in a background thread so it doesn't block the gateway loop.
+        Full permissions: no approval prompts, all tools allowed.
+        """
+        def _worker() -> None:
+            self.send(f"🤖 Claude running: _{prompt[:100]}_")
+            try:
+                # Run claude CLI with --print (non-interactive), --dangerously-skip-permissions
+                # so no approval popups block execution.
+                env = {**os.environ, "DRY_RUN": os.environ.get("DRY_RUN", "true")}
+                result = subprocess.run(
+                    [
+                        "claude",
+                        "--dangerously-skip-permissions",
+                        "--print",
+                        prompt,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    cwd=str(Path(__file__).parent.parent),
+                    env=env,
+                )
+                output = (result.stdout or "").strip()
+                stderr = (result.stderr or "").strip()
+                if not output and stderr:
+                    output = stderr
+                if not output:
+                    output = "(no output)"
+                # Discord message limit is 2000 chars — split if needed
+                for chunk in _split_discord(output, limit=1900):
+                    self.send(f"```\n{chunk}\n```")
+            except subprocess.TimeoutExpired:
+                self.send("⚠️ Claude timed out after 5 minutes.")
+            except FileNotFoundError:
+                self.send("⚠️ `claude` CLI not found. Install with: `npm install -g @anthropic-ai/claude-code`")
+            except Exception as exc:
+                self.send(f"⚠️ Claude error: {exc}")
+
+        t = threading.Thread(target=_worker, daemon=True, name="discord-claude")
+        t.start()
 
     # ------------------------------------------------------------------
 
