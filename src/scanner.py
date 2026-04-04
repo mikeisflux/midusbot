@@ -297,7 +297,7 @@ class ScannerMixin:
                 continue
 
             _win_mins = _updown_window_mins(market.question)
-            if _win_mins not in (5, 15):  # support 5-min and 15-min windows
+            if _win_mins != 5:  # 5-min UpDown only — oracle lag edge is weaker on longer windows
                 continue
 
             if self._already_positioned(market):
