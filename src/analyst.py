@@ -591,7 +591,55 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
     new["trades_at_last_run"] = len(rows)
     new["wins_at_last_run"]   = sum(1 for r in rows if r["win"])
 
-    save_params(new)
+    # ── SUGGESTION-ONLY MODE: do NOT write params, send to Discord instead ─────
+    # The analyst now acts as an advisor only. All parameter changes must be
+    # applied manually by the operator via Discord (!claude ...) or direct edits.
+    # This prevents the analyst from autonomously degrading trading performance.
+    _param_keys = (
+        "signal_threshold","min_trend_score","skip_assets","prefer_assets",
+        "max_secs_in","kelly_override","time_of_day_skip","asset_thresholds",
+        "min_price_history_s",
+    )
+    _suggested = {k: new[k] for k in _param_keys if k in new}
+    _current   = {k: params.get(k) for k in _param_keys}
+    _changed   = {k: v for k, v in _suggested.items() if v != _current.get(k)}
+
+    # Only save non-param fields (run tracking, memory, history metadata)
+    _saved = dict(params)
+    _saved["_runs"]              = new["_runs"]
+    _saved["_last_run_at"]       = new["_last_run_at"]
+    _saved["_last_reasoning"]    = new["_last_reasoning"]
+    _saved["trades_at_last_run"] = new["trades_at_last_run"]
+    _saved["wins_at_last_run"]   = new["wins_at_last_run"]
+    if ww_mrd:
+        _saved["ww_mrd_action"] = ww_mrd
+    if strategy:
+        _saved["analysis_strategy"] = strategy
+    save_params(_saved)
+
+    # Send suggested param changes to Discord
+    try:
+        from src.utils import alerter
+        if _changed:
+            _lines = [f"**[ANALYST] Run #{new['_runs']} — suggestions (NOT applied)**"]
+            _lines.append(f"WW_MRD: {ww_mrd}")
+            _lines.append(f"Reasoning: {reasoning[:300]}")
+            _lines.append("**Suggested changes:**")
+            for k, v in _changed.items():
+                _lines.append(f"  `{k}`: {_current.get(k)} → {v}")
+            _lines.append("_Apply with: `!claude update analyst_params.json with the analyst's suggestions`_")
+            alerter.send("\n".join(_lines), level="info")
+        else:
+            alerter.send(
+                f"**[ANALYST] Run #{new['_runs']}** — no param changes suggested.\n"
+                f"WW_MRD: {ww_mrd}",
+                level="info",
+            )
+    except Exception:
+        pass
+
+    # Keep new as the full suggested state for history logging below
+    new = {**_saved, **_suggested}
 
     # ── Append to unlimited memory ─────────────────────────────────────────
     if mem_entry:

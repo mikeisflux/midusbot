@@ -410,7 +410,12 @@ class PositionsMixin:
         shares = self._risk.shares_from_usdc(usdc, limit_price)
 
         if shares < config.MIN_ORDER_SHARES:
-            logger.debug(f"Skipping — {shares:.2f} shares below Polymarket minimum ({config.MIN_ORDER_SHARES})")
+            logger.info(
+                f"[SIZE] Skipping {_detect_updown_market(sig.question)} {sig.side} — "
+                f"kelly_size=${usdc:.2f} → {shares:.2f} shares @ {limit_price:.3f} "
+                f"(need {config.MIN_ORDER_SHARES}, edge={sig.edge:.1%}). "
+                f"Raise kelly_override or wait for higher-edge signal."
+            )
             return False
 
         kind = "arb" if sig.is_latency_arb else "divergence"
