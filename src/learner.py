@@ -376,46 +376,51 @@ class AdaptiveLearner:
             f"TP={self.risk_params.take_profit_pct:.0%}"
         )
 
-        # ── 5. Per-asset threshold adaptation ────────────────────────────
-        # Independently adjust per-asset signal thresholds in analyst_params.json
-        # based on per-asset win rates. Runs every adaptation cycle without
-        # waiting for the LLM.
+        # ── 5. Per-asset threshold adaptation via session accuracy ──────────
+        # Use ground-truth window direction accuracy (from session_tracker) rather
+        # than trade win/loss to calibrate thresholds. Session data captures every
+        # window the bot scanned — not just the ones it bet on — giving 10-100×
+        # more data points and no bias from entry price or position sizing.
         try:
             from src.analyst import load_params as _load_ap, save_params as _save_ap
-            _FLOOR = 0.0005   # never go below 0.05%
-            _CEIL  = 0.005    # never go above 0.50%
+            from src.session_tracker import get_all_stats as _session_stats
+            _FLOOR = 0.0001   # absolute minimum threshold (0.01%)
+            _CEIL  = 0.005    # absolute maximum threshold (0.50%)
+            _MIN_WINDOWS = 10  # need at least 10 windows of session data to adapt
 
-            ap             = _load_ap()
-            asset_thresh   = dict(ap.get("asset_thresholds", {}))
-            global_thresh  = float(ap.get("signal_threshold", 0.0008))
-
-            # Group recent closed trades by asset
-            asset_groups: dict[str, list] = {}
-            for r in closed:
-                a = _asset_symbol(r.question)
-                if a != "UNKNOWN":
-                    asset_groups.setdefault(a, []).append(r)
+            ap           = _load_ap()
+            asset_thresh = dict(ap.get("asset_thresholds", {}))
+            global_thresh = float(ap.get("signal_threshold", 0.0008))
+            stats        = _session_stats(lookback=60)
 
             changed = []
-            for asset, trades in asset_groups.items():
-                if len(trades) < 3:   # need at least 3 per asset to act
+            for asset, s in stats.items():
+                # Only act on assets where the bot actually generated signals
+                if s.get("signal_windows", 0) < _MIN_WINDOWS:
                     continue
-                wr  = mean([1.0 if r.pnl_usdc > 0 else 0.0 for r in trades])
+                accuracy = s.get("signal_accuracy", 0.5)
                 cur = asset_thresh.get(asset, global_thresh)
-                if wr < 0.45:
-                    new_t = min(_CEIL,  cur * 1.10)  # +10% — losing too much
-                elif wr > 0.60:
-                    new_t = max(_FLOOR, cur * 0.97)  # -3%  — winning, loosen
+                if accuracy < 0.45:
+                    # Direction prediction worse than random — raise threshold,
+                    # demand a stronger signal before betting
+                    new_t = min(_CEIL, cur * 1.10)
+                elif accuracy > 0.60:
+                    # Direction prediction consistently right — lower threshold
+                    # slightly to capture more of these good signals
+                    new_t = max(_FLOOR, cur * 0.97)
                 else:
-                    continue
+                    continue   # 45–60% accuracy: leave threshold alone
                 if abs(new_t - cur) > 1e-8:
                     asset_thresh[asset] = round(new_t, 6)
-                    changed.append(f"{asset}: {cur:.5f}→{new_t:.5f} (wr={wr:.0%})")
+                    changed.append(
+                        f"{asset}: {cur:.5f}→{new_t:.5f} "
+                        f"(acc={accuracy:.0%}, n={s['signal_windows']}w)"
+                    )
 
             if changed:
                 ap["asset_thresholds"] = asset_thresh
                 _save_ap(ap)
-                logger.info(f"[Learner] Per-asset thresholds: {', '.join(changed)}")
+                logger.info(f"[Learner] Per-asset thresholds from session data: {', '.join(changed)}")
         except Exception as _e:
             logger.debug(f"[Learner] Per-asset threshold update skipped: {_e}")
 

@@ -309,8 +309,10 @@ class ScannerMixin:
             self._dash_state.push_signal(sig)
             pending_signals.append((sig, _asset))
 
-        # Sort by edge descending — take only the single strongest signal per loop
-        pending_signals.sort(key=lambda x: x[0].edge, reverse=True)
+        # Sort by relative strength (|window_return| / threshold) descending.
+        # A signal that exceeds its own threshold by 2× beats one that barely
+        # exceeds a lower threshold — ensures per-asset calibration is respected.
+        pending_signals.sort(key=lambda x: x[0].rel_strength, reverse=True)
         for sig, _asset in pending_signals[:1]:
             if self._execute_signal(sig):
                 trades_placed += 1

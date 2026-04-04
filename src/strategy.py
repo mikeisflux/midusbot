@@ -19,6 +19,7 @@ import numpy as np
 from loguru import logger
 
 from src.client import Market, OrderBook
+from src import session_tracker as _st
 from src.signals import (
     _PRICE_HISTORY,
     _PRICE_LOCK,
@@ -59,6 +60,7 @@ class TradeSignal:
     no_best_ask: float | None = None   # NO token ask (fetched separately for NO trades)
     is_news_arb: bool = False
     secs_into_window: float = 0.0
+    rel_strength: float = 0.0   # |window_return| / threshold — used for best-signal ranking
 
     def __str__(self) -> str:
         return (
@@ -292,6 +294,9 @@ class UpDownMomentumStrategy:
         if live_price is None:
             logger.debug(f"[UPDOWN] {symbol} skipped — no live price from feed")
             return None
+        # Notify session tracker on every scan so window opens/closes are captured
+        # regardless of whether a signal fires. Direction is filled in below if signal fires.
+        _st.update(symbol, live_price)
         hist = _PRICE_HISTORY.get(symbol.upper(), [])
         if len(hist) < 2:
             logger.debug(f"[UPDOWN] {symbol} skipped — price history empty")
@@ -425,12 +430,22 @@ class UpDownMomentumStrategy:
         )
         pressure = _exchange_pressure(symbol)
 
+        # Relative strength: how much does this signal exceed its own threshold?
+        # BTC at 0.04% with 0.035% threshold = 1.14×  (stronger relative signal)
+        # SOL at 0.04% with 0.080% threshold = 0.50×  (weaker relative signal)
+        # This is the sort key used to pick the single best trade per loop.
+        rel_strength = abs(window_return) / _sig_thresh if _sig_thresh > 0 else 0.0
+
         logger.info(
             f"[UPDOWN] {symbol} {direction}  "
-            f"win_ret={window_return:+.4%}  trend={f'{trend_score:+.2f}' if trend_score is not None else 'N/A'}  btc={btc_lead:+.4%}  "
+            f"win_ret={window_return:+.4%}  thresh={_sig_thresh:.4%}  rel={rel_strength:.2f}×  "
+            f"trend={f'{trend_score:+.2f}' if trend_score is not None else 'N/A'}  btc={btc_lead:+.4%}  "
             f"fair={fair_value:.3f}  mkt={mkt_price:.3f}  edge={edge:+.3f}  "
             f"t={secs_in:.0f}s  → {side} [{confidence}]  \"{market.question[:45]}\""
         )
+
+        # Record signal direction in session tracker so we can measure accuracy later
+        _st.update(symbol, live_price, signal_direction=direction)
 
         return TradeSignal(
             market_id=market.id,
@@ -446,6 +461,7 @@ class UpDownMomentumStrategy:
             imbalance_signal=float(pressure),
             is_latency_arb=False,
             secs_into_window=float(secs_in),
+            rel_strength=rel_strength,
         )
 
 
