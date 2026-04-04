@@ -112,12 +112,12 @@ _UPDOWN_ASSETS = {
 _MIN_MOMENTUM_PCT = 0.0005
 
 # Minimum window-relative return to generate a signal.
-# 0.25% means the asset moved 0.25% from window-start — statistically
-# significant momentum (~2-3σ from random walk). Below this, signals are
-# noise and win rate drops to ~50%.
+# 0.08% floor: typical 5-min crypto move is 0.03-0.10%, so this admits
+# real momentum while blocking pure noise. Quality filtering (acceleration,
+# multitf consensus) rejects weak signals above the floor.
 # The LLM analyst and learner can raise this further via analyst_params;
 # they cannot set it below this floor.
-_MIN_WINDOW_RETURN_PCT = 0.0025
+_MIN_WINDOW_RETURN_PCT = 0.0008
 
 
 def _detect_updown_market(question: str) -> str | None:
