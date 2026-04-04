@@ -38,6 +38,23 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     exit 1
 fi
 
+cd "$REPO_DIR"
+
+# ── Safety: clean up any pre-existing dirty files ────────────────────────────
+# If a previous auto-improve run left uncommitted changes (e.g. py_compile
+# failed mid-run and Claude bailed), stash them away so git pull works cleanly.
+DIRTY_BEFORE=$(git status --porcelain | grep -v '^??' | wc -l)
+if [ "$DIRTY_BEFORE" -gt 0 ]; then
+    echo "[$(date)] WARNING: found $DIRTY_BEFORE dirty file(s) before run — stashing" >> "$LOG_FILE"
+    git stash push -m "auto_improve pre-run stash $(date +%s)" >> "$LOG_FILE" 2>&1 || true
+fi
+
+# Record the commit we started at so we can roll back if Claude breaks things
+PRE_RUN_HASH=$(git rev-parse HEAD)
+echo "[$(date)] Pre-run commit: $PRE_RUN_HASH" >> "$LOG_FILE"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 PROMPT="You are the autonomous engineering agent for Midusbot, a Polymarket 5-minute UpDown trading bot.
 You have two roles: (1) maintenance engineer — keep the bot healthy and bug-free, and (2) senior quant developer — proactively improve it to make as much money as possible.
 
@@ -139,6 +156,58 @@ OUTPUT=$(claude \
     2>&1)
 
 echo "$OUTPUT" >> "$LOG_FILE"
+
+# ── Safety: smoke-test the bot before declaring success ──────────────────────
+# If Claude left dirty uncommitted files, or committed something that breaks
+# imports, catch it here and roll back completely.
+
+# First revert any files Claude modified but forgot to commit
+DIRTY_AFTER=$(git status --porcelain | grep -v '^??' | wc -l)
+if [ "$DIRTY_AFTER" -gt 0 ]; then
+    echo "[$(date)] WARNING: Claude left $DIRTY_AFTER uncommitted change(s) — reverting dirty files" >> "$LOG_FILE"
+    git checkout -- . >> "$LOG_FILE" 2>&1 || true
+fi
+
+# Now smoke-test: can the bot actually import?
+VENV_PYTHON="$REPO_DIR/venv/bin/python"
+[ -x "$VENV_PYTHON" ] || VENV_PYTHON="python3"
+
+echo "[$(date)] Running smoke test..." >> "$LOG_FILE"
+if ! "$VENV_PYTHON" -c "from src.bot import PolymarketBot" >> "$LOG_FILE" 2>&1; then
+    echo "[$(date)] SMOKE TEST FAILED — rolling back to $PRE_RUN_HASH" >> "$LOG_FILE"
+
+    # Revert any uncommitted changes
+    git checkout -- . >> "$LOG_FILE" 2>&1 || true
+
+    # Revert any new commits Claude made
+    POST_RUN_HASH=$(git rev-parse HEAD)
+    if [ "$POST_RUN_HASH" != "$PRE_RUN_HASH" ]; then
+        git reset --hard "$PRE_RUN_HASH" >> "$LOG_FILE" 2>&1
+        git push --force origin "$(git branch --show-current)" >> "$LOG_FILE" 2>&1 || true
+        echo "[$(date)] Rolled back commits from $POST_RUN_HASH to $PRE_RUN_HASH and force-pushed" >> "$LOG_FILE"
+    fi
+
+    ROLLBACK_MSG="auto-improve ROLLBACK: smoke test failed after Claude's changes — reverted to $PRE_RUN_HASH"
+    echo "[$(date)] $ROLLBACK_MSG" >> "$LOG_FILE"
+
+    # Notify Discord of rollback
+    DISCORD_WEBHOOK="${DISCORD_WEBHOOK_URL:-}"
+    if [ -n "$DISCORD_WEBHOOK" ]; then
+        PAYLOAD=$(python3 -c "
+import json, sys
+msg = sys.stdin.read().strip()[:1800]
+print(json.dumps({'content': f'🚨 **[auto-improve] ROLLBACK** — bot failed smoke test after autonomous changes. Reverted to safe commit. Check logs/auto_improve_$(date +%Y-%m-%d).log'}))
+" <<< "$ROLLBACK_MSG")
+        curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" > /dev/null || true
+    fi
+
+    echo "[$(date)] auto_improve complete (ROLLED BACK)" >> "$LOG_FILE"
+    exit 1
+fi
+
+echo "[$(date)] Smoke test passed" >> "$LOG_FILE"
 echo "[$(date)] auto_improve complete" >> "$LOG_FILE"
 
 # Send summary to Discord if webhook is configured
