@@ -531,6 +531,27 @@ OUTPUT — respond ONLY with valid JSON, no extra text:
 # Prompt builder
 # ---------------------------------------------------------------------------
 
+def _session_stats_str() -> str:
+    """Format session tracker accuracy stats for the LLM prompt."""
+    try:
+        from src.session_tracker import get_all_stats
+        stats = get_all_stats(lookback=100)
+        if not stats:
+            return "(no session data yet — needs 1+ completed windows)"
+        lines = []
+        for sym, s in sorted(stats.items()):
+            if not s:
+                continue
+            lines.append(
+                f"  {sym}: {s.get('total_windows',0)} windows  "
+                f"signal_acc={s.get('signal_accuracy',0):.1%}({s.get('signal_windows',0)} signals)  "
+                f"avg_move={s.get('avg_move_pct',0)*100:.3f}%"
+            )
+        return "\n".join(lines) if lines else "(no sessions logged yet)"
+    except Exception as exc:
+        return f"(session stats unavailable: {exc})"
+
+
 def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> str:
     total = len(rows)
     wins  = sum(1 for r in rows if r["win"])
@@ -578,6 +599,7 @@ def _build_prompt(rows, asset_stats, hour_stats, params, delta, memory_ctx) -> s
     p.append(f"Last {total} trades: {wins}W / {total-wins}L ({wr:.1%})")
     p.append(f"\nAsset stats:\n{json.dumps(asset_stats, indent=2)}")
     p.append(f"\nWin rate by hour (UTC):\n{json.dumps(hour_stats, indent=2)}")
+    p.append(f"\nSession tracker (signal direction accuracy per 5-min window — ground truth, not trade-filtered):\n{_session_stats_str()}")
     p.append(f"\nLast 10 trades:\n{json.dumps(rows[-10:], indent=2)}")
     p.append(f"\nCurrent parameters:\n{json.dumps({k: v for k, v in params.items() if not k.startswith('_') and k not in ('analysis_strategy','ww_mrd_action','trades_at_last_run','wins_at_last_run')}, indent=2)}")
     p.append("")

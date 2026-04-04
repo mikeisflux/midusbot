@@ -68,7 +68,11 @@ _COINGECKO_IDS: dict[str, str] = {
 
 _PRICE_CACHE: dict[str, tuple[float, float]] = {}     # symbol → (price, timestamp)
 _EXCHANGE_PRESSURE: dict[str, float] = {}            # symbol → bid/ask imbalance (-1..+1)
-_CACHE_TTL = 2.0   # seconds
+_CACHE_TTL       = 2.0   # seconds — fresh price window (WS keeps this hot)
+_CACHE_TTL_STALE = 60.0  # seconds — stale-but-usable fallback when WS/REST fail
+
+# Feed health: track last WS tick time per symbol for diagnostics
+_LAST_WS_TICK: dict[str, float] = {}  # symbol → timestamp of last WS aggTrade
 
 # Rolling 60-second price history for momentum: symbol → [(price, ts), ...]
 _PRICE_HISTORY: dict[str, list[tuple[float, float]]] = {}
@@ -83,15 +87,26 @@ _PRICE_LOCK = _threading.RLock()
 # ---------------------------------------------------------------------------
 
 def _fetch_price(symbol: str) -> float | None:
-    """Fetch live price for any supported symbol (cached 2 s)."""
+    """
+    Fetch live price for any supported symbol.
+
+    Priority:
+      1. In-process cache (written by BinanceWSFeed WS thread) — if < 2s old
+      2. Binance REST fallback — single ticker, no rate limit
+      3. CoinGecko REST fallback — slower, rate-limited
+      4. Stale cache — if < 60s old, use last known price rather than returning None
+         (handles low-volume assets like HYPE whose WS ticks are infrequent)
+    """
     sym = symbol.upper()
     cached = _PRICE_CACHE.get(sym)
-    if cached and (time.time() - cached[1]) < _CACHE_TTL:
-        return cached[0]
+    now = time.time()
+
+    if cached and (now - cached[1]) < _CACHE_TTL:
+        return cached[0]   # fresh WS price
 
     price: float | None = None
 
-    # Try Binance first (fastest, no rate limit for single ticker)
+    # Try Binance REST first (fastest, no rate limit for single ticker)
     if sym in _BINANCE_FEEDS:
         try:
             r = requests.get(_BINANCE_FEEDS[sym], timeout=3)
@@ -112,6 +127,11 @@ def _fetch_price(symbol: str) -> float | None:
             price = float(r.json()[cg_id]["usd"])
         except Exception:
             pass
+
+    # Stale-cache fallback — for low-volume assets (HYPE, etc.) whose WS ticks
+    # are infrequent. Use last known price if < 60s old rather than returning None.
+    if price is None and cached and (now - cached[1]) < _CACHE_TTL_STALE:
+        return cached[0]
 
     if price is not None:
         _PRICE_CACHE[sym] = (price, time.time())

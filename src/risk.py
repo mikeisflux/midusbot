@@ -80,14 +80,22 @@ class RiskManager:
 
         # UpDown HIGH-confidence signals allow larger positions to mirror
         # reference traders (200+ shares). Cap scales with confidence.
+        # Bankroll-proportional: effective max = 12% of known wallet balance,
+        # but never exceeds config.MAX_POSITION_USDC (protects during drawdown).
+        _wallet_pct = 0.12
+        effective_max = (
+            min(self._wallet_balance * _wallet_pct, config.MAX_POSITION_USDC)
+            if self._wallet_balance > 0
+            else config.MAX_POSITION_USDC
+        )
         from src.strategy import _detect_updown_market
         is_updown = _detect_updown_market(signal.question) is not None
         if is_updown and signal.confidence == "HIGH":
-            pos_cap = config.MAX_POSITION_USDC * 3.0
+            pos_cap = effective_max * 3.0
         elif is_updown and signal.confidence == "MEDIUM":
-            pos_cap = config.MAX_POSITION_USDC * 1.5
+            pos_cap = effective_max * 1.5
         else:
-            pos_cap = config.MAX_POSITION_USDC
+            pos_cap = effective_max
 
         capped = min(usdc, pos_cap)
 

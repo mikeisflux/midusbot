@@ -42,6 +42,31 @@ import config
 import src.webui as webui
 
 
+def _seed_analyst_params() -> None:
+    """
+    Write history-informed defaults to analyst_params.json if the file is
+    missing, empty, or has an empty asset_thresholds dict.
+    Safe to call on every startup — won't overwrite values already set.
+    """
+    from src.analyst import load_params, save_params, DEFAULT_PARAMS
+    params = load_params()
+    changed = False
+
+    # Seed asset_thresholds if empty (fresh install or server wipe)
+    if not params.get("asset_thresholds"):
+        params["asset_thresholds"] = dict(DEFAULT_PARAMS["asset_thresholds"])
+        changed = True
+        logger.info("[BOT] Seeded asset_thresholds from history-informed defaults")
+
+    # Ensure signal_threshold has a sensible floor
+    if not params.get("signal_threshold"):
+        params["signal_threshold"] = DEFAULT_PARAMS["signal_threshold"]
+        changed = True
+
+    if changed:
+        save_params(params)
+
+
 @dataclass
 class OpenPosition:
     market_id: str
@@ -85,6 +110,9 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
         signal.signal(signal.SIGTERM, self._shutdown)
 
     def run(self) -> None:
+        # Auto-seed analyst_params.json with history-informed defaults if missing/empty
+        _seed_analyst_params()
+
         mode = "[DRY-RUN]" if config.DRY_RUN else "[LIVE]"
         logger.info(f"Polymarket bot starting — {mode}")
         logger.info(
@@ -97,6 +125,7 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
         self._running = True
         self._dashboard.start()
         self._price_feed.start()
+        self._warmup_until = time.time() + 90  # block trading for 90s while price history warms up
 
         webui.start(self._dash_state, port=8080, learner=self._learner,
                     close_position_fn=self._close_position, sim=self._sim)

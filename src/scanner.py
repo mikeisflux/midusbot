@@ -86,7 +86,8 @@ class ScannerMixin:
             logger.info(
                 f"Filter drops: inactive={n_inactive} price={n_price} "
                 f"liquidity={n_liquidity} volume={n_volume} "
-                f"too_soon={n_toosoon} too_late={n_toolate} no_date={n_nodate} expired={n_expired}"
+                f"too_soon={n_toosoon} too_late={n_toolate}(non-UD>48h) "
+                f"no_date={n_nodate} expired={n_expired}"
             )
 
         filtered.sort(key=lambda x: x[1])
@@ -181,6 +182,7 @@ class ScannerMixin:
         if not config.DRY_RUN and self._dash_state.loop_count % 20 == 0:
             self._reconcile_positions()
 
+        self._learner.maybe_run_analyst_timed()
         self._process_sim_queue()
         self._manage_positions()
 
@@ -188,19 +190,31 @@ class ScannerMixin:
             _fetch_price(sym)
 
         if self._dash_state.loop_count % 4 == 1:
-            from src.signals import _PRICE_CACHE, _PRICE_HISTORY
+            from src.signals import _PRICE_CACHE, _PRICE_HISTORY, _LAST_WS_TICK
             import time as _time
             _now = _time.time()
             parts = []
-            for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"):
-                cached = _PRICE_CACHE.get(sym)
-                hist   = _PRICE_HISTORY.get(sym, [])
-                ticks  = len(hist)
-                span   = int(hist[-1][1] - hist[0][1]) if len(hist) >= 2 else 0
+            silent_assets = []
+            for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"):
+                cached    = _PRICE_CACHE.get(sym)
+                hist      = _PRICE_HISTORY.get(sym, [])
+                ticks     = len(hist)
+                span      = int(hist[-1][1] - hist[0][1]) if len(hist) >= 2 else 0
+                last_tick = _LAST_WS_TICK.get(sym)
                 price_str = f"${cached[0]:,.2f}" if cached else "-"
-                status = f"✓{ticks}t/{span}s" if ticks >= 5 and span >= 90 else f"⏳{ticks}t/{span}s"
+                if last_tick and (_now - last_tick) < 120:
+                    status = f"✓{ticks}t/{span}s"
+                elif ticks >= 5 and span >= 90:
+                    status = f"⚠REST{ticks}t/{span}s"  # has data but WS silent > 2 min
+                    silent_assets.append(sym)
+                else:
+                    status = f"⏳{ticks}t/{span}s"
+                    if ticks == 0:
+                        silent_assets.append(sym)
                 parts.append(f"{sym}={price_str}({status})")
             logger.info("Feed: " + "  ".join(parts))
+            if silent_assets:
+                logger.warning(f"Feed: WS silent for {silent_assets} — using REST/stale fallback")
 
         self._dash_state.add_exec_log("scan",
             f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '...'} markets")
@@ -233,6 +247,20 @@ class ScannerMixin:
             if sym:
                 _updown_assets_held.add(sym)
 
+        # Cross-window correlation cooldown: block correlated assets for 1 full
+        # 5-min window after a bet (300s). BTC/ETH/BNB/SOL/XRP/DOGE are highly
+        # correlated — concurrent bets are ~6× leveraged on the same direction.
+        _CORRELATED = {"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE"}
+        _cooldown_map: dict[str, float] = getattr(self, "_asset_last_bet", {})
+        if not hasattr(self, "_asset_last_bet"):
+            self._asset_last_bet: dict[str, float] = {}
+            _cooldown_map = self._asset_last_bet
+        _COOLDOWN_SECS = 300
+        _cooled_out: set[str] = set()
+        for _sym, _ts in _cooldown_map.items():
+            if time.time() - _ts < _COOLDOWN_SECS:
+                _cooled_out.add(_sym)
+
         # Collect all valid signals, then execute only the single best.
         # BTC/ETH/SOL/XRP/DOGE/BNB are 90%+ correlated — betting all at once
         # is 6× leverage on one direction, not diversification.
@@ -255,6 +283,10 @@ class ScannerMixin:
                     market.no_token.token_id in self._positions):
                 continue
             if _asset in _updown_assets_held:
+                continue
+            # Block correlated assets if one was bet recently (cross-window cooldown)
+            if _asset in _CORRELATED and _asset in _cooled_out:
+                logger.debug(f"[COOLDOWN] Skipping {_asset} — cooldown active ({_COOLDOWN_SECS}s)")
                 continue
 
             _secs = _market_seconds_into_window(market)
@@ -316,6 +348,8 @@ class ScannerMixin:
         for sig, _asset in pending_signals[:1]:
             if self._execute_signal(sig):
                 trades_placed += 1
+                # Record bet time for cross-window cooldown
+                self._asset_last_bet[_asset] = time.time()
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure        = self._risk.total_exposure()

@@ -155,6 +155,12 @@ class BinanceWSFeed:
                 price = float(price_str)
                 _update_strategy_cache(symbol, price)
                 self._last_prices[symbol] = price
+                # Track WS tick time for feed health monitoring
+                try:
+                    import src.signals as _sig
+                    _sig._LAST_WS_TICK[symbol] = time.time()
+                except Exception:
+                    pass
 
             elif stream_type == "bookTicker":
                 # Best bid/ask — compute order book pressure imbalance

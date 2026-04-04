@@ -308,8 +308,9 @@ class UpDownMomentumStrategy:
 
         # ── Guard 2: Entry price must still be near 0.50 ─────────────────────
         mid = order_book.mid if order_book else market.yes_price
-        if mid > 0.62 or mid < 0.38:
-            logger.debug(f"[UPDOWN] {symbol} skipped — mid={mid:.3f} already priced away from 50/50")
+        if mid > 0.54 or mid < 0.46:
+            # MMs have already substantially repriced — oracle lag edge is mostly gone
+            logger.debug(f"[UPDOWN] {symbol} skipped — mid={mid:.3f} already repriced (>0.54 or <0.46)")
             return None
 
         # ── PRIMARY SIGNAL: window-relative return ────────────────────────────

@@ -5,6 +5,7 @@ Handles open/close lifecycle, reconciliation, persistence, and wallet sync.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -231,7 +232,26 @@ class PositionsMixin:
     # ------------------------------------------------------------------
 
     def _execute_signal(self, sig) -> bool:
+        _exec_start = time.time()
         if config.TRADING_PAUSED:
+            return False
+
+        # Cold-start warmup — block trading for 90s after launch while price
+        # history accumulates; signals on stale/empty data are unreliable
+        _warmup = getattr(self, "_warmup_until", 0.0)
+        if time.time() < _warmup:
+            _secs_left = int(_warmup - time.time())
+            logger.debug(f"[WARMUP] Skipping signal — price feed warming up ({_secs_left}s remaining)")
+            return False
+
+        # Capital floor — hard stop if wallet is dangerously low
+        _wallet = self._dash_state.wallet_balance or 0.0
+        _floor  = float(getattr(config, "CAPITAL_FLOOR_USDC", 15.0))
+        if _wallet > 0 and _wallet < _floor:
+            logger.warning(
+                f"[CAPITAL FLOOR] Wallet ${_wallet:.2f} below floor ${_floor:.2f} — "
+                f"all trading halted. Replenish USDC to resume."
+            )
             return False
 
         if sig.token_id in self._positions:
@@ -277,7 +297,6 @@ class PositionsMixin:
             logger.debug(f"Skipping — {shares:.2f} shares below Polymarket minimum ({config.MIN_ORDER_SHARES})")
             return False
 
-        import random
         kind = "arb" if sig.is_latency_arb else "divergence"
         urgency_tag = ""
         if sig.hours_to_close is not None:
@@ -289,21 +308,29 @@ class PositionsMixin:
             f"+{sig.edge:.2%} divergence{urgency_tag} — \"{sig.question[:40]}\" "
             f"CLOB @ {sig.market_price:.2f} | fair {sig.fair_value:.2f} via {'ARB' if sig.is_latency_arb else 'MOM+OB'}")
 
-        latency_ms = random.randint(5, 95)
-        self._dash_state.add_exec_log("exec",
-            f"EXEC ${limit_price:.2f} → \"{sig.question[:38]}\" // {latency_ms}ms")
-
         wallet = self._dash_state.wallet_balance or 0.0
         if wallet > 0 and wallet < usdc * 0.5:
             logger.debug(f"Skipping — wallet ${wallet:.2f} too low for ${usdc:.2f} order")
             return False
 
+        _order_start = time.time()
         resp = self._client.place_limit_order(
             token_id=sig.token_id,
             side="BUY",
             price=limit_price,
             size=shares,
         )
+        _order_ms  = int((time.time() - _order_start) * 1000)
+        _total_ms  = int((time.time() - _exec_start)  * 1000)
+        self._dash_state.add_exec_log("exec",
+            f"EXEC ${limit_price:.2f} → \"{sig.question[:38]}\" "
+            f"// order={_order_ms}ms total={_total_ms}ms"
+            + ("  ⚠ SLOW" if _total_ms > 3000 else ""))
+        if _total_ms > 3000:
+            logger.warning(
+                f"[LATENCY] Signal→order took {_total_ms}ms — oracle lag edge may be gone "
+                f"({sig.question[:40]})"
+            )
 
         if resp:
             actual_cost  = usdc
@@ -353,6 +380,7 @@ class PositionsMixin:
                 composite_signal=sig.signal,
                 confidence=sig.confidence,
                 dry_run=config.DRY_RUN,
+                rel_strength=getattr(sig, "rel_strength", 0.0),
             )
 
             if sig.side == "YES":

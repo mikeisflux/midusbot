@@ -123,6 +123,7 @@ class TradeRecord:
     closed_at: float          # 0.0 while open
     closed: bool = False
     dry_run: bool = False     # True when recorded under DRY_RUN simulation
+    rel_strength: float = 0.0 # |window_return| / asset_threshold — signal quality ratio
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -172,6 +173,7 @@ class AdaptiveLearner:
         self._journal: list[TradeRecord]  = []
         self._closed_since_adapt: int     = 0
         self._adaptation_count: int       = 0
+        self._last_analyst_run: float     = 0.0   # wall-clock timestamp of last LLM run
 
         self._load()
 
@@ -211,6 +213,7 @@ class AdaptiveLearner:
         composite_signal: float,
         confidence: str,
         dry_run: bool = False,
+        rel_strength: float = 0.0,
     ) -> None:
         rec = TradeRecord(
             market_id=market_id,
@@ -231,6 +234,7 @@ class AdaptiveLearner:
             closed_at=0.0,
             closed=False,
             dry_run=dry_run,
+            rel_strength=rel_strength,
         )
         self._journal.append(rec)
         # Prune in-memory journal to last 500 entries to prevent unbounded growth
@@ -272,6 +276,30 @@ class AdaptiveLearner:
             self._adapt()
 
         return rec.pnl_usdc
+
+    _ANALYST_INTERVAL_SECS: float = 4 * 3600  # run analyst at least every 4h
+
+    def maybe_run_analyst_timed(self) -> None:
+        """
+        Time-based fallback: run LLM analyst every 4h even when trade count
+        hasn't reached ADAPT_EVERY_N. Ensures analyst runs when bot is slow.
+        Safe to call every loop — does nothing if interval hasn't elapsed.
+        """
+        if time.time() - self._last_analyst_run < self._ANALYST_INTERVAL_SECS:
+            return
+        journal = [r for r in self._journal if r.closed]
+        if len(journal) < 3:
+            return   # not enough data for analyst to make any decision
+        logger.info("[Learner] 4h analyst trigger — running timed LLM analysis")
+        self._last_analyst_run = time.time()
+        import threading
+        def _run():
+            try:
+                from src.analyst import analyse_and_update
+                analyse_and_update(self)
+            except Exception as exc:
+                logger.debug(f"[Learner] Timed analyst skipped: {exc}")
+        threading.Thread(target=_run, daemon=True, name="analyst-timed").start()
 
     def get_dashboard_dict(self) -> dict:
         """Return current learned params for the dashboard."""
@@ -329,12 +357,16 @@ class AdaptiveLearner:
             self.strategy_params.imbalance_weight /= total_w
 
         # ── 2. Signal threshold ───────────────────────────────────────
+        # NOTE: self.strategy_params.signal_threshold is INTERNAL ONLY.
+        # The live strategy reads analyst_params.json["signal_threshold"].
+        # Per-asset thresholds are updated in step 5 (session accuracy).
+        # We keep this internal counter for the learner's own Kelly logic
+        # but do NOT write it to analyst_params — the analyst LLM owns that.
         overall_wr = mean([1.0 if r.pnl_usdc > 0 else 0.0 for r in closed])
         if overall_wr < 0.45:
             self.strategy_params.signal_threshold *= 1.05
         elif overall_wr > 0.60:
             self.strategy_params.signal_threshold *= 0.98
-
         self.strategy_params.signal_threshold = float(
             np.clip(self.strategy_params.signal_threshold, 0.05, 0.50)
         )
@@ -429,6 +461,7 @@ class AdaptiveLearner:
         # the LLM. The analyst writes analyst_params.json when done; the
         # strategy picks them up on the next loop automatically.
         import threading
+        self._last_analyst_run = time.time()  # record before thread starts
         def _run_analyst():
             try:
                 from src.analyst import analyse_and_update
