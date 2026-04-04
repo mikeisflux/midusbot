@@ -111,13 +111,23 @@ _UPDOWN_ASSETS = {
 # Minimum absolute 60s momentum to act on (0.05% move in 60s)
 _MIN_MOMENTUM_PCT = 0.0005
 
-# Minimum window-relative return to generate a signal.
-# 0.08% floor: typical 5-min crypto move is 0.03-0.10%, so this admits
-# real momentum while blocking pure noise. Quality filtering (acceleration,
-# multitf consensus) rejects weak signals above the floor.
-# The LLM analyst and learner can raise this further via analyst_params;
-# they cannot set it below this floor.
+# Global fallback floor — only used when no per-asset threshold exists
+# and analyst hasn't set a global signal_threshold.
 _MIN_WINDOW_RETURN_PCT = 0.0008
+
+# Per-asset default thresholds based on typical 5-min volatility.
+# These seed the system before the learner/analyst have enough data.
+# BTC/ETH/BNB are slow large-caps; SOL/DOGE/HYPE move faster.
+# Analyst and learner can raise or lower these at any time.
+_DEFAULT_ASSET_THRESHOLDS: dict[str, float] = {
+    "BTC":  0.0003,   # ~$20 move on $67k — slow mover
+    "ETH":  0.0003,   # ~$0.60 move on $2050
+    "BNB":  0.0003,   # ~$0.18 move on $589
+    "XRP":  0.0003,   # ~$0.0004 move on $1.32
+    "SOL":  0.0004,   # more volatile than large-caps
+    "DOGE": 0.0004,   # small price, high % swings
+    "HYPE": 0.0005,   # erratic/newer asset, needs cleaner signal
+}
 
 
 def _detect_updown_market(question: str) -> str | None:
@@ -316,15 +326,22 @@ class UpDownMomentumStrategy:
             _effective_secs = int(secs_in)
 
         window_return = _window_return(symbol, _effective_secs)
-        # Per-asset threshold overrides take priority over global threshold.
-        # The analyst / learner can raise the threshold; _MIN_WINDOW_RETURN_PCT
-        # is a hard FLOOR — it can never be set below 0.25%.
+        # Threshold priority (highest → lowest):
+        #   1. analyst/learner per-asset override  (asset_thresholds["BTC"])
+        #   2. per-asset default                   (_DEFAULT_ASSET_THRESHOLDS["BTC"])
+        #   3. analyst global signal_threshold      (floored at _MIN_WINDOW_RETURN_PCT)
         _asset_thresholds = _ap.get("asset_thresholds", {})
-        _sig_thresh = float(
-            _asset_thresholds.get(symbol.upper(),
-            _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT))
-        )
-        _sig_thresh = max(_sig_thresh, _MIN_WINDOW_RETURN_PCT)  # enforce floor
+        _sym = symbol.upper()
+        if _sym in _asset_thresholds:
+            # Explicit per-asset value — respect it directly (tiny sanity floor only)
+            _sig_thresh = float(max(0.0001, _asset_thresholds[_sym]))
+        else:
+            # Fall back to per-asset default or global, whichever is available
+            _global = float(max(
+                _MIN_WINDOW_RETURN_PCT,
+                _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT),
+            ))
+            _sig_thresh = float(_DEFAULT_ASSET_THRESHOLDS.get(_sym, _global))
         if window_return is None:
             logger.debug(f"[UPDOWN] {symbol} skipped — window_return unavailable (lookback={_effective_secs}s, hist={int(_available_span if len(_hist_now)>=2 else 0)}s)")
             return None
