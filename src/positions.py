@@ -467,6 +467,15 @@ class PositionsMixin:
         else:
             use_fok = False
 
+        # Polymarket CLOB requires: maker amount (shares) max 2 decimals,
+        # taker amount (USDC = shares × price) max 4 decimals.
+        # Round price to 2 decimals and recalculate shares from final price.
+        limit_price = round(limit_price, 2)
+        shares = round(shares, 2)
+        if shares < config.MIN_ORDER_SHARES:
+            logger.info(f"[SIZE] Skipping after price round — {shares:.2f} shares < {config.MIN_ORDER_SHARES}")
+            return False
+
         _order_start = time.time()
         resp = self._client.place_limit_order(
             token_id=sig.token_id,
