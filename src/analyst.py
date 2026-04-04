@@ -75,7 +75,15 @@ DEFAULT_PARAMS: dict = {
     "max_secs_in":         240,      # stop entering after N seconds
     "kelly_override":      None,     # override kelly fraction (None = use config)
     "time_of_day_skip":    [],       # UTC hours (0-23) to not trade
-    "asset_thresholds":    {},       # per-asset threshold overrides e.g. {"HYPE": 0.002}
+    "asset_thresholds":    {         # per-asset threshold overrides (history-informed defaults)
+        "BTC":  0.00035,   # 0.035% — stable large-cap
+        "ETH":  0.0004,    # 0.040% — 0/2 trades in history
+        "BNB":  0.0004,    # 0.040% — 0/1 trade in history
+        "XRP":  0.0008,    # 0.080% — 0/2, lost hard; needs strong signal
+        "SOL":  0.00035,   # 0.035% — only winning asset; keep accessible
+        "DOGE": 0.0010,    # 0.100% — 0/5 trades, systematic losses
+        "HYPE": 0.0008,    # 0.080% — insufficient history
+    },
     "min_price_history_s": 60,       # require N seconds of price history before trading
 
     # ── Self-improvement state ─────────────────────────────────────────────
@@ -459,7 +467,14 @@ PARAMETERS YOU CAN SET:
 - max_secs_in (120–240): stop entering this late into the window.
 - kelly_override (0.05–0.5 or null): override position sizing fraction.
 - time_of_day_skip: [0,1,2,...] UTC hours to not trade at all.
-- asset_thresholds: {"HYPE": 0.002, "BTC": 0.0006} per-asset overrides.
+- asset_thresholds: per-asset window_return thresholds. These OVERRIDE the
+  global signal_threshold for that specific asset. Always set ALL assets to
+  keep control. Current history-informed baselines:
+    SOL=0.00035 (only winner, 25% wr), BTC=0.00035, ETH=0.0004, BNB=0.0004,
+    XRP=0.0008 (0/2 hard losses), DOGE=0.001 (0/5 systematic losses), HYPE=0.0008.
+  Raise an asset's threshold if its win rate is below 45%.
+  Lower an asset's threshold if its win rate is above 60% (more trades).
+  Range: 0.0001–0.005 per asset.
 - min_price_history_s (60–300): require this many seconds of price feed
   before entering (avoids trading on stale data after feed gaps).
 

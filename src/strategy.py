@@ -115,18 +115,21 @@ _MIN_MOMENTUM_PCT = 0.0005
 # and analyst hasn't set a global signal_threshold.
 _MIN_WINDOW_RETURN_PCT = 0.0008
 
-# Per-asset default thresholds based on typical 5-min volatility.
-# These seed the system before the learner/analyst have enough data.
-# BTC/ETH/BNB are slow large-caps; SOL/DOGE/HYPE move faster.
+# Per-asset default thresholds informed by dry-run history (23 trades).
+# SOL: only winning asset (25% wr) — keep accessible at 0.035%.
+# DOGE: 0/5 real trades, worst P&L overall — needs 0.10% minimum.
+# XRP: 0/2 real trades, largest single-trade loss — needs 0.08%.
+# BTC/ETH/BNB: weak signals, small sample — 0.035-0.04%.
+# HYPE: insufficient data — conservative 0.08%.
 # Analyst and learner can raise or lower these at any time.
 _DEFAULT_ASSET_THRESHOLDS: dict[str, float] = {
-    "BTC":  0.0003,   # ~$20 move on $67k — slow mover
-    "ETH":  0.0003,   # ~$0.60 move on $2050
-    "BNB":  0.0003,   # ~$0.18 move on $589
-    "XRP":  0.0003,   # ~$0.0004 move on $1.32
-    "SOL":  0.0004,   # more volatile than large-caps
-    "DOGE": 0.0004,   # small price, high % swings
-    "HYPE": 0.0005,   # erratic/newer asset, needs cleaner signal
+    "BTC":  0.00035,  # 0.035% — stable large-cap, tiny signals
+    "ETH":  0.0004,   # 0.04%  — 0/2 trades, raise floor slightly
+    "BNB":  0.0004,   # 0.04%  — 0/1 trade, raise floor slightly
+    "XRP":  0.0008,   # 0.08%  — 0/2, lost hard on strongest signal
+    "SOL":  0.00035,  # 0.035% — ONLY winner; keep accessible
+    "DOGE": 0.0010,   # 0.10%  — 0/5, systematic losses; severe tightening
+    "HYPE": 0.0008,   # 0.08%  — insufficient data; conservative
 }
 
 
