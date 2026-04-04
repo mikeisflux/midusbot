@@ -170,26 +170,26 @@ class BinanceWSFeed:
 
 
 def _update_strategy_cache(symbol: str, price: float) -> None:
-    """Write a fresh price into strategy._PRICE_CACHE and _PRICE_HISTORY."""
+    """Write a fresh price into signals._PRICE_CACHE and _PRICE_HISTORY."""
     try:
-        import src.strategy as _strat
+        import src.signals as _sig
         now = time.time()
-        with _strat._PRICE_LOCK:
-            _strat._PRICE_CACHE[symbol] = (price, now)
-            hist = _strat._PRICE_HISTORY.setdefault(symbol, [])
+        with _sig._PRICE_LOCK:
+            _sig._PRICE_CACHE[symbol] = (price, now)
+            hist = _sig._PRICE_HISTORY.setdefault(symbol, [])
             hist.append((price, now))
-            cutoff = now - _strat._HISTORY_WINDOW
-            _strat._PRICE_HISTORY[symbol] = [(p, t) for p, t in hist if t >= cutoff]
+            cutoff = now - _sig._HISTORY_WINDOW
+            _sig._PRICE_HISTORY[symbol] = [(p, t) for p, t in hist if t >= cutoff]
     except Exception:
         pass
 
 
 def _update_exchange_pressure(symbol: str, pressure: float) -> None:
-    """Write Binance bid/ask imbalance into strategy._EXCHANGE_PRESSURE."""
+    """Write Binance bid/ask imbalance into signals._EXCHANGE_PRESSURE."""
     try:
-        import src.strategy as _strat
-        with _strat._PRICE_LOCK:
-            _strat._EXCHANGE_PRESSURE[symbol] = pressure
+        import src.signals as _sig
+        with _sig._PRICE_LOCK:
+            _sig._EXCHANGE_PRESSURE[symbol] = pressure
     except Exception:
         pass
 
