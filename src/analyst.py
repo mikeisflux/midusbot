@@ -704,8 +704,9 @@ def analyse_and_update(learner: "AdaptiveLearner") -> dict | None:
             logger.debug(f"[ANALYST] Invalid {key!r} from LLM: {val!r}")
             return fallback
 
-    if _f("signal_threshold", 0.00005, 0.005) is not None:
-        new["signal_threshold"] = _f("signal_threshold", 0.00005, 0.005)
+    # signal_threshold is intentionally NOT applied here — it's a no-op fallback
+    # that only fires for assets not in asset_thresholds (which is never the case).
+    # The LLM consistently misunderstands its direction so we discard it entirely.
     if _f("min_trend_score", 0.0, 0.75) is not None:
         new["min_trend_score"] = _f("min_trend_score", 0.0, 0.75)
     if "skip_assets" in payload and isinstance(payload["skip_assets"], list):
