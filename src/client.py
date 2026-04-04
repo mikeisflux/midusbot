@@ -737,34 +737,96 @@ class PolymarketClient:
                 logger.debug(f"get_clob_market({condition_id[:16]}) failed: {exc}")
         return None
 
-    def redeem_position(self, condition_id: str, neg_risk: bool = False) -> bool:
+    def redeem_position(
+        self,
+        condition_id: str,
+        neg_risk: bool = False,
+        amounts: list[float] | None = None,
+        outcome_index: int = 0,
+        size: float = 0.0,
+    ) -> bool:
         """
         Redeem winning tokens for USDC after a market resolves.
 
-        Calls the CTF Exchange's redeemPositions function via py_clob_client.
-        Pass index_sets=[1,2] — the contract only pays out for whichever
-        outcome actually won; the other contributes $0.
+        Preferred path: gasless relayer via polymarket-apis PolymarketGaslessWeb3Client
+          — no gas fees, no builder credit limit (100 trades/day cap on direct calls).
+        Fallback: direct CTF contract call via py_clob_client.
 
-        For negRisk markets the contract is different but the py_clob_client
-        handles routing internally.
+        amounts: [yes_amount, no_amount] — if None, built from outcome_index + size
+                 or defaults to [1, 1] (contract pays only the winning side).
         """
         if config.DRY_RUN:
             logger.info(f"[DRY-RUN] Would redeem condition {condition_id[:16]}…")
             return True
+
+        # Build amounts array
+        if amounts is None:
+            if size > 0:
+                amounts = [0.0, 0.0]
+                amounts[outcome_index] = size
+            else:
+                amounts = [1.0, 1.0]  # contract ignores losing side amount
+
+        # ── Path 1: Gasless relayer (preferred) ──────────────────────────────
+        if config.RELAYER_API_KEY and config.RELAYER_API_KEY_ADDRESS:
+            try:
+                from polymarket_apis.clients.web3_client import PolymarketGaslessWeb3Client
+                web3_client = PolymarketGaslessWeb3Client(
+                    private_key=config.PRIVATE_KEY,
+                    relayer_api_key=config.RELAYER_API_KEY,
+                    relayer_api_key_address=config.RELAYER_API_KEY_ADDRESS,
+                    signature_type=config.SIGNATURE_TYPE,
+                    funder=config.FUNDER_ADDRESS,
+                )
+                import time as _time
+                MAX_RETRIES = 3
+                for attempt in range(1, MAX_RETRIES + 1):
+                    try:
+                        receipt = web3_client.redeem_position(
+                            condition_id=condition_id,
+                            amounts=amounts,
+                            neg_risk=neg_risk,
+                        )
+                        logger.info(
+                            f"[RELAYER] Redeemed condition {condition_id[:16]}…  "
+                            f"receipt={receipt}"
+                        )
+                        return True
+                    except Exception as exc:
+                        wait = 3 * (2 ** (attempt - 1))
+                        if attempt < MAX_RETRIES:
+                            logger.warning(
+                                f"[RELAYER] redeem attempt {attempt}/{MAX_RETRIES} failed: "
+                                f"{exc} — retrying in {wait}s"
+                            )
+                            _time.sleep(wait)
+                        else:
+                            logger.warning(
+                                f"[RELAYER] All {MAX_RETRIES} attempts failed: {exc} "
+                                f"— falling back to direct CTF call"
+                            )
+            except ImportError:
+                logger.warning(
+                    "polymarket-apis not installed — falling back to direct CTF redeem. "
+                    "Run: pip install polymarket-apis"
+                )
+            except Exception as exc:
+                logger.warning(f"[RELAYER] init failed: {exc} — falling back to direct CTF call")
+
+        # ── Path 2: Direct CTF contract call (fallback) ───────────────────────
         if not self._clob_client:
-            logger.warning("redeem_position: no CLOB client — cannot redeem")
+            logger.warning("redeem_position: no CLOB client and relayer unavailable — cannot redeem")
             return False
         try:
-            # Polymarket uses bridged USDC on Polygon as collateral
-            USDC    = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-            ZERO32  = "0x" + "0" * 64
-            result  = self._clob_client.redeem_positions(
+            USDC   = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            ZERO32 = "0x" + "0" * 64
+            result = self._clob_client.redeem_positions(
                 USDC, ZERO32, condition_id, [1, 2]
             )
-            logger.info(f"Redeemed position — condition {condition_id[:16]}…  result={result}")
+            logger.info(f"[CTF] Redeemed condition {condition_id[:16]}…  result={result}")
             return True
         except Exception as exc:
-            logger.warning(f"redeem_position failed: {exc}")
+            logger.warning(f"redeem_position failed (both paths): {exc}")
             return False
 
     def sell_via_swaps(

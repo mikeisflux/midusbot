@@ -57,6 +57,13 @@ SWAPS_API_KEY: str = os.getenv("SWAPS_API_KEY", "")
 # Your EVM EOA address (the raw wallet address, not the proxy)
 EVM_EOA: str = os.getenv("EVM_EOA", FUNDER_ADDRESS)
 
+# ── Gasless relayer (polymarket-claimer approach) ─────────────────────────────
+# Allows redeeming winning positions without gas fees and without the
+# 100-trades/day builder credit limit of direct contract calls.
+# Get a relayer key from Polymarket (same place as CLOB API keys).
+RELAYER_API_KEY:         str = os.getenv("RELAYER_API_KEY", "")
+RELAYER_API_KEY_ADDRESS: str = os.getenv("RELAYER_API_KEY_ADDRESS", "")
+
 # ── Loop ─────────────────────────────────────────────────────────────────────
 LOOP_INTERVAL_SECONDS: int = int(os.getenv("LOOP_INTERVAL_SECONDS", "15"))  # fast enough for 5-min markets
 
