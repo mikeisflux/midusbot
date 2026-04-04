@@ -72,10 +72,34 @@ class PositionsMixin:
                 market_active = clob_mkt.get("active", True)
                 market_closed = clob_mkt.get("closed", False)
                 if not market_active or market_closed:
-                    logger.info(
-                        f"PRUNED: market resolved/closed — removing ghost position "
-                        f"{pos.question[:55]}"
-                    )
+                    # Check price before pruning — may be a winning position to redeem
+                    _final_price = self._gamma_position_price(pos)
+                    if not config.DRY_RUN and _final_price >= 0.97:
+                        logger.info(
+                            f"AUTO-CLAIM (external): resolved WIN @ {_final_price:.3f} "
+                            f"({pos.shares:.2f} shares)  {pos.question[:50]}"
+                        )
+                        try:
+                            neg_risk = bool(clob_mkt.get("neg_risk", False))
+                            redeemed = self._client.redeem_position(pos.market_id, neg_risk=neg_risk)
+                            if redeemed:
+                                pnl = self._learner.record_close(token_id, _final_price)
+                                cost = pos.cost_usdc if not pos.is_external else 0.0
+                                fee  = self._risk.trade_fee(cost, _final_price * pos.shares)
+                                self._risk.record_close(pnl_usdc=pnl - fee, cost_usdc=cost)
+                                self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
+                                symbol = _detect_updown_market(pos.question)
+                                if symbol:
+                                    direction_bet = "UP" if pos.side == "YES" else "DOWN"
+                                    self._trend_tracker.record_result(symbol, direction_bet, won=True)
+                                logger.info(f"CLAIMED (external): {pos.question[:50]}  P&L=${pnl:+.2f}")
+                        except Exception as _e:
+                            logger.warning(f"AUTO-CLAIM (external) failed: {_e}")
+                    else:
+                        logger.info(
+                            f"PRUNED: market resolved/closed — removing ghost position "
+                            f"{pos.question[:55]}"
+                        )
                     self._risk.record_close()
                     if pos.market_id:
                         self._closed_market_ids.add(pos.market_id)
