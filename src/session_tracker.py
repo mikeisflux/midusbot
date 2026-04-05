@@ -31,6 +31,14 @@ _WINDOW_SEC = 300  # 5 minutes
 _active: dict[str, tuple[float, float, str | None]] = {}
 _lock   = threading.Lock()
 
+# Registered callbacks fired when a window closes: fn(symbol, actual_direction, had_signal)
+_window_close_callbacks: list = []
+
+
+def register_window_close_callback(fn) -> None:
+    """Register a function to call each time a 5-min window closes for any asset."""
+    _window_close_callbacks.append(fn)
+
 
 def _window_start_now() -> float:
     """UTC timestamp of the start of the current 5-min window."""
@@ -98,6 +106,13 @@ def _close_window(
             fh.write(json.dumps(entry) + "\n")
     except Exception:
         pass
+
+    # Fire registered callbacks so TrendTracker stays current every window.
+    for fn in _window_close_callbacks:
+        try:
+            fn(symbol, actual_direction, signal_direction is not None)
+        except Exception:
+            pass
 
 
 def get_asset_stats(symbol: str, lookback: int = 60) -> dict:

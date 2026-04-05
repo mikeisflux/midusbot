@@ -83,6 +83,38 @@ class TrendTracker:
             f"({entry.get('wins', 0)}W / {entry.get('losses', 0)}L)"
         )
 
+    def auto_record_direction(self, symbol: str, actual_direction: str, had_signal: bool) -> None:
+        """
+        Called by session_tracker at the end of every 5-min window via callback.
+
+        When no bet was placed (had_signal=False), we still update the streak
+        from the observed Binance price direction — this keeps streaks from
+        freezing at their last-traded value (e.g. XRP stuck at 39 forever).
+
+        When a bet WAS placed (had_signal=True), the position-close path already
+        called record_result() with the actual outcome, so we skip here to avoid
+        double-counting.
+        """
+        if had_signal:
+            return  # position-close already updated the streak
+        sym = symbol.upper()
+        current = self._state.get(sym)
+        if current is None:
+            # No history for this asset yet — initialise from observed direction
+            self._state[sym] = {
+                "direction": actual_direction,
+                "streak": 1,
+                "wins": 1,
+                "losses": 0,
+            }
+            self._save()
+            logger.debug(f"[TREND] {sym}: auto-init direction={actual_direction} streak=1")
+            return
+
+        current_direction = current["direction"]
+        won = (actual_direction == current_direction)
+        self.record_result(sym, current_direction, won=won)
+
     def summary(self) -> dict:
         return {k: dict(v) for k, v in self._state.items()}
 

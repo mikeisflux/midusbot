@@ -142,6 +142,11 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
         self._updown        = UpDownMomentumStrategy()
         self._trend_tracker = TrendTracker()
         self._trend         = TrendFollowStrategy(self._trend_tracker)
+        # Wire session_tracker window-close events into TrendTracker so streaks
+        # update every 5 min from actual Binance price direction, not just on
+        # position closes. Without this, streaks freeze when the bot isn't trading.
+        import src.session_tracker as _st
+        _st.register_window_close_callback(self._trend_tracker.auto_record_direction)
         self._positions: dict[str, OpenPosition] = {}
         self._risk          = RiskManager(params=self._learner.risk_params, positions=self._positions)
         self._dashboard     = Dashboard(enabled=dashboard_enabled)

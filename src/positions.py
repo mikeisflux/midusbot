@@ -114,9 +114,27 @@ class PositionsMixin:
                             logger.warning(f"AUTO-CLAIM (external) failed: {_e}")
                     else:
                         logger.info(
-                            f"PRUNED: market resolved/closed — removing ghost position "
+                            f"PRUNED (LOSS): market closed — auto-redeeming $0 "
                             f"{pos.question[:55]}"
                         )
+                        # Redeem even for $0 — clears position from Polymarket portfolio
+                        # so user doesn't see stale "Redeem" buttons everywhere.
+                        if not config.DRY_RUN and pos.market_id:
+                            try:
+                                neg_risk = bool(clob_mkt.get("neg_risk", False))
+                                self._client.redeem_position(pos.market_id, neg_risk=neg_risk)
+                                if self._redeemed_tokens is not None:
+                                    self._redeemed_tokens.add(token_id)
+                                    _save_redeemed(self._redeemed_tokens)
+                            except Exception as _re:
+                                logger.debug(f"Redeem $0 loss failed (ok to ignore): {_re}")
+                        # Record the loss so learner + trend tracker stay calibrated.
+                        self._learner.record_close(token_id, 0.0)
+                        self._dash_state.record_closed_trade(0.0, fee_usdc=0.0)
+                        _prune_sym = _detect_updown_market(pos.question)
+                        if _prune_sym:
+                            _prune_dir = "UP" if pos.side == "YES" else "DOWN"
+                            self._trend_tracker.record_result(_prune_sym, _prune_dir, won=False)
                     self._risk.record_close()
                     if pos.market_id:
                         self._mark_market_closed(pos.market_id)
@@ -273,8 +291,11 @@ class PositionsMixin:
                     tokens = mkt.get("tokens") or []
                     for tok in tokens:
                         if str(tok.get("token_id", "")) == pos.token_id:
-                            price = float(tok.get("price") or 0)
-                            if price > 0:
+                            # Return 0 for resolved-loss tokens (price=0 is real).
+                            # Old code skipped 0 → fell back to entry_price → masked losses.
+                            raw = tok.get("price")
+                            if raw is not None:
+                                price = float(raw)
                                 logger.debug(
                                     f"[CLOB fallback] {pos.side} price={price:.3f}  "
                                     f"{pos.question[:50]}"
@@ -529,7 +550,19 @@ class PositionsMixin:
         # so the order fills immediately or cancels. Never post maker orders on short windows:
         # GTC at bid+0.01 will sit on the book and expire when the market resolves (unfilled).
         # The tiny spread saving (~1-2¢) is not worth the risk of zero fill on a 5-min window.
+        #
+        # ENTRY ASK GUARD: cap the ask we'll pay at ENTRY_PRICE_GUARD (0.54).
+        # Without this, a thin-book market with best_ask=0.99 causes the bot to
+        # enter at 86-99¢ — instantly a 40%+ loss if price reverts to mid.
+        # If the best ask is above the guard, the market has already repriced; skip.
         if sig.best_ask is not None and sig.win_mins <= 5:
+            _ask_guard = getattr(config, "ENTRY_PRICE_GUARD", 0.54)
+            if sig.best_ask > _ask_guard:
+                logger.info(
+                    f"[ASK-GUARD] Skipping — best_ask={sig.best_ask:.3f} > {_ask_guard:.2f} "
+                    f"(book too expensive to enter safely) {sig.question[:40]}"
+                )
+                return False
             limit_price = sig.best_ask  # cross the spread, fill immediately
             use_fok = True
         elif sig.side == "YES" and sig.best_bid is not None and sig.best_ask is not None:
