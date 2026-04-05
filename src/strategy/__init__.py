@@ -39,6 +39,13 @@ from src.strategy.prob_stats import (
     _markov_persistence_mult,
     _binomial_streak_confidence,
 )
+# signals re-exports — scanner.py and bot.py import these from src.strategy
+# because the old strategy.py imported them at module level
+from src.signals import (
+    _fetch_price,
+    _PRICE_HISTORY,
+    _PRICE_LOCK,
+)
 from src.strategy.updown_momentum import UpDownMomentumStrategy
 from src.strategy.trend_follow import TrendFollowStrategy
 
@@ -62,4 +69,8 @@ __all__ = [
     "_normal_vol_mult",
     "_markov_persistence_mult",
     "_binomial_streak_confidence",
+    # signals forwarded for backward compat
+    "_fetch_price",
+    "_PRICE_HISTORY",
+    "_PRICE_LOCK",
 ]
