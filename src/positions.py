@@ -807,7 +807,23 @@ class PositionsMixin:
                 continue
 
             if cur_price <= 0.03:
-                logger.info(f"  Skipping resolved loss (price={cur_price:.2f}): {question[:55]}")
+                logger.info(f"  Resolved LOSS (price={cur_price:.2f}): {question[:55]}")
+                # Record the loss in the learner journal (returns 0.0 pnl if no
+                # open record exists — harmless for external positions).
+                _loss_pnl = self._learner.record_close(token_id, cur_price)
+                self._risk.record_close(pnl_usdc=_loss_pnl, cost_usdc=0.0)
+                self._dash_state.record_closed_trade(_loss_pnl, fee_usdc=0.0)
+                # Reset the trend tracker so the streak doesn't stay inflated
+                # after a resolved loss.
+                _loss_sym = _detect_updown_market(question)
+                if _loss_sym:
+                    _loss_dir = "UP" if side == "YES" else "DOWN"
+                    self._trend_tracker.record_result(_loss_sym, _loss_dir, won=False)
+                # Mark closed so this position never appears in reconcile again.
+                if market_id:
+                    self._mark_market_closed(market_id)
+                self._redeemed_tokens.add(token_id)
+                _save_redeemed(self._redeemed_tokens)
                 continue
 
 
