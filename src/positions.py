@@ -193,12 +193,29 @@ class PositionsMixin:
             # Recovers remaining capital (60¢ on the dollar) rather than riding
             # to near-zero. Applies even when the adaptive stop-loss is looser.
             if pos.entry_price > 0 and pnl_pct <= -0.40:
-                to_close.append((token_id, current_price))
                 logger.warning(
                     f"[STOP-40%] {pos.side} {pos.question[:45]}  "
                     f"entry={pos.entry_price:.3f} → now={current_price:.3f}  "
                     f"loss={pnl_pct:.1%} — selling to recover remaining capital"
                 )
+                # ── Learning: record this as a wrong-direction bet ────────────
+                # _close_position (called below) handles: learner journal P&L,
+                # risk.record_close (updates _daily_pnl + frees exposure), and
+                # dash_state — so the wallet/daily-loss counter stays correct.
+                #
+                # What _close_position does NOT do for mid-price exits: update
+                # the trend tracker (it only fires at price ≥0.95 or ≤0.05).
+                # Record the loss here so the streak direction resets — prevents
+                # the bot from doubling down on a direction that just lost 40%.
+                _stop_symbol = _detect_updown_market(pos.question)
+                if _stop_symbol:
+                    _stop_dir = "UP" if pos.side == "YES" else "DOWN"
+                    self._trend_tracker.record_result(_stop_symbol, _stop_dir, won=False)
+                    logger.debug(
+                        f"[STOP-40%] Recorded LOSS for {_stop_symbol} {_stop_dir} "
+                        f"in trend tracker — streak reset"
+                    )
+                to_close.append((token_id, current_price))
                 continue
 
             # Early exit / loss cut — heuristic exits based on current price extremes.
