@@ -175,6 +175,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <span id="mode-badge" class="mode-badge dry">DRY-RUN</span>
   </div>
   <div id="hdr-right">
+    <div id="h-clock" style="color:var(--cyan);font-size:11px;letter-spacing:1px;white-space:nowrap">—</div>
     <div>Uptime <span id="h-uptime">00:00:00</span></div>
     <div>Cycle <span id="h-cycle">#0</span></div>
     <div>Edge <span id="h-edge" class="g">—</span></div>
@@ -583,7 +584,8 @@ async function refresh() {
     }
 
     // Footer
-    $('f-time').textContent = new Date().toLocaleTimeString();
+    var _now = new Date();
+    $('f-time').textContent = _now.toLocaleDateString(undefined,{year:'numeric',month:'2-digit',day:'2-digit'}) + ' ' + _now.toLocaleTimeString();
     if (d.learned) {
       $('f-learn').textContent = (d.learned.adaptation_count||0) + ' adaptations · thresh '+(d.learned.signal_threshold||.15).toFixed(3);
     }
@@ -621,6 +623,18 @@ async function resetTraining() {
   alert(d.message || 'Training reset complete.');
   refresh();
 }
+
+function tickClock() {
+  var n = new Date();
+  var pad = function(x){return x<10?'0'+x:x};
+  var dateStr = n.getFullYear()+'-'+pad(n.getMonth()+1)+'-'+pad(n.getDate());
+  var timeStr = pad(n.getHours())+':'+pad(n.getMinutes())+':'+pad(n.getSeconds());
+  var el = $('h-clock');
+  if (el) el.textContent = dateStr + ' ' + timeStr + ' UTC+' + (-n.getTimezoneOffset()/60);
+}
+
+tickClock();
+setInterval(tickClock, 1000);
 
 refresh();
 setInterval(refresh, 2000);
@@ -793,6 +807,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'Courie
 <div id="header">
   <span id="hname">MIDUSBOT</span>
   <div id="hright">
+    <span id="m-clock" style="font-size:10px;color:#40c4ff;letter-spacing:.5px;margin-right:6px">—</span>
     <span class="dot"></span>
     <span id="badge" class="badge dry">DRY-RUN</span>
   </div>
@@ -1083,7 +1098,9 @@ async function refresh() {
       ).join('');
     }
 
-    $('status-bar').textContent = 'updated '+new Date().toLocaleTimeString();
+    var _mn = new Date();
+    var _mp = function(x){return x<10?'0'+x:x};
+    $('status-bar').textContent = 'updated '+_mn.getFullYear()+'-'+_mp(_mn.getMonth()+1)+'-'+_mp(_mn.getDate())+' '+_mn.toLocaleTimeString();
   } catch(e) {
     $('status-bar').textContent = 'connection error — retrying…';
   }
@@ -1102,6 +1119,16 @@ async function clearLogs() {
   $('m-log-body').innerHTML='';
   setC('m-log-count','0 entries');
 }
+
+function tickClockMobile() {
+  var n = new Date();
+  var pad = function(x){return x<10?'0'+x:x};
+  var el = $('m-clock');
+  if (el) el.textContent = n.getFullYear()+'-'+pad(n.getMonth()+1)+'-'+pad(n.getDate())+' '+pad(n.getHours())+':'+pad(n.getMinutes())+':'+pad(n.getSeconds());
+}
+
+tickClockMobile();
+setInterval(tickClockMobile, 1000);
 
 refresh();
 setInterval(refresh, 3000);
