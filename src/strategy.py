@@ -622,16 +622,11 @@ class UpDownMomentumStrategy:
             return None
 
         # Window return + threshold
-        with _PRICE_LOCK:
-            _hist_now = list(_PRICE_HISTORY.get(symbol.upper(), []))
-        if len(_hist_now) >= 2:
-            _available_span = _hist_now[-1][1] - _hist_now[0][1]
-            _effective_secs = min(int(secs_in), max(15, int(_available_span) - 2))
-        else:
-            _available_span = 0
-            _effective_secs = int(secs_in)
-
-        window_return = _window_return(symbol, _effective_secs)
+        # Always measure from the actual window start (secs_in). If price history
+        # doesn't reach that far back, _window_return() returns None and we skip —
+        # which is correct. The old min(secs_in, available_span-2) caused a shorter
+        # lookback when ticks were sparse, artificially inflating the measured move.
+        window_return = _window_return(symbol, int(secs_in))
         # Threshold priority (highest → lowest):
         #   1. analyst/learner per-asset override  (asset_thresholds["BTC"])
         #   2. per-asset default                   (_DEFAULT_ASSET_THRESHOLDS["BTC"])
