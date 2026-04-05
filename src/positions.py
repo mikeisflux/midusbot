@@ -241,28 +241,28 @@ class PositionsMixin:
             # Apply to ALL positions (including those loaded from disk / reconciled externals)
             # so that no position ever rides to zero without an attempted sell.
             if current_price is not None:
-                if pos.side == "YES" and current_price < 0.20:
+                if pos.side == "YES" and current_price < config.EARLY_EXIT_LOSS_THRESHOLD:
                     to_close.append((token_id, current_price))
                     logger.info(
                         f"[EARLY-EXIT] Cutting losing YES position at {current_price:.3f} "
                         f"({pnl_pct:+.1%}) — {pos.question[:40]}"
                     )
                     continue
-                if pos.side == "NO" and current_price > 0.80:
+                if pos.side == "NO" and current_price > (1.0 - config.EARLY_EXIT_LOSS_THRESHOLD):
                     to_close.append((token_id, current_price))
                     logger.info(
                         f"[EARLY-EXIT] Cutting losing NO position at {current_price:.3f} "
                         f"({pnl_pct:+.1%}) — {pos.question[:40]}"
                     )
                     continue
-                if pos.side == "YES" and current_price > 0.78:
+                if pos.side == "YES" and current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
                     to_close.append((token_id, current_price))
                     logger.info(
                         f"[EARLY-EXIT] Locking in YES gain at {current_price:.3f} "
                         f"({pnl_pct:+.1%}) — {pos.question[:40]}"
                     )
                     continue
-                if pos.side == "NO" and current_price < 0.22:
+                if pos.side == "NO" and current_price < (1.0 - config.EARLY_EXIT_GAIN_THRESHOLD):
                     to_close.append((token_id, current_price))
                     logger.info(
                         f"[EARLY-EXIT] Locking in NO gain at {current_price:.3f} "
@@ -539,7 +539,7 @@ class PositionsMixin:
         # Skip if spread is very tight — means aggressive MMs are dominating the book.
         if sig.best_ask is not None and sig.best_bid is not None and sig.best_bid > 0:
             _spread = sig.best_ask - sig.best_bid
-            if _spread < 0.005:  # < 0.5 cent spread means MMs are aggressive — edge likely gone
+            if _spread < config.OB_MIN_SPREAD:  # tight spread = MMs repricing fast = edge likely gone
                 logger.debug(
                     f"[OB-THINNESS] {sig.question[:40]} — "
                     f"spread={_spread:.3f} very tight, MMs repricing fast — skip"

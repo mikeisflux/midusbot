@@ -1096,6 +1096,7 @@ class TrendFollowStrategy:
             f"t={secs_in:.0f}s  [{confidence}]  \"{market.question[:45]}\""
         )
 
+        _st.update(symbol, live_price, signal_direction=direction)
         return TradeSignal(
             market_id=market.id,
             question=market.question,

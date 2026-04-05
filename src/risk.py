@@ -212,11 +212,10 @@ class RiskManager:
         if b <= 0:
             return 0.0
 
-        # Polymarket charges 2% fee on winnings — adjust payout ratio.
-        # True payout = (1/mkt - 1) * (1 - 0.02) = b * 0.98
-        # This makes the breakeven accuracy ~51.5% instead of 50%.
-        POLY_FEE = 0.02  # 2% fee on winnings
-        b = b * (1.0 - POLY_FEE)
+        # Polymarket charges a fee on winnings — adjust payout ratio.
+        # True payout = (1/mkt - 1) * (1 - fee) = b * (1 - fee)
+        # This makes the breakeven accuracy slightly above 50%.
+        b = b * (1.0 - config.POLY_WIN_FEE)
 
         kelly_fraction = (b * p - q) / b
         if kelly_fraction <= 0:
