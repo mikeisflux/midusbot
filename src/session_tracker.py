@@ -85,7 +85,9 @@ def _close_window(
 ) -> None:
     if open_price <= 0:
         return
-    pct_change       = (close_price - open_price) / open_price
+    pct_change = (close_price - open_price) / open_price
+    if abs(pct_change) < 1e-8:
+        return  # flat window — exclude ties from accuracy calculation
     actual_direction = "UP" if pct_change > 0 else "DOWN"
     entry = {
         "symbol":           symbol,
@@ -218,7 +220,9 @@ def _close_window_with_timing(
 ) -> None:
     if open_price <= 0:
         return
-    pct_change       = (close_price - open_price) / open_price
+    pct_change = (close_price - open_price) / open_price
+    if abs(pct_change) < 1e-8:
+        return  # flat window — exclude ties from accuracy calculation
     actual_direction = "UP" if pct_change > 0 else "DOWN"
     entry = {
         "symbol":           symbol,

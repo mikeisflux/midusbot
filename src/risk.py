@@ -86,9 +86,8 @@ class RiskManager:
         # Multi-asset correlated exposure cap: limit total exposure across BTC/ETH/BNB/SOL/XRP/DOGE/HYPE.
         # These assets are 90%+ correlated — simultaneous exposure multiplies directional risk.
         _CORRELATED_GROUP = {"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "HYPE"}
-        _GROUP_CAP_PCT = 0.25  # max 25% of wallet in correlated crypto bets at once
         if self._wallet_balance > 0:
-            _group_cap = self._wallet_balance * _GROUP_CAP_PCT
+            _group_cap = self._wallet_balance * config.GROUP_CAP_PCT
         else:
             _group_cap = config.MAX_TOTAL_EXPOSURE_USDC * 0.5
 
@@ -117,9 +116,8 @@ class RiskManager:
         # reference traders (200+ shares). Cap scales with confidence.
         # Bankroll-proportional: effective max = 12% of known wallet balance,
         # but never exceeds config.MAX_POSITION_USDC (protects during drawdown).
-        _wallet_pct = 0.12
         effective_max = (
-            min(self._wallet_balance * _wallet_pct, config.MAX_POSITION_USDC)
+            min(self._wallet_balance * config.POSITION_WALLET_PCT, config.MAX_POSITION_USDC)
             if self._wallet_balance > 0
             else config.MAX_POSITION_USDC
         )

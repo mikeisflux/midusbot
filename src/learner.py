@@ -88,7 +88,7 @@ class StrategyParams:
     """Mutable parameters consumed by MomentumImbalanceStrategy."""
     momentum_weight: float  = 0.50
     imbalance_weight: float = 0.50
-    signal_threshold: float = 0.15
+    signal_threshold: float = 0.0008  # internal tracker only; live strategy reads analyst_params.json
     max_signal_adjust: float = 0.07
 
 
@@ -372,7 +372,7 @@ class AdaptiveLearner:
         elif overall_wr > 0.60:
             self.strategy_params.signal_threshold *= 0.98
         self.strategy_params.signal_threshold = float(
-            np.clip(self.strategy_params.signal_threshold, 0.05, 0.50)
+            np.clip(self.strategy_params.signal_threshold, 0.0001, 0.005)
         )
 
         # ── 3. Kelly multiplier ───────────────────────────────────────

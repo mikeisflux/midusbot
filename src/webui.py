@@ -13,6 +13,7 @@ Auto-refreshes every 2 seconds.
 """
 from __future__ import annotations
 
+import html
 import logging
 import threading
 import time
@@ -66,8 +67,8 @@ def positions_page():
         side_color = "#00e676" if pos.side == "YES" else "#ff1744"
         rows += (
             '<tr>'
-            '<td style="max-width:320px;white-space:normal">' + pos.question + '</td>'
-            '<td style="color:' + side_color + '">' + pos.side + '</td>'
+            '<td style="max-width:320px;white-space:normal">' + html.escape(pos.question) + '</td>'
+            '<td style="color:' + side_color + '">' + html.escape(pos.side) + '</td>'
             '<td>' + str(round(pos.shares, 2)) + '</td>'
             '<td>' + str(round(pos.entry_price * 100, 1)) + 'c</td>'
             '<td>' + str(round(cur * 100, 1)) + 'c</td>'

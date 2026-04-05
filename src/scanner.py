@@ -277,10 +277,9 @@ class ScannerMixin:
         if not hasattr(self, "_asset_last_bet"):
             self._asset_last_bet: dict[str, float] = {}
             _cooldown_map = self._asset_last_bet
-        _COOLDOWN_SECS = 300
         _cooled_out: set[str] = set()
         for _sym, _ts in _cooldown_map.items():
-            if time.time() - _ts < _COOLDOWN_SECS:
+            if time.time() - _ts < config.COOLDOWN_SECS:
                 _cooled_out.add(_sym)
 
         # Collect all valid signals, then execute only the single best.
@@ -309,7 +308,7 @@ class ScannerMixin:
                 continue
             # Block correlated assets if one was bet recently (cross-window cooldown)
             if _asset in _CORRELATED and _asset in _cooled_out:
-                logger.debug(f"[COOLDOWN] Skipping {_asset} — cooldown active ({_COOLDOWN_SECS}s)")
+                logger.debug(f"[COOLDOWN] Skipping {_asset} — cooldown active ({config.COOLDOWN_SECS}s)")
                 continue
 
             _secs = _market_seconds_into_window(market)
