@@ -581,6 +581,20 @@ class UpDownMomentumStrategy:
                 f"(MMs already repriced) → SKIP"
             )
             return None
+
+        # ── Guard 2b: Order book liquidity check ──────────────────────────────
+        # bid=0.01 / ask=0.99 means there's no real market — nobody is quoting.
+        # mid=0.50 in this case is a mathematical artefact (0.01+0.99)/2, not a
+        # real price. Skip before doing any signal computation.
+        if order_book and order_book.best_bid > 0 and order_book.best_ask > 0:
+            _book_spread = order_book.best_ask - order_book.best_bid
+            if _book_spread > 0.85:
+                logger.debug(
+                    f"[LOGIC:UPDOWN:{symbol}] BOOK-EMPTY — bid={order_book.best_bid:.3f} "
+                    f"ask={order_book.best_ask:.3f} spread={_book_spread:.3f} "
+                    f"(no real market, ask-guard would block anyway) → SKIP"
+                )
+                return None
         logger.debug(f"[LOGIC:UPDOWN:{symbol}] ENTRY-GUARD — mid={mid:.3f} within 0.46-0.54 → PASS")
 
         # Skip assets on analyst block-list
@@ -978,6 +992,20 @@ class TrendFollowStrategy:
                 f"> MAX={self.MAX_ENTRY_PRICE} (market moved, too late) → SKIP"
             )
             return None
+
+        # Book liquidity guard: bid=0.01/ask=0.99 means no real market — mid=0.50
+        # is a fake average of empty quotes, not a tradeable price. ASK-GUARD in
+        # execute_signal would catch this later but checking here avoids wasted
+        # signal computation (HYPE always has an empty book, for example).
+        if order_book and order_book.best_bid > 0 and order_book.best_ask > 0:
+            _spread = order_book.best_ask - order_book.best_bid
+            if _spread > 0.85:
+                logger.debug(
+                    f"[LOGIC:TREND:{symbol}] BOOK-EMPTY — bid={order_book.best_bid:.3f} "
+                    f"ask={order_book.best_ask:.3f} spread={_spread:.3f} → SKIP (no liquidity)"
+                )
+                return None
+
         logger.debug(
             f"[LOGIC:TREND:{symbol}] PRICE-GUARD — mkt_price={mkt_price:.3f} "
             f"≤ MAX={self.MAX_ENTRY_PRICE} → PASS"
