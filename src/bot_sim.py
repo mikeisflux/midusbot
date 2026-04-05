@@ -25,15 +25,18 @@ class SimMixin:
             close_after = now + 300 + 90
 
         self._sim_queue.append({
-            "question":    sig.question,
-            "market_id":   sig.market_id,
-            "token_id":    sig.token_id,
-            "side":        sig.side,
-            "entry":       entry,
-            "fair_value":  sig.fair_value,
-            "shares":      shares,
-            "confidence":  sig.confidence,
-            "close_after": close_after,
+            "question":        sig.question,
+            "market_id":       sig.market_id,
+            "token_id":        sig.token_id,
+            "side":            sig.side,
+            "entry":           entry,
+            "fair_value":      sig.fair_value,
+            "shares":          shares,
+            "confidence":      sig.confidence,
+            "close_after":     close_after,
+            "momentum_signal": getattr(sig, "momentum_signal", 0.0),
+            "imbalance_signal":getattr(sig, "imbalance_signal", 0.0),
+            "rel_strength":    getattr(sig, "rel_strength", 0.0),
         })
         self._save_sim_queue()
 
@@ -114,10 +117,11 @@ class SimMixin:
                     entry_price=sim.get("entry", 0.5),
                     shares=sim.get("shares", 0.0),
                     cost_usdc=sim.get("shares", 0.0) * sim.get("entry", 0.5),
-                    momentum_signal=0.0,
-                    imbalance_signal=0.0,
+                    momentum_signal=sim.get("momentum_signal", 0.0),
+                    imbalance_signal=sim.get("imbalance_signal", 0.0),
                     composite_signal=0.0,
                     confidence=sim.get("confidence", "LOW"),
+                    rel_strength=sim.get("rel_strength", 0.0),
                     dry_run=True,
                 )
             sim_cost = sim.get("shares", 0.0) * sim.get("entry", 0.5)
