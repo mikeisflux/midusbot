@@ -18,6 +18,11 @@ import json
 import sys
 from pathlib import Path
 
+# Ensure project root is on sys.path exactly once
+_PROJECT_ROOT = str(Path(__file__).parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 DATA_DIR = Path("data")
 JOURNAL_FILE   = DATA_DIR / "journal.jsonl"
 PARAMS_FILE    = DATA_DIR / "analyst_params.json"
@@ -101,7 +106,6 @@ def tool_analyst_history(limit: int = 5) -> list[dict]:
 def tool_alpha_decay() -> dict:
     """Return alpha decay analysis from learner."""
     try:
-        sys.path.insert(0, str(Path(__file__).parent.parent))
         from src.learner import Learner
         learner = Learner()
         return {"report": learner.alpha_decay_report()}
@@ -112,7 +116,6 @@ def tool_alpha_decay() -> dict:
 def tool_feature_importance() -> dict:
     """Return signal feature importance from learner."""
     try:
-        sys.path.insert(0, str(Path(__file__).parent.parent))
         from src.learner import Learner
         learner = Learner()
         return {"report": learner.feature_importance()}
@@ -123,7 +126,6 @@ def tool_feature_importance() -> dict:
 def tool_backtest(lookback_days: int = 7) -> dict:
     """Run backtest engine against session_log."""
     try:
-        sys.path.insert(0, str(Path(__file__).parent.parent))
         from src.backtest import BacktestEngine
         engine = BacktestEngine()
         results = engine.run(lookback_days=lookback_days)
