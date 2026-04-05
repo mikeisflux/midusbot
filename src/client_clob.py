@@ -264,6 +264,16 @@ class ClobMixin:
             logger.info(f"[DRY-RUN] Would place {side} {size:.2f} shares of {token_id[:8]}… @ {price:.4f}")
             return {"dry_run": True, "side": side, "price": price, "size": size}
 
+        if not (0.0 < price < 1.0):
+            logger.error(f"place_limit_order: price {price} out of range (0,1) — dropping order")
+            return None
+        if size <= 0:
+            logger.error(f"place_limit_order: size {size} must be > 0 — dropping order")
+            return None
+        if side not in ("BUY", "SELL"):
+            logger.error(f"place_limit_order: invalid side '{side}' — dropping order")
+            return None
+
         if not self._clob_client:
             logger.error("CLOB client not available — cannot place order.")
             return None
