@@ -649,7 +649,7 @@ class UpDownMomentumStrategy:
         if window_return is None:
             logger.info(
                 f"[LOGIC:UPDOWN:{symbol}] WIN-RETURN — unavailable "
-                f"(lookback={_effective_secs}s hist={int(_available_span)}s) → SKIP"
+                f"(lookback={int(secs_in)}s) → SKIP"
             )
             return None
         _ratio = abs(window_return) / _sig_thresh if _sig_thresh > 0 else 0.0
@@ -1110,7 +1110,8 @@ class TrendFollowStrategy:
             f"t={secs_in:.0f}s  [{confidence}]  \"{market.question[:45]}\""
         )
 
-        _st.update(symbol, live_price, signal_direction=direction)
+        _tf_live = _fetch_price(symbol) or mid
+        _st.update(symbol, _tf_live, signal_direction=direction)
         return TradeSignal(
             market_id=market.id,
             question=market.question,

@@ -239,17 +239,6 @@ def _hour_stats(rows: list[dict]) -> dict:
             for k, v in sorted(h.items()) if v["total"] >= 2}
 
 
-def _read_sources() -> str:
-    """Read all source files the LLM has permission to see."""
-    parts = []
-    for path in _READABLE_SOURCES:
-        p = Path(path)
-        if p.exists():
-            src = p.read_text()
-            parts.append(f"\n### {path} ###\n```python\n{src}\n```")
-    return "\n".join(parts)
-
-
 def _recent_errors(n: int = 20) -> str:
     """Return the last N runtime errors from the bot error log."""
     err_log = DATA_DIR / "bot_errors.jsonl"
