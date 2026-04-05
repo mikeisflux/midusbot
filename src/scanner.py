@@ -383,6 +383,17 @@ class ScannerMixin:
                 elif secs_remaining < 60:   # < 1 minute: urgency penalty
                     sig.rel_strength *= 0.8
 
+            # Live mode: only trade HIGH confidence signals.
+            # LOW/MEDIUM signals have too much noise to justify real capital.
+            # In dry-run we still collect them so the dashboard and learner
+            # get training data across the full confidence range.
+            if not config.DRY_RUN and sig.confidence != "HIGH":
+                logger.info(
+                    f"[LIVE-FILTER] Skipping {_asset} {sig.side} [{sig.confidence}] — "
+                    f"live mode requires HIGH confidence  \"{sig.question[:40]}\""
+                )
+                continue
+
             signals_found += 1
             self._dash_state.push_signal(sig)
             pending_signals.append((sig, _asset))
