@@ -273,9 +273,16 @@ def _bayesian_win_rate_mult(symbol: str) -> float:
     s      = _load_prob_stats(symbol)
     wins   = s["bayes_wins"]
     losses = s["bayes_losses"]
+    n      = wins + losses
     posterior_mean = (2.0 + wins) / (4.0 + wins + losses)
     mult = 1.0 + (posterior_mean - 0.5) * 1.5
-    return float(np.clip(mult, 0.5, 1.5))
+    mult = float(np.clip(mult, 0.5, 1.5))
+    logger.debug(
+        f"[LOGIC:BAYES:{symbol}] n={n} signals  wins={wins} losses={losses}  "
+        f"posterior={posterior_mean:.3f}  → mult={mult:.3f}×  "
+        f"({'neutral — no data' if n == 0 else 'boosting accuracy' if posterior_mean > 0.5 else 'penalising bad accuracy'})"
+    )
+    return mult
 
 
 def _normal_vol_mult(symbol: str, window_return: float) -> float:
@@ -297,11 +304,21 @@ def _normal_vol_mult(symbol: str, window_return: float) -> float:
     s = _load_prob_stats(symbol)
     vol_mean = s["vol_mean"]
     vol_std  = s["vol_std"]
+    n_moves  = s["n_moves"]
     if vol_mean is None or vol_std is None or vol_std < 1e-8:
+        logger.debug(
+            f"[LOGIC:VOL:{symbol}] insufficient data (n={n_moves}, need 15) → mult=1.00× (neutral)"
+        )
         return 1.0
     z    = (abs(window_return) - vol_mean) / vol_std
-    mult = 1.0 + (z - 1.5) * 0.2
-    return float(np.clip(mult, 0.5, 1.8))
+    mult = float(np.clip(1.0 + (z - 1.5) * 0.2, 0.5, 1.8))
+    logger.debug(
+        f"[LOGIC:VOL:{symbol}] signal={abs(window_return):.4%}  "
+        f"hist_mean={vol_mean:.4%} hist_std={vol_std:.4%} n={n_moves}  "
+        f"z={z:.2f}  → mult={mult:.3f}×  "
+        f"({'above noise' if z > 1.5 else 'within typical noise band'})"
+    )
+    return mult
 
 
 def _markov_persistence_mult(symbol: str, signal_dir: str) -> float:
@@ -319,7 +336,11 @@ def _markov_persistence_mult(symbol: str, signal_dir: str) -> float:
     """
     s          = _load_prob_stats(symbol)
     directions = s["directions"][-50:]
-    if len(directions) < 10:
+    n_dirs     = len(directions)
+    if n_dirs < 10:
+        logger.debug(
+            f"[LOGIC:MARKOV:{symbol}] only {n_dirs} direction observations (need 10) → mult=1.00× (neutral)"
+        )
         return 1.0
 
     same = total = 0
@@ -330,11 +351,19 @@ def _markov_persistence_mult(symbol: str, signal_dir: str) -> float:
                 same += 1
 
     if total < 5:
+        logger.debug(
+            f"[LOGIC:MARKOV:{symbol}] only {total} prior {signal_dir} windows (need 5) → mult=1.00× (neutral)"
+        )
         return 1.0
 
     persistence = (same + 1) / (total + 2)   # Laplace smoothing
-    mult = 0.6 + persistence * 0.8            # 0.6→1.4 as persistence 0→1
-    return float(np.clip(mult, 0.6, 1.4))
+    mult = float(np.clip(0.6 + persistence * 0.8, 0.6, 1.4))
+    logger.debug(
+        f"[LOGIC:MARKOV:{symbol}] dir={signal_dir}  same={same}/{total} transitions  "
+        f"persistence={persistence:.3f}  → mult={mult:.3f}×  "
+        f"({'trend-following' if persistence > 0.5 else 'mean-reverting'})"
+    )
+    return mult
 
 
 def _binomial_streak_confidence(streak: int) -> str:
@@ -486,11 +515,7 @@ class UpDownMomentumStrategy:
         if symbol is None:
             return None
 
-        # ── Guard 1: Strict timing — must know window start, 15–75s in ───────
-        # The oracle lag edge is only available in the first ~75s of each window.
-        # Before 15s we have too little window data to measure the return.
-        # After 75s the market makers have already repriced to fair value.
-        # If end_date is unparseable, skip entirely — don't trade blind.
+        # ── Guard 1: Strict timing — must know window start ───────────────────
         secs_in = _market_seconds_into_window(market)
         # Load analyst params (LLM-tuned)
         try:
@@ -501,198 +526,273 @@ class UpDownMomentumStrategy:
 
         _max_secs_in = int(_ap.get("max_secs_in", 240))
         if secs_in is None or secs_in < 5:
+            logger.debug(f"[LOGIC:UPDOWN:{symbol}] TIMING — secs_in={secs_in} < 5 or unknown → SKIP")
             return None
         window_mins = _updown_window_mins(market.question) or 5
-        # For longer windows, scale max_secs_in proportionally (80% of window duration)
         effective_max_secs = _max_secs_in if window_mins == 5 else int(window_mins * 60 * 0.80)
         if secs_in > effective_max_secs:
-            logger.debug(f"[UPDOWN] {symbol} skipped — {secs_in:.0f}s into {window_mins}min window (max {effective_max_secs}s)")
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] TIMING — {secs_in:.0f}s into {window_mins}min window "
+                f"(max={effective_max_secs}s) → SKIP (too late, oracle lag gone)"
+            )
             return None
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] TIMING — {secs_in:.0f}s into {window_mins}min window "
+            f"(max={effective_max_secs}s) → PASS"
+        )
 
-        # Time-of-day skip (UTC hours the LLM decided are bad)
+        # Time-of-day skip
         _tod_skip = _ap.get("time_of_day_skip", [])
         if _tod_skip and time.gmtime().tm_hour in _tod_skip:
-            logger.debug(f"[UPDOWN] {symbol} skipped — time-of-day block (UTC hour {time.gmtime().tm_hour})")
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] TOD-SKIP — UTC hour {time.gmtime().tm_hour} "
+                f"in analyst block-list {_tod_skip} → SKIP"
+            )
             return None
 
-        # Warm up price history — require minimum seconds of feed data
-        _min_hist = int(_ap.get("min_price_history_s", 30))   # 30s default (was 120 — far too long)
+        # Price history warmup
+        _min_hist = int(_ap.get("min_price_history_s", 30))
         live_price = _fetch_price(symbol)
         if live_price is None:
-            logger.debug(f"[UPDOWN] {symbol} skipped — no live price from feed")
+            logger.debug(f"[LOGIC:UPDOWN:{symbol}] PRICE-FEED — no live price from Binance WS → SKIP")
             return None
-        # Notify session tracker on every scan so window opens/closes are captured
-        # regardless of whether a signal fires. Direction is filled in below if signal fires.
         _st.update(symbol, live_price)
         hist = _PRICE_HISTORY.get(symbol.upper(), [])
         if len(hist) < 2:
-            logger.debug(f"[UPDOWN] {symbol} skipped — price history empty")
+            logger.debug(f"[LOGIC:UPDOWN:{symbol}] WARMUP — price history empty (0 ticks) → SKIP")
             return None
         hist_span = hist[-1][1] - hist[0][1]
         if hist_span < _min_hist:
-            logger.debug(f"[UPDOWN] {symbol} skipped — only {hist_span:.0f}s of price history (need {_min_hist}s)")
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] WARMUP — only {hist_span:.0f}s of price history "
+                f"(need {_min_hist}s) → SKIP"
+            )
             return None
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] WARMUP — {hist_span:.0f}s price history  "
+            f"live_price={live_price:.4f} → PASS"
+        )
 
         # ── Guard 2: Entry price must still be near 0.50 ─────────────────────
         mid = order_book.mid if order_book else market.yes_price
         if mid > 0.54 or mid < 0.46:
-            # MMs have already substantially repriced — oracle lag edge is mostly gone
-            logger.debug(f"[UPDOWN] {symbol} skipped — mid={mid:.3f} already repriced (>0.54 or <0.46)")
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] ENTRY-GUARD — mid={mid:.3f} outside 0.46-0.54 "
+                f"(MMs already repriced) → SKIP"
+            )
             return None
+        logger.debug(f"[LOGIC:UPDOWN:{symbol}] ENTRY-GUARD — mid={mid:.3f} within 0.46-0.54 → PASS")
 
-        # ── PRIMARY SIGNAL: window-relative return ────────────────────────────
-        # _price_momentum(symbol, secs_in) = (price_now - price_at_window_start)
-        #                                    / price_at_window_start
-        # This is EXACTLY what the oracle measures. If it's positive → YES is
-        # already ahead; negative → NO is already ahead. The Polymarket price
-        # is still 0.50 (oracle lag) → we have edge.
-        # Apply LLM-suggested skip list
+        # Skip assets on analyst block-list
         if symbol.upper() in [s.upper() for s in _ap.get("skip_assets", [])]:
+            logger.debug(f"[LOGIC:UPDOWN:{symbol}] SKIP-ASSETS — analyst blocked this asset → SKIP")
             return None
 
-        # Use the oldest available price tick as reference if the window opened
-        # before the bot started (common after restarts). We cap secs_in to what
-        # we actually have so _window_return finds a tick within tolerance.
+        # Window return + threshold
         with _PRICE_LOCK:
             _hist_now = list(_PRICE_HISTORY.get(symbol.upper(), []))
         if len(_hist_now) >= 2:
             _available_span = _hist_now[-1][1] - _hist_now[0][1]
             _effective_secs = min(int(secs_in), max(15, int(_available_span) - 2))
         else:
+            _available_span = 0
             _effective_secs = int(secs_in)
 
         window_return = _window_return(symbol, _effective_secs)
         # Threshold priority (highest → lowest):
         #   1. analyst/learner per-asset override  (asset_thresholds["BTC"])
         #   2. per-asset default                   (_DEFAULT_ASSET_THRESHOLDS["BTC"])
-        #   3. analyst global signal_threshold      (floored at _MIN_WINDOW_RETURN_PCT)
+        #   3. analyst global signal_threshold
         _asset_thresholds = _ap.get("asset_thresholds", {})
         _sym = symbol.upper()
         if _sym in _asset_thresholds:
-            # Explicit per-asset value — clamp between hard floor and hard ceiling
-            # to prevent analyst from making thresholds noise-level or impossibly high.
             _hard_floor = _ASSET_THRESHOLD_FLOORS.get(_sym, 0.00025)
             _hard_ceil  = _ASSET_THRESHOLD_CEILS.get(_sym, 0.00300)
             _sig_thresh = float(max(_hard_floor, min(_hard_ceil, _asset_thresholds[_sym])))
+            _thresh_src = f"analyst ({_asset_thresholds[_sym]:.5%}, clamped floor={_hard_floor:.5%} ceil={_hard_ceil:.5%})"
         else:
-            # Fall back to per-asset default or global, clamped to valid range
             _global = float(max(
                 _MIN_WINDOW_RETURN_PCT,
                 min(_GLOBAL_THRESHOLD_CEIL, _ap.get("signal_threshold", _MIN_WINDOW_RETURN_PCT)),
             ))
             _sig_thresh = float(_DEFAULT_ASSET_THRESHOLDS.get(_sym, _global))
-        if window_return is None:
-            logger.info(f"[UPDOWN] {symbol} skipped — window_return unavailable (lookback={_effective_secs}s, hist={int(_available_span if len(_hist_now)>=2 else 0)}s)")
-            return None
-        if abs(window_return) < _sig_thresh:
-            logger.info(f"[UPDOWN] {symbol} skipped — win_ret={window_return:+.4%} below thresh {_sig_thresh:.4%}")
-            return None
+            _thresh_src = f"default (asset default or global fallback)"
 
-        # ── CONVICTION FILTER: Binance trade count vs rolling average ────────────
-        # Low trade count = one big order, no follow-through. Only trade when
-        # trade rate is elevated (>= 1.5× rolling average). Skip if < 0.5× avg.
+        if window_return is None:
+            logger.info(
+                f"[LOGIC:UPDOWN:{symbol}] WIN-RETURN — unavailable "
+                f"(lookback={_effective_secs}s hist={int(_available_span)}s) → SKIP"
+            )
+            return None
+        _ratio = abs(window_return) / _sig_thresh if _sig_thresh > 0 else 0.0
+        if abs(window_return) < _sig_thresh:
+            logger.info(
+                f"[LOGIC:UPDOWN:{symbol}] THRESHOLD — win_ret={window_return:+.4%} "
+                f"thresh={_sig_thresh:.4%} ({_thresh_src}) ratio={_ratio:.2f}× → SKIP (below threshold)"
+            )
+            return None
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] THRESHOLD — win_ret={window_return:+.4%} "
+            f"thresh={_sig_thresh:.4%} ({_thresh_src}) ratio={_ratio:.2f}× → PASS"
+        )
+
+        # ── CONVICTION FILTER ─────────────────────────────────────────────────
         _rate_30s = _get_trade_rate(symbol, window_secs=30)
         _rate_avg = _get_avg_trade_rate(symbol)
         if _rate_avg > 0 and _rate_30s > 0:
             _rate_ratio = _rate_30s / _rate_avg
             if _rate_ratio < 0.5:
                 logger.info(
-                    f"[CONVICTION] {symbol} skipped — trade rate {_rate_30s:.2f}/s "
-                    f"is {_rate_ratio:.2f}× avg ({_rate_avg:.2f}/s) — low conviction"
+                    f"[LOGIC:UPDOWN:{symbol}] CONVICTION — rate={_rate_30s:.2f}/s "
+                    f"avg={_rate_avg:.2f}/s ratio={_rate_ratio:.2f}× (need ≥0.5×) → SKIP (low conviction)"
                 )
                 return None
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] CONVICTION — rate={_rate_30s:.2f}/s "
+                f"avg={_rate_avg:.2f}/s ratio={_rate_ratio:.2f}× → PASS"
+            )
 
         # ── MARKET REGIME FILTER ──────────────────────────────────────────────
-        # Skip signals in choppy/ranging markets where momentum accuracy ~50%
         regime = _market_regime(symbol)
         signal_dir = "UP" if window_return > 0 else "DOWN"
         if regime == "CHOPPY":
-            logger.info(f"[REGIME] {symbol} skipped — choppy market, momentum unreliable")
+            logger.info(
+                f"[LOGIC:UPDOWN:{symbol}] REGIME — {regime} signal={signal_dir} → SKIP (choppy = 50% noise)"
+            )
             return None
         if regime == "TRENDING_UP" and signal_dir == "DOWN":
-            logger.info(f"[REGIME] {symbol} skipped — TRENDING_UP regime contradicts DOWN signal")
+            logger.info(
+                f"[LOGIC:UPDOWN:{symbol}] REGIME — {regime} contradicts DOWN signal → SKIP"
+            )
             return None
         if regime == "TRENDING_DOWN" and signal_dir == "UP":
-            logger.info(f"[REGIME] {symbol} skipped — TRENDING_DOWN regime contradicts UP signal")
+            logger.info(
+                f"[LOGIC:UPDOWN:{symbol}] REGIME — {regime} contradicts UP signal → SKIP"
+            )
             return None
+        logger.debug(f"[LOGIC:UPDOWN:{symbol}] REGIME — {regime} compatible with {signal_dir} → PASS")
 
         # ── MEAN REVERSION CHECK ──────────────────────────────────────────────
-        # When window_return is extreme (>0.3%), reversion probability increases.
-        # Log it; analyst can use to tune. For now: downgrade to LOW confidence.
         _is_extreme_move = abs(window_return) >= 0.003  # 0.3%
+        if _is_extreme_move:
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] EXTREME-MOVE — win_ret={window_return:+.4%} ≥ 0.3% "
+                f"→ confidence will be capped at MEDIUM unless 3+ confirmations"
+            )
 
-        # ── FUNDING RATE CONFIRMATION (optional) ─────────────────────────────
-        # Positive funding = market leans bullish; negative = bearish.
-        # Use as a soft tiebreaker when other signals are borderline.
+        # ── FUNDING RATE CONFIRMATION ─────────────────────────────────────────
         _funding = _get_funding_rate(symbol)
         if _funding is not None:
             _funding_dir = "UP" if _funding > 0 else "DOWN"
-            if abs(_funding) > 0.0001 and _funding_dir != signal_dir:
-                logger.debug(
-                    f"[FUNDING] {symbol} funding_rate={_funding:.6f} contradicts {signal_dir} — "
-                    f"confidence downgraded"
-                )
-                # Don't block, just note for confidence scoring below
+            _funding_aligns = _funding_dir == signal_dir
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] FUNDING — rate={_funding:.6f} dir={_funding_dir} "
+                f"signal={signal_dir} → {'CONFIRMS' if _funding_aligns else 'CONTRADICTS'} "
+                f"{'(soft downgrade to confidence score)' if not _funding_aligns else ''}"
+            )
+        else:
+            logger.debug(f"[LOGIC:UPDOWN:{symbol}] FUNDING — no data (neutral)")
 
-        # ── OI DELTA CONFIRMATION (optional) ─────────────────────────────────
-        # Rising OI + price move = conviction; falling OI = possible exhaustion
+        # ── OI DELTA CONFIRMATION ─────────────────────────────────────────────
         _oi_delta = _get_oi_delta(symbol)
         _oi_confirms = _oi_delta is not None and _oi_delta > 0.001
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] OI-DELTA — delta={_oi_delta} "
+            f"→ {'CONFIRMS (rising OI = conviction)' if _oi_confirms else 'no confirmation'}"
+        )
 
         # ── CROSS-EXCHANGE DIVERGENCE ─────────────────────────────────────────
-        # Coinbase higher than Binance → arb pressure pushes Binance up
         _ce_div = _cross_exchange_divergence(symbol)
         _ce_confirms = abs(_ce_div) > 0.0002 and ((_ce_div > 0) == (window_return > 0))
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] CE-DIV — coinbase_vs_binance={_ce_div:+.4%} "
+            f"→ {'CONFIRMS arb pressure' if _ce_confirms else 'no confirmation'}"
+        )
 
-        # ── CONFIRMATION 0: momentum must be accelerating (not decelerating) ──
-        # If the trend is slowing down 45+ seconds in, mean reversion is likely.
-        # We skip — a fading move at 0.25% is still likely to revert by resolution.
+        # ── MOMENTUM ACCELERATION CHECK ───────────────────────────────────────
         if secs_in >= 45:
             accel = _price_acceleration(symbol)
-            if accel is not None and (accel > 0) != (window_return > 0):
-                logger.info(
-                    f"[UPDOWN] {symbol} skipped — momentum decelerating "
-                    f"(win_ret={window_return:+.4%}, accel={accel:+.4%})"
+            if accel is not None:
+                _accel_ok = (accel > 0) == (window_return > 0)
+                if not _accel_ok:
+                    logger.info(
+                        f"[LOGIC:UPDOWN:{symbol}] ACCEL — win_ret={window_return:+.4%} "
+                        f"accel={accel:+.4%} DECELERATING at t={secs_in:.0f}s → SKIP (mean reversion likely)"
+                    )
+                    return None
+                logger.debug(
+                    f"[LOGIC:UPDOWN:{symbol}] ACCEL — win_ret={window_return:+.4%} "
+                    f"accel={accel:+.4%} still accelerating → PASS"
                 )
-                return None
+        else:
+            logger.debug(f"[LOGIC:UPDOWN:{symbol}] ACCEL — t={secs_in:.0f}s < 45s, check skipped")
 
-        # ── CONFIRMATION 0b: multi-timeframe consensus must agree ─────────────
-        # Require at least MEDIUM consensus from 30s/60s/5m timeframes.
-        # If all timeframes agree the direction is opposite, skip.
+        # ── MULTI-TIMEFRAME CONSENSUS ─────────────────────────────────────────
         consensus_score, consensus_conf = _multitf_consensus(symbol)
         if consensus_conf not in ("NONE",) and consensus_score != 0.0:
             consensus_dir = "UP" if consensus_score > 0 else "DOWN"
             signal_dir    = "UP" if window_return > 0 else "DOWN"
             if consensus_dir != signal_dir:
                 logger.info(
-                    f"[UPDOWN] {symbol} skipped — multitf consensus {consensus_dir} "
-                    f"contradicts signal {signal_dir} (conf={consensus_conf})"
+                    f"[LOGIC:UPDOWN:{symbol}] MULTITF — score={consensus_score:+.2f} conf={consensus_conf} "
+                    f"consensus={consensus_dir} vs signal={signal_dir} → SKIP (timeframes disagree)"
                 )
                 return None
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] MULTITF — score={consensus_score:+.2f} conf={consensus_conf} "
+                f"consensus={consensus_dir} agrees with signal → PASS"
+            )
+        else:
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] MULTITF — score={consensus_score:+.2f} conf={consensus_conf} "
+                f"→ no strong consensus, proceeding"
+            )
 
-        # ── CONFIRMATION 1: consecutive window trend ─────────────────────────
+        # ── CONSECUTIVE WINDOW TREND ──────────────────────────────────────────
         trend_score = _consecutive_window_trend(symbol)  # -1..+1, None = unknown
         trend_dir_ok = True
         _min_trend = float(_ap.get("min_trend_score", 0.0))
         if trend_score is not None:
-            trend_direction = "UP" if trend_score > 0 else "DOWN"
+            trend_direction  = "UP" if trend_score > 0 else "DOWN"
             signal_direction = "UP" if window_return > 0 else "DOWN"
             if trend_direction != signal_direction and abs(trend_score) >= 0.5:
+                logger.debug(
+                    f"[LOGIC:UPDOWN:{symbol}] CW-TREND — score={trend_score:+.2f} "
+                    f"trend={trend_direction} contradicts signal={signal_direction} (|score|≥0.5) → SKIP"
+                )
                 return None
             trend_dir_ok = trend_direction == signal_direction
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] CW-TREND — score={trend_score:+.2f} "
+                f"trend={trend_direction} signal={signal_direction} "
+                f"aligned={'YES' if trend_dir_ok else 'NO (weak, not blocking)'}"
+            )
+        else:
+            logger.debug(f"[LOGIC:UPDOWN:{symbol}] CW-TREND — no data (neutral, not blocking)")
         if _min_trend > 0 and (trend_score is None or abs(trend_score) < _min_trend):
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] MIN-TREND — score={trend_score} < required {_min_trend} → SKIP"
+            )
             return None
 
-        # ── CONFIRMATION 2: BTC leadership for alts ──────────────────────────
+        # ── BTC LEADERSHIP ────────────────────────────────────────────────────
         btc_lead = _btc_leadership_signal(symbol)
         combined = window_return + btc_lead
-
         if btc_lead != 0.0 and (combined > 0) != (window_return > 0):
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] BTC-LEAD — btc={btc_lead:+.4%} "
+                f"combined={combined:+.4%} REVERSES signal direction → SKIP"
+            )
             return None
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] BTC-LEAD — btc={btc_lead:+.4%} "
+            f"win_ret={window_return:+.4%} combined={combined:+.4%} → PASS "
+            f"direction={'UP' if combined > 0 else 'DOWN'}"
+        )
 
         direction = "UP" if combined > 0 else "DOWN"
 
-        # ── Fair value ────────────────────────────────────────────────────────
+        # ── Fair value + edge ─────────────────────────────────────────────────
         fair_prob = compute_updown_fair_value(window_return, trend_score, trend_dir_ok)
 
         if direction == "UP":
@@ -708,9 +808,17 @@ class UpDownMomentumStrategy:
         edge = fair_value - mkt_price
 
         if edge < config.MIN_EDGE:
+            logger.debug(
+                f"[LOGIC:UPDOWN:{symbol}] EDGE — fair={fair_value:.3f} mkt={mkt_price:.3f} "
+                f"edge={edge:+.3f} < MIN_EDGE={config.MIN_EDGE:.3f} → SKIP (insufficient edge)"
+            )
             return None
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] EDGE — fair={fair_value:.3f} mkt={mkt_price:.3f} "
+            f"edge={edge:+.3f} ≥ MIN_EDGE={config.MIN_EDGE:.3f} → PASS"
+        )
 
-        # Confidence scoring: HIGH requires multiple confirmations
+        # ── CONFIDENCE SCORING ────────────────────────────────────────────────
         _confirmations = sum([
             abs(window_return) >= 0.003,                                      # strong move
             trend_score is not None and abs(trend_score) >= 0.75,            # strong trend
@@ -718,7 +826,6 @@ class UpDownMomentumStrategy:
             _ce_confirms,                                                      # cross-exchange confirms
             _funding is not None and ((_funding > 0) == (window_return > 0)), # funding aligns
         ])
-        # Downgrade if this looks like an extreme mean-reversion candidate
         if _is_extreme_move and _confirmations < 3:
             confidence = "MEDIUM"
         elif _confirmations >= 3:
@@ -727,6 +834,13 @@ class UpDownMomentumStrategy:
             confidence = "MEDIUM"
         else:
             confidence = "LOW"
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] CONFIDENCE — confirmations={_confirmations}/5 "
+            f"(strong_move={abs(window_return)>=0.003}, trend={trend_score is not None and abs(trend_score or 0)>=0.75}, "
+            f"oi={_oi_confirms}, ce={_ce_confirms}, "
+            f"funding={_funding is not None and ((_funding>0)==(window_return>0))}) "
+            f"extreme={_is_extreme_move} → {confidence}"
+        )
         pressure = _exchange_pressure(symbol)
 
         # Relative strength: how much does this signal exceed its own threshold?
@@ -753,13 +867,13 @@ class UpDownMomentumStrategy:
         # 3. Markov: boost if this direction has been persistent for this asset
         _markov_mult = _markov_persistence_mult(symbol, direction)
         _prob_mult   = _bayes_mult * _vol_mult * _markov_mult
+        _rel_before  = rel_strength
         rel_strength *= _prob_mult
-        if abs(_prob_mult - 1.0) > 0.05:
-            logger.debug(
-                f"[PROB] {symbol} bayes={_bayes_mult:.2f}×  vol={_vol_mult:.2f}×  "
-                f"markov={_markov_mult:.2f}×  → combined={_prob_mult:.2f}×  "
-                f"rel_strength={rel_strength:.2f}"
-            )
+        logger.debug(
+            f"[LOGIC:UPDOWN:{symbol}] PROB-MULTS — "
+            f"bayes={_bayes_mult:.3f}×  vol={_vol_mult:.3f}×  markov={_markov_mult:.3f}×  "
+            f"combined={_prob_mult:.3f}×  rel_strength: {_rel_before:.3f} → {rel_strength:.3f}"
+        )
 
         logger.info(
             f"[UPDOWN] {symbol} {direction}  "
@@ -830,15 +944,23 @@ class TrendFollowStrategy:
 
         direction = self._tracker.get_direction(symbol)
         if direction is None:
-            return None   # no history yet — UpDownMomentumStrategy handles cold starts
+            logger.debug(f"[LOGIC:TREND:{symbol}] DIRECTION — no history in TrendTracker → SKIP (cold start)")
+            return None
 
-        # Strict timing: same window as UpDownMomentumStrategy
+        # Strict timing
         secs_in = _market_seconds_into_window(market)
         if secs_in is None or secs_in < 5 or secs_in > 240:
+            logger.debug(
+                f"[LOGIC:TREND:{symbol}] TIMING — secs_in={secs_in} (need 5–240s) → SKIP"
+            )
             return None
 
         streak = self._tracker.get_streak(symbol)
         mid = order_book.mid if order_book else market.yes_price
+        logger.debug(
+            f"[LOGIC:TREND:{symbol}] STATE — direction={direction} streak={streak} "
+            f"mid={mid:.3f} t={secs_in:.0f}s"
+        )
 
         if direction == "UP":
             side  = "YES"
@@ -849,49 +971,93 @@ class TrendFollowStrategy:
             token = market.no_token
             mkt_price = 1.0 - mid
 
-        # Price must still be near 0.50 — if it's moved, we're too late
+        # Price guard: only enter near 0.50
         if mkt_price > self.MAX_ENTRY_PRICE:
+            logger.debug(
+                f"[LOGIC:TREND:{symbol}] PRICE-GUARD — mkt_price={mkt_price:.3f} "
+                f"> MAX={self.MAX_ENTRY_PRICE} (market moved, too late) → SKIP"
+            )
             return None
+        logger.debug(
+            f"[LOGIC:TREND:{symbol}] PRICE-GUARD — mkt_price={mkt_price:.3f} "
+            f"≤ MAX={self.MAX_ENTRY_PRICE} → PASS"
+        )
 
-        # Window-relative confirmation: current price must agree with trend direction.
+        # Window-relative confirmation: current Binance move must agree with streak direction
         window_return = _window_return(symbol, int(secs_in))
         if window_return is None:
+            logger.debug(f"[LOGIC:TREND:{symbol}] WINDOW-CONFIRM — window_return unavailable → SKIP")
             return None
         window_dir = "UP" if window_return > 0 else "DOWN"
         if window_dir != direction:
-            return None  # window-relative signal contradicts trend — sit out
-        combined = window_return + _btc_leadership_signal(symbol)
+            logger.debug(
+                f"[LOGIC:TREND:{symbol}] WINDOW-CONFIRM — win_ret={window_return:+.4%} "
+                f"dir={window_dir} contradicts streak direction={direction} → SKIP"
+            )
+            return None
+        logger.debug(
+            f"[LOGIC:TREND:{symbol}] WINDOW-CONFIRM — win_ret={window_return:+.4%} "
+            f"dir={window_dir} agrees with streak={direction} → PASS"
+        )
 
-        # Consecutive-window trend: if recent windows have been going the same
-        # way as our streak direction, boost the streak bonus slightly.
+        btc_lead = _btc_leadership_signal(symbol)
+        combined = window_return + btc_lead
+        logger.debug(
+            f"[LOGIC:TREND:{symbol}] BTC-LEAD — btc={btc_lead:+.4%} "
+            f"win_ret={window_return:+.4%} combined={combined:+.4%}"
+        )
+
+        # Consecutive-window trend boost
         cw_trend = _consecutive_window_trend(symbol)
         cw_boost = 0
         if cw_trend is not None:
             cw_dir = "UP" if cw_trend > 0 else "DOWN"
             if cw_dir == direction and abs(cw_trend) >= 0.5:
-                cw_boost = 1  # treat as +1 to streak for fair value calc
+                cw_boost = 1
+        logger.debug(
+            f"[LOGIC:TREND:{symbol}] CW-TREND — score={cw_trend} boost={cw_boost} "
+            f"(+1 to streak if recent windows align)"
+        )
 
+        # Fair value + edge
         fair_value = compute_trendfollow_fair_value(streak, cw_boost)
         edge = fair_value - mkt_price
-
         if edge < config.MIN_EDGE:
+            logger.debug(
+                f"[LOGIC:TREND:{symbol}] EDGE — fair={fair_value:.3f} mkt={mkt_price:.3f} "
+                f"edge={edge:+.3f} < MIN_EDGE={config.MIN_EDGE:.3f} → SKIP"
+            )
+            return None
+        logger.debug(
+            f"[LOGIC:TREND:{symbol}] EDGE — fair={fair_value:.3f} mkt={mkt_price:.3f} "
+            f"edge={edge:+.3f} ≥ MIN_EDGE={config.MIN_EDGE:.3f} → PASS"
+        )
+
+        # Binomial significance: P(k consecutive wins | p=0.5) = 0.5^k
+        confidence = _binomial_streak_confidence(streak)
+        _p_luck = 0.5 ** streak
+        logger.debug(
+            f"[LOGIC:TREND:{symbol}] BINOMIAL — streak={streak} "
+            f"P(luck)={_p_luck:.4f} → confidence={confidence}"
+        )
+        if confidence == "LOW" and abs(window_return) < _MIN_WINDOW_RETURN_PCT * 2:
+            logger.debug(
+                f"[LOGIC:TREND:{symbol}] LOW-CONF-GATE — LOW confidence + weak win_ret={window_return:+.4%} "
+                f"(need ≥{_MIN_WINDOW_RETURN_PCT*2:.4%}) → SKIP (too risky on fresh flip)"
+            )
             return None
 
-        # 4. Binomial significance gate: streak must be statistically improbable
-        #    to rate HIGH. Replaces "streak ≥ 3 = HIGH" (which is only 12.5% luck).
-        #      P(k wins | p=0.5) = 0.5^k
-        #      k ≥ 5 → p < 3.1% → HIGH  |  k = 3–4 → MEDIUM  |  k ≤ 2 → LOW
-        confidence = _binomial_streak_confidence(streak)
-        if confidence == "LOW" and abs(window_return) < _MIN_WINDOW_RETURN_PCT * 2:
-            return None   # fresh direction flip + weak window signal — too risky
-
-        # 1 & 3. Bayesian win rate + Markov persistence multipliers for ranking
+        # Probability multipliers (Bayesian + Markov; no Normal-vol for trend strategy)
         _tf_bayes  = _bayesian_win_rate_mult(symbol)
         _tf_markov = _markov_persistence_mult(symbol, direction)
         _tf_prob   = _tf_bayes * _tf_markov
-        # rel_strength: edge × streak significance × probability multipliers
-        # (edge / MIN_EDGE) normalises so a 2× MIN_EDGE signal = 2.0 base)
         _tf_rel_strength = (edge / config.MIN_EDGE) * (1.0 + streak * 0.1) * _tf_prob
+        logger.debug(
+            f"[LOGIC:TREND:{symbol}] PROB-MULTS — "
+            f"bayes={_tf_bayes:.3f}×  markov={_tf_markov:.3f}×  combined={_tf_prob:.3f}×  "
+            f"rel_strength={_tf_rel_strength:.3f} "
+            f"(base={edge/config.MIN_EDGE:.2f}× × streak_factor={1.0+streak*0.1:.2f}× × prob={_tf_prob:.3f}×)"
+        )
 
         _cw_str = f"{cw_trend:+.2f}" if cw_trend is not None else "N/A"
         logger.info(
