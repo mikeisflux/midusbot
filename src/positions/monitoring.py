@@ -181,32 +181,21 @@ class MonitoringMixin:
                 continue
 
             # ── Early exit / loss cut ─────────────────────────────────────────
+            # current_price is always the token price for the SIDE held.
+            # YES token falls when losing; NO token falls when losing.
+            # Both sides use the same direction: low price = loss, high price = gain.
             if current_price is not None:
-                if pos.side == "YES" and current_price < config.EARLY_EXIT_LOSS_THRESHOLD:
+                if current_price < config.EARLY_EXIT_LOSS_THRESHOLD:
                     to_close.append((token_id, current_price))
                     logger.info(
-                        f"[EARLY-EXIT] Cutting losing YES position at {current_price:.3f} "
+                        f"[EARLY-EXIT] Cutting losing {pos.side} position at {current_price:.3f} "
                         f"({pnl_pct:+.1%}) — {pos.question[:40]}"
                     )
                     continue
-                if pos.side == "NO" and current_price > (1.0 - config.EARLY_EXIT_LOSS_THRESHOLD):
+                if current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
                     to_close.append((token_id, current_price))
                     logger.info(
-                        f"[EARLY-EXIT] Cutting losing NO position at {current_price:.3f} "
-                        f"({pnl_pct:+.1%}) — {pos.question[:40]}"
-                    )
-                    continue
-                if pos.side == "YES" and current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
-                    to_close.append((token_id, current_price))
-                    logger.info(
-                        f"[EARLY-EXIT] Locking in YES gain at {current_price:.3f} "
-                        f"({pnl_pct:+.1%}) — {pos.question[:40]}"
-                    )
-                    continue
-                if pos.side == "NO" and current_price < (1.0 - config.EARLY_EXIT_GAIN_THRESHOLD):
-                    to_close.append((token_id, current_price))
-                    logger.info(
-                        f"[EARLY-EXIT] Locking in NO gain at {current_price:.3f} "
+                        f"[EARLY-EXIT] Locking in {pos.side} gain at {current_price:.3f} "
                         f"({pnl_pct:+.1%}) — {pos.question[:40]}"
                     )
                     continue
