@@ -542,14 +542,21 @@ class PositionsMixin:
         # Order book thinness filter: thick books mean MMs are active and have repriced.
         # Thin books (wide spread) = MMs absent = maximum oracle lag edge.
         # Skip if spread is very tight — means aggressive MMs are dominating the book.
-        if sig.best_ask is not None and sig.best_bid is not None and sig.best_bid > 0:
+        # For NO-side, use the NO token's book if available; fall back to YES book.
+        if sig.side == "NO" and sig.no_best_ask is not None:
+            # NO book: estimate spread as no_best_ask - (1 - YES best_ask)
+            _no_bid_est = (1.0 - sig.best_ask) if sig.best_ask is not None else 0.0
+            _spread = sig.no_best_ask - _no_bid_est if _no_bid_est > 0 else 1.0
+        elif sig.best_ask is not None and sig.best_bid is not None and sig.best_bid > 0:
             _spread = sig.best_ask - sig.best_bid
-            if _spread < config.OB_MIN_SPREAD:  # tight spread = MMs repricing fast = edge likely gone
-                logger.debug(
-                    f"[OB-THINNESS] {sig.question[:40]} — "
-                    f"spread={_spread:.3f} very tight, MMs repricing fast — skip"
-                )
-                return False
+        else:
+            _spread = 1.0  # unknown spread, allow trade
+        if _spread < config.OB_MIN_SPREAD:
+            logger.debug(
+                f"[OB-THINNESS] {sig.question[:40]} — "
+                f"spread={_spread:.3f} very tight, MMs repricing fast — skip"
+            )
+            return False
 
         # For 5-minute markets, always take liquidity — use ask price + FOK order type
         # so the order fills immediately or cancels. Never post maker orders on short windows:
@@ -560,15 +567,17 @@ class PositionsMixin:
         # Without this, a thin-book market with best_ask=0.99 causes the bot to
         # enter at 86-99¢ — instantly a 40%+ loss if price reverts to mid.
         # If the best ask is above the guard, the market has already repriced; skip.
-        if sig.best_ask is not None and sig.win_mins <= 5:
+        # For NO-side orders, use the NO token's ask price (not the YES token's ask).
+        _entry_ask = sig.no_best_ask if (sig.side == "NO" and sig.no_best_ask) else sig.best_ask
+        if _entry_ask is not None and sig.win_mins <= 5:
             _ask_guard = getattr(config, "ENTRY_PRICE_GUARD", 0.54)
-            if sig.best_ask > _ask_guard:
+            if _entry_ask > _ask_guard:
                 logger.info(
-                    f"[ASK-GUARD] Skipping — best_ask={sig.best_ask:.3f} > {_ask_guard:.2f} "
+                    f"[ASK-GUARD] Skipping — best_ask={_entry_ask:.3f} > {_ask_guard:.2f} "
                     f"(book too expensive to enter safely) {sig.question[:40]}"
                 )
                 return False
-            limit_price = sig.best_ask  # cross the spread, fill immediately
+            limit_price = _entry_ask  # cross the spread, fill immediately
             use_fok = True
         elif sig.side == "YES" and sig.best_bid is not None and sig.best_ask is not None:
             # Longer windows: maker order at mid is fine
