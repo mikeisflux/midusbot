@@ -425,6 +425,25 @@ class UpDownMomentumStrategy:
             f"combined={_prob_mult:.3f}×  rel_strength: {_rel_before:.3f} → {rel_strength:.3f}"
         )
 
+        # ── Probability gate — hard block, not just ranking ───────────────────
+        # Previously these multipliers only affected the sort key (rel_strength),
+        # so a signal with poor Bayesian accuracy still traded if it was the only
+        # signal available. Now the combined score is a real filter.
+        #
+        # All three multipliers fall back to 1.0 when data is sparse, so this
+        # gate is neutral on cold start and only activates after history builds.
+        #
+        # Threshold 0.75: Bayes(0.7×) × Markov(0.8×) × Vol(1.0×) = 0.56 → skip
+        # An asset with <45% historical accuracy + mean-reverting direction should not trade.
+        _PROB_GATE = 0.75
+        if _prob_mult < _PROB_GATE:
+            logger.info(
+                f"[LOGIC:UPDOWN:{symbol}] PROB-GATE — combined={_prob_mult:.3f} "
+                f"(bayes={_bayes_mult:.3f}× vol={_vol_mult:.3f}× markov={_markov_mult:.3f}×) "
+                f"< {_PROB_GATE} → SKIP (statistics say unfavorable odds)"
+            )
+            return None
+
         logger.info(
             f"[UPDOWN] {symbol} {direction}  "
             f"win_ret={window_return:+.4%}  thresh={_sig_thresh:.4%}  rel={rel_strength:.2f}×  "

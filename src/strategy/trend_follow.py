@@ -183,7 +183,7 @@ class TrendFollowStrategy:
             )
             return None
 
-        # ── Probability multipliers ───────────────────────────────────────────
+        # ── Probability multipliers + gate ───────────────────────────────────
         _tf_bayes  = _bayesian_win_rate_mult(symbol)
         _tf_markov = _markov_persistence_mult(symbol, direction)
         _tf_prob   = _tf_bayes * _tf_markov
@@ -194,6 +194,14 @@ class TrendFollowStrategy:
             f"rel_strength={_tf_rel_strength:.3f} "
             f"(base={edge/config.MIN_EDGE:.2f}× × streak_factor={1.0+streak*0.1:.2f}× × prob={_tf_prob:.3f}×)"
         )
+        _PROB_GATE = 0.75
+        if _tf_prob < _PROB_GATE:
+            logger.info(
+                f"[LOGIC:TREND:{symbol}] PROB-GATE — combined={_tf_prob:.3f} "
+                f"(bayes={_tf_bayes:.3f}× markov={_tf_markov:.3f}×) "
+                f"< {_PROB_GATE} → SKIP (statistics say unfavorable odds)"
+            )
+            return None
 
         _cw_str = f"{cw_trend:+.2f}" if cw_trend is not None else "N/A"
         logger.info(
