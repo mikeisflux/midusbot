@@ -546,7 +546,10 @@ class PositionsMixin:
         if sig.side == "NO" and sig.no_best_ask is not None:
             # NO book: estimate spread as no_best_ask - (1 - YES best_ask)
             _no_bid_est = (1.0 - sig.best_ask) if sig.best_ask is not None else 0.0
-            _spread = sig.no_best_ask - _no_bid_est if _no_bid_est > 0 else 1.0
+            # Negative spread = crossed book (exploitable mispricing, not tight MMs).
+            # Clamp to 1.0 so the thinness filter allows the trade through.
+            _raw = sig.no_best_ask - _no_bid_est if _no_bid_est > 0 else 1.0
+            _spread = _raw if _raw > 0 else 1.0
         elif sig.best_ask is not None and sig.best_bid is not None and sig.best_bid > 0:
             _spread = sig.best_ask - sig.best_bid
         else:
