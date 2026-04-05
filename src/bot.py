@@ -71,22 +71,44 @@ def _check_clock_sync() -> None:
 
 def _audit_api_latency() -> None:
     """
-    Measure round-trip latency to Binance and Polymarket APIs.
-    Log a warning if > 200ms (suggests server location may be suboptimal).
+    Measure round-trip latency to Binance and Polymarket APIs at startup.
+
+    Binance REST latency does NOT affect signal quality — prices come from
+    the WebSocket feed which is already connected by the time this runs.
+    Binance REST is only used for initial price-history loading and fallback.
+
+    Polymarket latency (Gamma + CLOB) directly affects order execution speed,
+    so those thresholds are stricter.
     """
     import requests as _req
+    # (name, url, warn_above_ms, note_if_high)
     endpoints = [
-        ("Binance",     "https://api.binance.com/api/v3/ping"),
-        ("Poly-Gamma",  "https://gamma-api.polymarket.com/markets?limit=1"),
-        ("Poly-CLOB",   "https://clob.polymarket.com/"),
+        (
+            "Binance",
+            "https://api.binance.com/api/v3/ping",
+            500,
+            "REST used for price-history bootstrap only — WebSocket already streaming",
+        ),
+        (
+            "Poly-Gamma",
+            "https://gamma-api.polymarket.com/markets?limit=1",
+            200,
+            "affects market scanning speed",
+        ),
+        (
+            "Poly-CLOB",
+            "https://clob.polymarket.com/",
+            200,
+            "affects order execution speed — relocate server if consistently >200ms",
+        ),
     ]
-    for name, url in endpoints:
+    for name, url, warn_ms, note in endpoints:
         try:
             t0  = time.time()
             _req.get(url, timeout=5)
             rtt = int((time.time() - t0) * 1000)
-            if rtt > 200:
-                logger.warning(f"[LATENCY-AUDIT] {name} RTT={rtt}ms — consider server relocation closer to APIs")
+            if rtt > warn_ms:
+                logger.warning(f"[LATENCY-AUDIT] {name} RTT={rtt}ms (>{warn_ms}ms) — {note}")
             else:
                 logger.info(f"[LATENCY-AUDIT] {name} RTT={rtt}ms ✓")
         except Exception as exc:
