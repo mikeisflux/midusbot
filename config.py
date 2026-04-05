@@ -104,9 +104,6 @@ OB_MIN_SPREAD:      float = float(os.getenv("OB_MIN_SPREAD", "0.005"))
 # Wallet replenishment alert threshold (USDC)
 WALLET_REPLENISH_ALERT: float = float(os.getenv("WALLET_REPLENISH_ALERT", "25.0"))
 
-# Conviction filter: minimum trade-rate ratio vs rolling average (0 = disabled)
-MIN_TRADE_RATE_RATIO: float = float(os.getenv("MIN_TRADE_RATE_RATIO", "0.5"))
-
 # Correlation cooldown between bets on correlated assets (seconds)
 COOLDOWN_SECS:      int = int(os.getenv("COOLDOWN_SECS", "300"))
 
@@ -119,5 +116,3 @@ POSITION_WALLET_PCT: float = float(os.getenv("POSITION_WALLET_PCT", "0.12"))
 # Polymarket win fee (2% on winnings — adjusts Kelly payout ratio)
 POLY_WIN_FEE:       float = float(os.getenv("POLY_WIN_FEE", "0.02"))
 
-# Pre-window entry: allow entering this many seconds before window fully opens
-PRE_WINDOW_ENTRY_SECS: int = int(os.getenv("PRE_WINDOW_ENTRY_SECS", "2"))

@@ -70,7 +70,10 @@ _COINGECKO_IDS: dict[str, str] = {
 _PRICE_CACHE: dict[str, tuple[float, float]] = {}     # symbol → (price, timestamp)
 _EXCHANGE_PRESSURE: dict[str, float] = {}            # symbol → bid/ask imbalance (-1..+1)
 _CACHE_TTL       = 2.0   # seconds — fresh price window (WS keeps this hot)
-_CACHE_TTL_STALE = 60.0  # seconds — stale-but-usable fallback when WS/REST fail
+_CACHE_TTL_STALE = 30.0  # seconds — stale-but-usable fallback when WS/REST fail
+# NOTE: 5-min UpDown oracle lag edge exists only in the first ~90s of a window.
+# A 60s stale price would consume 2/3 of the edge window before trading. 30s is
+# the upper bound — if price is older than this, skip rather than trade on fiction.
 
 # Feed health: track last WS tick time per symbol for diagnostics
 _LAST_WS_TICK: dict[str, float] = {}  # symbol → timestamp of last WS aggTrade

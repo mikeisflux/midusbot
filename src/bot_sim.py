@@ -127,7 +127,10 @@ class SimMixin:
             sim_cost = sim.get("shares", 0.0) * sim.get("entry", 0.5)
             if config.DRY_RUN:
                 self._learner.record_close(_sim_tid, exit_price)
-            self._risk.record_close(pnl_usdc=net_pnl, cost_usdc=sim_cost)
+                # Only update risk accounting from sim in DRY_RUN — in live mode,
+                # _close_position() already recorded the real PnL via record_close().
+                # Calling it again here would double-count daily P&L.
+                self._risk.record_close(pnl_usdc=net_pnl, cost_usdc=sim_cost)
             self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
             self._positions.pop(sim["token_id"], None)
