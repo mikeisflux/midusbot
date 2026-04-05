@@ -106,8 +106,8 @@ def tool_analyst_history(limit: int = 5) -> list[dict]:
 def tool_alpha_decay() -> dict:
     """Return alpha decay analysis from learner."""
     try:
-        from src.learner import Learner
-        learner = Learner()
+        from src.learner import AdaptiveLearner
+        learner = AdaptiveLearner()
         return {"report": learner.alpha_decay_report()}
     except Exception as e:
         return {"error": str(e)}
@@ -116,8 +116,8 @@ def tool_alpha_decay() -> dict:
 def tool_feature_importance() -> dict:
     """Return signal feature importance from learner."""
     try:
-        from src.learner import Learner
-        learner = Learner()
+        from src.learner import AdaptiveLearner
+        learner = AdaptiveLearner()
         return {"report": learner.feature_importance()}
     except Exception as e:
         return {"error": str(e)}
@@ -130,10 +130,10 @@ def tool_backtest(lookback_days: int = 7) -> dict:
         engine = BacktestEngine()
         results = engine.run(lookback_days=lookback_days)
         return {
-            "total_trades": results.total_trades,
+            "total_trades": results.n_trades,
             "win_rate": round(results.win_rate, 3),
             "total_pnl": round(results.total_pnl, 2),
-            "per_asset": results.per_asset,
+            "by_asset": results.by_asset,
         }
     except Exception as e:
         return {"error": str(e)}

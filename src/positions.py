@@ -91,6 +91,7 @@ class PositionsMixin:
                 if not market_active or market_closed:
                     # Check price before pruning — may be a winning position to redeem
                     _final_price = self._gamma_position_price(pos)
+                    _risk_closed = False
                     if not config.DRY_RUN and _final_price >= 0.97:
                         logger.info(
                             f"AUTO-CLAIM (external): resolved WIN @ {_final_price:.3f} "
@@ -104,6 +105,7 @@ class PositionsMixin:
                                 cost = pos.cost_usdc if not pos.is_external else 0.0
                                 fee  = self._risk.trade_fee(cost, _final_price * pos.shares)
                                 self._risk.record_close(pnl_usdc=pnl - fee, cost_usdc=cost)
+                                _risk_closed = True
                                 self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
                                 symbol = _detect_updown_market(pos.question)
                                 if symbol:
@@ -135,8 +137,10 @@ class PositionsMixin:
                         if _prune_sym:
                             _prune_dir = "UP" if pos.side == "YES" else "DOWN"
                             self._trend_tracker.record_result(_prune_sym, _prune_dir, won=False)
-                    _prune_cost = pos.cost_usdc if not pos.is_external else 0.0
-                    self._risk.record_close(pnl_usdc=-_prune_cost, cost_usdc=_prune_cost)
+                    # Free exposure — skip if WIN path already did it
+                    if not _risk_closed:
+                        _prune_cost = pos.cost_usdc if not pos.is_external else 0.0
+                        self._risk.record_close(pnl_usdc=-_prune_cost, cost_usdc=_prune_cost)
                     if pos.market_id:
                         self._mark_market_closed(pos.market_id)
                     del self._positions[token_id]

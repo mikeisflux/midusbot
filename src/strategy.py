@@ -56,7 +56,7 @@ _AP_CACHE_TTL: float = 5.0   # seconds
 def _load_analyst_params_cached() -> dict:
     global _AP_CACHE, _AP_CACHE_TS
     now = time.time()
-    if now - _AP_CACHE_TS < _AP_CACHE_TTL and _AP_CACHE:
+    if now - _AP_CACHE_TS < _AP_CACHE_TTL and _AP_CACHE_TS > 0:
         return _AP_CACHE
     try:
         from src.analyst import load_params
