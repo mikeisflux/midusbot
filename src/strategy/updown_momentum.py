@@ -413,7 +413,7 @@ class UpDownMomentumStrategy:
             logger.debug(f"[UPDOWN] {symbol} prefer_assets boost → rel_strength={rel_strength:.2f}×")
 
         # ── Advanced probability modifiers ────────────────────────────────────
-        _bayes_mult  = _bayesian_win_rate_mult(symbol)
+        _bayes_mult  = _bayesian_win_rate_mult(symbol, direction)
         _vol_mult    = _normal_vol_mult(symbol, window_return)
         _markov_mult = _markov_persistence_mult(symbol, direction)
         _prob_mult   = _bayes_mult * _vol_mult * _markov_mult

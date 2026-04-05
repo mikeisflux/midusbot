@@ -57,59 +57,83 @@ def _load_prob_stats(symbol: str, lookback: int = 100) -> dict:
 
     recent = entries[-lookback:]
 
-    # Bayesian: signal win/loss counts
-    signaled = [e for e in recent if e.get("signal_direction") is not None]
-    wins     = sum(1 for e in signaled if e.get("signal_correct"))
-    losses   = len(signaled) - wins
+    # Directional counts from ALL windows (not just signaled ones).
+    # session_tracker records actual_direction for every 5-min window it
+    # observes, regardless of whether the bot traded.  This gives hundreds
+    # of data points per asset vs. the handful of actual trades.
+    directions = [e["actual_direction"] for e in recent if e.get("actual_direction")]
+    up_count   = sum(1 for d in directions if d == "UP")
+    down_count = len(directions) - up_count
 
-    # Normal vol: distribution of |pct_change| per 5-min window
+    # Normal vol: distribution of |pct_change| per 5-min window (all windows)
     moves    = [abs(e["pct_change"]) for e in recent if e.get("pct_change") is not None]
     vol_mean = float(np.mean(moves)) if len(moves) >= 15 else None
     vol_std  = float(np.std(moves))  if len(moves) >= 15 else None
 
-    # Markov: sequence of actual_direction outcomes
-    directions = [e["actual_direction"] for e in recent if e.get("actual_direction")]
+    # Also keep signal accuracy for debug/logging
+    signaled = [e for e in recent if e.get("signal_direction") is not None]
+    sig_wins  = sum(1 for e in signaled if e.get("signal_correct"))
 
     stats: dict = {
-        "bayes_wins":   wins,
-        "bayes_losses": losses,
-        "n_signaled":   len(signaled),
+        "up_count":     up_count,
+        "down_count":   down_count,
+        "n_windows":    len(directions),
         "vol_mean":     vol_mean,
         "vol_std":      vol_std,
         "n_moves":      len(moves),
         "directions":   directions,
+        # legacy — still used for debug logging
+        "bayes_wins":   sig_wins,
+        "bayes_losses": len(signaled) - sig_wins,
+        "n_signaled":   len(signaled),
     }
     with _PROB_LOCK:
         _PROB_CACHE[sym] = (stats, now)
     return stats
 
 
-def _bayesian_win_rate_mult(symbol: str) -> float:
+def _bayesian_win_rate_mult(symbol: str, signal_dir: str = "UP") -> float:
     """
-    1. Bayesian win-rate multiplier.
+    1. Bayesian directional base-rate multiplier.
 
-    Uses a Beta(2, 2) prior (weakly centred at 0.5) updated with
-    observed signal_correct counts from session_log.
+    Uses ALL logged window outcomes (actual_direction) — not just windows
+    where the bot traded.  session_tracker records every 5-min window close
+    for every scanned asset, giving hundreds of data points per asset.
 
-      posterior_mean = (2 + wins) / (4 + wins + losses)
-      multiplier     = 1.0 + (posterior_mean − 0.5) × 1.5
+    Measures: P(window goes signal_dir) from the historical base rate.
+
+      count_signal = windows that went signal_dir direction
+      count_opp    = windows that went the opposite direction
+      posterior    = Beta(2+count_signal, 2+count_opp) mean
+                   = (2 + count_signal) / (4 + total_windows)
+      multiplier   = 1.0 + (posterior − 0.5) × 1.5
       clamped to [0.5, 1.5]
 
-    At posterior 0.5 (no data / 50-50) → ×1.0 (neutral).
-    At posterior 0.7 (good accuracy)   → ×1.3 (boost).
-    At posterior 0.3 (bad accuracy)    → ×0.7 (penalise).
+    Example: BTC went UP 55 of last 100 windows:
+      posterior for UP  = 57/104 = 0.548 → ×1.07 (slight boost)
+      posterior for DOWN = 47/104 = 0.452 → ×0.93 (slight penalty)
+
+    Neutral (×1.0) when fewer than 10 windows logged.
     """
-    s      = _load_prob_stats(symbol)
-    wins   = s["bayes_wins"]
-    losses = s["bayes_losses"]
-    n      = wins + losses
-    posterior_mean = (2.0 + wins) / (4.0 + wins + losses)
+    s           = _load_prob_stats(symbol)
+    n_windows   = s["n_windows"]
+    count_sig   = s["up_count"]   if signal_dir == "UP" else s["down_count"]
+    count_opp   = s["down_count"] if signal_dir == "UP" else s["up_count"]
+
+    if n_windows < 10:
+        logger.debug(
+            f"[LOGIC:BAYES:{symbol}] n={n_windows} windows (need 10) → mult=1.00× (neutral)"
+        )
+        return 1.0
+
+    posterior_mean = (2.0 + count_sig) / (4.0 + count_sig + count_opp)
     mult = 1.0 + (posterior_mean - 0.5) * 1.5
     mult = float(np.clip(mult, 0.5, 1.5))
     logger.debug(
-        f"[LOGIC:BAYES:{symbol}] n={n} signals  wins={wins} losses={losses}  "
+        f"[LOGIC:BAYES:{symbol}] dir={signal_dir}  "
+        f"{count_sig}/{n_windows} windows went {signal_dir}  "
         f"posterior={posterior_mean:.3f}  → mult={mult:.3f}×  "
-        f"({'neutral — no data' if n == 0 else 'boosting accuracy' if posterior_mean > 0.5 else 'penalising bad accuracy'})"
+        f"({'favourable' if posterior_mean > 0.5 else 'unfavourable'})"
     )
     return mult
 

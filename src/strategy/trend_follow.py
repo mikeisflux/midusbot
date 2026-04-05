@@ -184,7 +184,7 @@ class TrendFollowStrategy:
             return None
 
         # ── Probability multipliers + gate ───────────────────────────────────
-        _tf_bayes  = _bayesian_win_rate_mult(symbol)
+        _tf_bayes  = _bayesian_win_rate_mult(symbol, direction)
         _tf_markov = _markov_persistence_mult(symbol, direction)
         _tf_prob   = _tf_bayes * _tf_markov
         _tf_rel_strength = (edge / config.MIN_EDGE) * (1.0 + streak * 0.1) * _tf_prob
