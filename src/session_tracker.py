@@ -147,6 +147,11 @@ def get_asset_stats(symbol: str, lookback: int = 60) -> dict:
     recent   = entries[-lookback:]
     if not recent:
         return {}
+    # Exclude flat windows (pct_change ≈ 0) — these were written before the
+    # write-time filter was added and would bias accuracy metrics.
+    recent   = [e for e in recent if abs(e.get("pct_change", 1.0)) >= 1e-8]
+    if not recent:
+        return {}
     signaled = [e for e in recent if e.get("signal_direction") is not None]
     correct  = [e for e in signaled if e.get("signal_correct")]
     return {
@@ -201,7 +206,8 @@ def update_with_timing(
         if sym in _active:
             entry_start, open_price, entry_dir = _active[sym]
             if win_start > entry_start + 10:
-                _close_window_with_timing(sym, entry_start, open_price, current_price, entry_dir)
+                _close_window_with_timing(sym, entry_start, open_price, current_price,
+                                          entry_dir, secs_in=secs_into_window)
                 _active[sym] = (win_start, current_price, signal_direction)
             else:
                 if signal_direction is not None and entry_dir is None:
