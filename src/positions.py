@@ -135,7 +135,8 @@ class PositionsMixin:
                         if _prune_sym:
                             _prune_dir = "UP" if pos.side == "YES" else "DOWN"
                             self._trend_tracker.record_result(_prune_sym, _prune_dir, won=False)
-                    self._risk.record_close()
+                    _prune_cost = pos.cost_usdc if not pos.is_external else 0.0
+                    self._risk.record_close(pnl_usdc=-_prune_cost, cost_usdc=_prune_cost)
                     if pos.market_id:
                         self._mark_market_closed(pos.market_id)
                     del self._positions[token_id]
