@@ -944,7 +944,7 @@ class PositionsMixin:
         balance = self._dash_state.wallet_balance
         if balance <= 0:
             return
-        _REPLENISH_THRESHOLD = 25.0
+        _REPLENISH_THRESHOLD = config.WALLET_REPLENISH_ALERT
         if not hasattr(self, "_replenish_alerted"):
             self._replenish_alerted = False
         if balance < _REPLENISH_THRESHOLD and not self._replenish_alerted:
