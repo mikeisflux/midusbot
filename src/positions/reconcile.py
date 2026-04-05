@@ -86,7 +86,7 @@ class ReconcileMixin:
             ob = self._client.get_order_book(token_id)
             cur_price = ob.mid if ob is not None else avg_price
 
-            if cur_price >= 0.97 and not config.DRY_RUN:
+            if cur_price >= 0.90 and not config.DRY_RUN:
                 logger.info(
                     f"  AUTO-REDEEM: resolved WIN (price={cur_price:.2f}) "
                     f"{size:.2f} shares — {question[:50]}"

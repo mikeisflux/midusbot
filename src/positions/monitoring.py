@@ -7,9 +7,11 @@ MonitoringMixin provides:
 """
 from __future__ import annotations
 
+import time
+
 from loguru import logger
 
-from src.strategy import _detect_updown_market
+from src.strategy import _detect_updown_market, _updown_window_mins
 import config
 
 
@@ -46,7 +48,7 @@ class MonitoringMixin:
                 if not market_active or market_closed:
                     _final_price = self._gamma_position_price(pos)
                     _risk_closed = False
-                    if not config.DRY_RUN and _final_price >= 0.97:
+                    if not config.DRY_RUN and _final_price >= 0.90:
                         logger.info(
                             f"AUTO-CLAIM (external): resolved WIN @ {_final_price:.3f} "
                             f"({pos.shares:.2f} shares)  {pos.question[:50]}"
@@ -106,7 +108,7 @@ class MonitoringMixin:
 
             # ── WIN auto-claim ────────────────────────────────────────────────
             if not config.DRY_RUN:
-                if current_price >= 0.97:
+                if current_price >= 0.90:
                     logger.info(
                         f"AUTO-CLAIM: resolved WIN @ {current_price:.3f} "
                         f"({pos.shares:.2f} shares)  {pos.question[:50]}"
@@ -199,6 +201,22 @@ class MonitoringMixin:
                         f"({pnl_pct:+.1%}) — {pos.question[:40]}"
                     )
                     continue
+
+            # ── Time-based exit: sell before window resolves ──────────────────
+            # 5-min markets snap to 0 at close — don't hold into resolution if not winning.
+            if not pos.is_external and current_price is not None:
+                _sym = _detect_updown_market(pos.question)
+                if _sym and getattr(pos, "entry_time", 0) > 0:
+                    _elapsed = time.time() - pos.entry_time
+                    _window_secs = (_updown_window_mins(pos.question) or 5) * 60
+                    _secs_remaining = _window_secs - _elapsed
+                    if _secs_remaining < 75 and current_price < 0.62:
+                        to_close.append((token_id, current_price))
+                        logger.info(
+                            f"[TIME-EXIT] {_secs_remaining:.0f}s left, token={current_price:.3f} "
+                            f"— exiting before resolution  {pos.question[:40]}"
+                        )
+                        continue
 
             if not pos.is_external and pos.entry_price > 0:
                 if self._risk.should_stop_loss(pnl_pct):

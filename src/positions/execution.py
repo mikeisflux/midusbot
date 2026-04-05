@@ -52,6 +52,7 @@ class ExecutionMixin:
         if resp is None:
             ob = self._client.get_order_book(token_id)
             book_best_bid = ob.best_bid if ob else 0.0
+            _ob_dead = ob is None  # no orderbook = market likely resolved
             if book_best_bid > 0.0:
                 sell_price = book_best_bid
             elif current_price is not None and current_price > 0.05:
@@ -59,15 +60,18 @@ class ExecutionMixin:
             else:
                 sell_price = pos.entry_price
             _is_updown = _detect_updown_market(pos.question) is not None
-            resp = self._client.place_limit_order(
-                token_id=token_id,
-                side="SELL",
-                price=sell_price,
-                size=pos.shares,
-                fok=_is_updown,
-            )
+            if not _ob_dead:
+                resp = self._client.place_limit_order(
+                    token_id=token_id,
+                    side="SELL",
+                    price=sell_price,
+                    size=pos.shares,
+                    fok=_is_updown,
+                )
 
-        if resp is None and pos.market_id and current_price is not None and current_price >= 0.97:
+        # Redeem fallback: if sell failed/skipped and orderbook is gone, always try redeem.
+        # Win positions get paid out; loss positions get $0 but the stuck position is cleared.
+        if resp is None and pos.market_id and _ob_dead:
             neg_risk = False
             try:
                 mkt = self._client.get_clob_market(pos.market_id)
@@ -75,9 +79,18 @@ class ExecutionMixin:
                     neg_risk = bool(mkt.get("neg_risk", False))
             except Exception:
                 pass
+            logger.info(
+                f"No orderbook for {pos.question[:40]} — attempting redeem "
+                f"(price={current_price:.3f if current_price else 'n/a'})"
+            )
             redeemed = self._client.redeem_position(pos.market_id, neg_risk=neg_risk)
             if redeemed:
                 resp = {"redeemed": True}
+            else:
+                logger.warning(
+                    f"Redeem failed for {pos.question[:40]} — force-removing stuck position"
+                )
+                resp = {"force_closed": True}
 
         if resp:
             exit_price = current_price or pos.entry_price
@@ -290,6 +303,22 @@ class ExecutionMixin:
             logger.info(f"[SIZE] Skipping after floor — {shares:.0f} shares < {config.MIN_ORDER_SHARES}")
             return False
 
+        # ── Final staleness check ─────────────────────────────────────────────
+        # Re-fetch live orderbook right before placing the order. Signals are
+        # evaluated seconds before execution — market can reprice in that window.
+        # We saw entries at 0.31 and 0.40 due to stale signal prices.
+        if not config.DRY_RUN:
+            _ob_live = self._client.get_order_book(sig.token_id)
+            if _ob_live is not None and _ob_live.mid > 0:
+                _live_mid = _ob_live.mid
+                _guard = config.ENTRY_PRICE_GUARD
+                if _live_mid > _guard or _live_mid < (1.0 - _guard):
+                    logger.info(
+                        f"[STALE-GUARD] Market moved to {_live_mid:.3f} before order "
+                        f"— outside [{1-_guard:.2f},{_guard:.2f}] — skip {sig.question[:40]}"
+                    )
+                    return False
+
         _order_start = time.time()
         resp = self._client.place_limit_order(
             token_id=sig.token_id,
@@ -344,6 +373,7 @@ class ExecutionMixin:
                 composite_signal=sig.signal,
                 confidence=sig.confidence,
                 order_id=resp.get("id") if isinstance(resp, dict) else None,
+                entry_time=time.time(),
             )
             self._save_positions()
 

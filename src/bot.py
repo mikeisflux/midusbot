@@ -155,6 +155,7 @@ class OpenPosition:
     confidence: str = "LOW"
     order_id: Optional[str] = None
     is_external: bool = False
+    entry_time: float = 0.0  # unix timestamp for time-based exits
 
 
 class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
