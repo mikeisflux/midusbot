@@ -43,100 +43,105 @@ class SimMixin:
     def _process_sim_queue(self) -> None:
         now = time.time()
         still_open = []
-        for sim in self._sim_queue:
-            if now < sim["close_after"]:
-                still_open.append(sim)
-                continue
+        try:
+            for sim in self._sim_queue:
+                if now < sim["close_after"]:
+                    still_open.append(sim)
+                    continue
 
-            exit_price = None
+                exit_price = None
 
-            if sim.get("market_id"):
-                try:
-                    mkt = self._client.get_clob_market(sim["market_id"])
-                    if mkt:
-                        for tok in mkt.get("tokens") or []:
-                            if str(tok.get("token_id", "")) == sim["token_id"]:
-                                p = float(tok.get("price") or 0)
-                                if p > 0.95 or (0.0 < p < 0.05):
-                                    exit_price = p
-                                break
-                except Exception:
-                    pass
+                if sim.get("market_id"):
+                    try:
+                        mkt = self._client.get_clob_market(sim["market_id"])
+                        if mkt:
+                            for tok in mkt.get("tokens") or []:
+                                if str(tok.get("token_id", "")) == sim["token_id"]:
+                                    p = float(tok.get("price") or 0)
+                                    if p > 0.95 or (0.0 < p < 0.05):
+                                        exit_price = p
+                                    break
+                    except Exception:
+                        pass
 
-            if exit_price is None:
-                try:
-                    ob = self._client.get_order_book(sim["token_id"])
-                    if ob:
-                        if ob.best_bid > 0.95:
-                            exit_price = ob.best_bid
-                        elif 0.0 < ob.best_bid < 0.05:
-                            exit_price = ob.best_bid
-                except Exception:
-                    pass
+                if exit_price is None:
+                    try:
+                        ob = self._client.get_order_book(sim["token_id"])
+                        if ob:
+                            if ob.best_bid > 0.95:
+                                exit_price = ob.best_bid
+                            elif 0.0 < ob.best_bid < 0.05:
+                                exit_price = ob.best_bid
+                    except Exception:
+                        pass
 
-            if exit_price is None and now < sim["close_after"] + 600:
-                still_open.append(sim)
-                continue
+                if exit_price is None and now < sim["close_after"] + 600:
+                    still_open.append(sim)
+                    continue
 
-            if exit_price is None:
-                try:
-                    ob = self._client.get_order_book(sim["token_id"])
-                    if ob:
-                        exit_price = ob.best_bid if ob.best_bid > 0.01 else ob.best_ask
-                except Exception:
-                    pass
-            if exit_price is None:
-                noise      = random.gauss(0, 0.018)
-                exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
+                if exit_price is None:
+                    try:
+                        ob = self._client.get_order_book(sim["token_id"])
+                        if ob:
+                            exit_price = ob.best_bid if ob.best_bid > 0.01 else ob.best_ask
+                    except Exception:
+                        pass
+                if exit_price is None:
+                    noise      = random.gauss(0, 0.018)
+                    exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
 
-            self._sim.close_position(sim["token_id"], exit_price)
+                self._sim.close_position(sim["token_id"], exit_price)
 
-            gross_pnl  = round(sim["shares"] * (exit_price - sim["entry"]), 4)
-            entry_usdc = sim["shares"] * sim["entry"]
-            exit_usdc  = sim["shares"] * exit_price
-            fee        = self._risk.trade_fee(entry_usdc, exit_usdc)
-            net_pnl    = round(gross_pnl - fee, 4)
+                gross_pnl  = round(sim["shares"] * (exit_price - sim["entry"]), 4)
+                entry_usdc = sim["shares"] * sim["entry"]
+                exit_usdc  = sim["shares"] * exit_price
+                fee        = self._risk.trade_fee(entry_usdc, exit_usdc)
+                net_pnl    = round(gross_pnl - fee, 4)
 
-            if net_pnl >= 0:
-                self._dash_state.add_exec_log("filled",
-                    f"FILLED +${net_pnl:.2f} (fee ${fee:.3f}) // market converged  \"{sim['question'][:38]}\"")
-            else:
-                self._dash_state.add_exec_log("slipped",
-                    f"SLIPPED ${net_pnl:.2f} (fee ${fee:.3f}) // adverse fill  \"{sim['question'][:38]}\"")
+                if net_pnl >= 0:
+                    self._dash_state.add_exec_log("filled",
+                        f"FILLED +${net_pnl:.2f} (fee ${fee:.3f}) // market converged  \"{sim['question'][:38]}\"")
+                else:
+                    self._dash_state.add_exec_log("slipped",
+                        f"SLIPPED ${net_pnl:.2f} (fee ${fee:.3f}) // adverse fill  \"{sim['question'][:38]}\"")
 
-            _sim_tid = sim["token_id"]
-            # In DRY_RUN, write sim journal entry if not already tracked.
-            # In live mode, the real trade already recorded itself — skip to avoid
-            # polluting the journal with dry_run=True phantom entries.
-            if config.DRY_RUN and not self._learner.has_open(token_id=_sim_tid):
-                self._learner.record_open(
-                    market_id=sim.get("market_id", ""),
-                    token_id=_sim_tid,
-                    side=sim.get("side", "YES"),
-                    question=sim.get("question", ""),
-                    entry_price=sim.get("entry", 0.5),
-                    shares=sim.get("shares", 0.0),
-                    cost_usdc=sim.get("shares", 0.0) * sim.get("entry", 0.5),
-                    momentum_signal=sim.get("momentum_signal", 0.0),
-                    imbalance_signal=sim.get("imbalance_signal", 0.0),
-                    composite_signal=0.0,
-                    confidence=sim.get("confidence", "LOW"),
-                    rel_strength=sim.get("rel_strength", 0.0),
-                    dry_run=True,
-                )
-            sim_cost = sim.get("shares", 0.0) * sim.get("entry", 0.5)
-            if config.DRY_RUN:
-                self._learner.record_close(_sim_tid, exit_price)
-                # Only update risk accounting from sim in DRY_RUN — in live mode,
-                # _close_position() already recorded the real PnL via record_close().
-                # Calling it again here would double-count daily P&L.
-                self._risk.record_close(pnl_usdc=net_pnl, cost_usdc=sim_cost)
-            self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
+                _sim_tid = sim["token_id"]
+                # In DRY_RUN, write sim journal entry if not already tracked.
+                # In live mode, the real trade already recorded itself — skip to avoid
+                # polluting the journal with dry_run=True phantom entries.
+                if config.DRY_RUN and not self._learner.has_open(token_id=_sim_tid):
+                    self._learner.record_open(
+                        market_id=sim.get("market_id", ""),
+                        token_id=_sim_tid,
+                        side=sim.get("side", "YES"),
+                        question=sim.get("question", ""),
+                        entry_price=sim.get("entry", 0.5),
+                        shares=sim.get("shares", 0.0),
+                        cost_usdc=sim.get("shares", 0.0) * sim.get("entry", 0.5),
+                        momentum_signal=sim.get("momentum_signal", 0.0),
+                        imbalance_signal=sim.get("imbalance_signal", 0.0),
+                        composite_signal=0.0,
+                        confidence=sim.get("confidence", "LOW"),
+                        rel_strength=sim.get("rel_strength", 0.0),
+                        dry_run=True,
+                    )
+                sim_cost = sim.get("shares", 0.0) * sim.get("entry", 0.5)
+                if config.DRY_RUN:
+                    self._learner.record_close(_sim_tid, exit_price)
+                    # Only update risk accounting from sim in DRY_RUN — in live mode,
+                    # _close_position() already recorded the real PnL via record_close().
+                    # Calling it again here would double-count daily P&L.
+                    self._risk.record_close(pnl_usdc=net_pnl, cost_usdc=sim_cost)
+                self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
-            self._positions.pop(sim["token_id"], None)
+                self._positions.pop(sim["token_id"], None)
 
-        self._sim_queue = still_open
-        self._save_sim_queue()
+        finally:
+            # Always commit whatever we've processed — even if an exception fires
+            # mid-loop. Without this, queue items that already ran could re-process
+            # on the next tick, double-counting P&L.
+            self._sim_queue = still_open
+            self._save_sim_queue()
 
         if config.DRY_RUN:
             sim_open_cost = sum(t.cost_usdc for t in self._sim._open.values())

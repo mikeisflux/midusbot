@@ -155,6 +155,7 @@ class SimPortfolio:
         """
         trade = self._open.pop(token_id, None)
         if trade is None:
+            logger.debug(f"[SIM] close_position: {token_id[:12]}… not in open positions (already closed?)")
             return 0.0
         gross = exit_price * trade.shares
         pnl   = round(gross - trade.cost_usdc, 6)

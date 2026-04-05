@@ -749,6 +749,11 @@ class PositionsMixin:
                     count += 1
             if count:
                 logger.info(f"Restored {count} open position(s) from disk.")
+                # Rebuild risk exposure counter from loaded positions so GROUP_CAP
+                # is correctly enforced immediately after restart, not just after
+                # the first trade cycle.
+                for pos in self._positions.values():
+                    self._risk.record_open(cost_usdc=getattr(pos, "cost_usdc", 0.0))
         except Exception as exc:
             logger.warning(f"_load_positions failed: {exc}")
 
