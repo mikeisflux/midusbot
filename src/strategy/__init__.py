@@ -38,6 +38,7 @@ from src.strategy.prob_stats import (
     _normal_vol_mult,
     _markov_persistence_mult,
     _binomial_streak_confidence,
+    _actual_direction_streak,
 )
 # signals re-exports — scanner.py and bot.py import these from src.strategy
 # because the old strategy.py imported them at module level

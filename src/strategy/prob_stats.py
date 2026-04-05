@@ -70,7 +70,20 @@ def _load_prob_stats(symbol: str, lookback: int = 100) -> dict:
     vol_mean = float(np.mean(moves)) if len(moves) >= 15 else None
     vol_std  = float(np.std(moves))  if len(moves) >= 15 else None
 
-    # Also keep signal accuracy for debug/logging
+    # Consecutive streak from the tail of the directions list
+    # e.g. [..., UP, UP, UP] → streak_up=3, streak_down=0
+    streak_up = streak_down = 0
+    for d in reversed(directions):
+        if d == "UP":
+            if streak_down > 0:
+                break
+            streak_up += 1
+        else:
+            if streak_up > 0:
+                break
+            streak_down += 1
+
+    # Signal accuracy kept for debug/logging (not used in gates)
     signaled = [e for e in recent if e.get("signal_direction") is not None]
     sig_wins  = sum(1 for e in signaled if e.get("signal_correct"))
 
@@ -78,11 +91,12 @@ def _load_prob_stats(symbol: str, lookback: int = 100) -> dict:
         "up_count":     up_count,
         "down_count":   down_count,
         "n_windows":    len(directions),
+        "streak_up":    streak_up,
+        "streak_down":  streak_down,
         "vol_mean":     vol_mean,
         "vol_std":      vol_std,
         "n_moves":      len(moves),
         "directions":   directions,
-        # legacy — still used for debug logging
         "bayes_wins":   sig_wins,
         "bayes_losses": len(signaled) - sig_wins,
         "n_signaled":   len(signaled),
@@ -221,18 +235,38 @@ def _markov_persistence_mult(symbol: str, signal_dir: str) -> float:
 
 def _binomial_streak_confidence(streak: int) -> str:
     """
-    4. Binomial significance gate for win-streak confidence.
+    4. Binomial significance gate — streak length vs. p=0.5 null hypothesis.
 
-    P(k consecutive wins | p=0.5) = 0.5^k (assuming independence).
+    P(k consecutive same-direction windows | p=0.5) = 0.5^k.
 
-      k ≥ 5  → p < 0.031 → HIGH   (statistically significant at 5% level)
-      k = 3–4 → p < 0.125 → MEDIUM (borderline)
-      k ≤ 2  → p ≥ 0.25  → LOW    (easily due to chance)
+      k ≥ 5  → p < 0.031 → HIGH   (significant at 5% level)
+      k = 3–4 → p < 0.125 → MEDIUM
+      k ≤ 2  → p ≥ 0.25  → LOW
+
+    streak should come from _actual_direction_streak(), which reads
+    consecutive same-direction windows from session_log actual_direction —
+    NOT from TrendTracker (which is trade-based).
     """
-    p_value = 0.5 ** streak
-    if p_value < 0.05:    # streak ≥ 5
+    p_value = 0.5 ** max(streak, 1)
+    if p_value < 0.05:
         return "HIGH"
-    elif p_value < 0.25:  # streak 3–4
+    elif p_value < 0.25:
         return "MEDIUM"
-    else:                  # streak 1–2
+    else:
         return "LOW"
+
+
+def _actual_direction_streak(symbol: str, direction: str) -> int:
+    """
+    Count consecutive windows that went `direction` at the end of session_log.
+
+    Uses actual_direction from all logged windows — not trade wins/losses.
+    Returns 0 when data is insufficient (< 3 windows).
+
+    Example: if the last 4 BTC windows were UP, UP, UP, DOWN → streak for UP = 0
+             if the last 4 BTC windows were UP, UP, UP, UP  → streak for UP = 4
+    """
+    s = _load_prob_stats(symbol)
+    if s["n_windows"] < 3:
+        return 0
+    return s["streak_up"] if direction == "UP" else s["streak_down"]

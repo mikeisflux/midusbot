@@ -225,9 +225,35 @@ def _consecutive_window_trend(symbol: str, n_windows: int = 12) -> float | None:
       -1.0 = all windows closed DOWN (strong downward trend)
        0.0 = mixed (no trend)
 
-    Uses price history ticks. Requires at least 2 valid window samples.
+    Primary source: session_log.jsonl actual_direction (ground truth for every
+    window observed, not just traded windows).
+    Fallback: in-memory price history ticks (limited to ~1h depth).
     """
     sym = symbol.upper()
+
+    # ── Primary: session_log actual_direction ─────────────────────────────────
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        _log = _Path("data/session_log.jsonl")
+        if _log.exists():
+            directions = []
+            with _log.open() as fh:
+                for line in fh:
+                    try:
+                        e = _json.loads(line)
+                        if e.get("symbol") == sym and e.get("actual_direction"):
+                            directions.append(e["actual_direction"])
+                    except Exception:
+                        pass
+            recent = directions[-n_windows:]
+            if len(recent) >= 2:
+                score = sum(1 if d == "UP" else -1 for d in recent) / len(recent)
+                return float(score)
+    except Exception:
+        pass
+
+    # ── Fallback: price history ticks ─────────────────────────────────────────
     with _PRICE_LOCK:
         hist = list(_PRICE_HISTORY.get(sym, []))
     if len(hist) < 10:
@@ -235,12 +261,10 @@ def _consecutive_window_trend(symbol: str, n_windows: int = 12) -> float | None:
     now = time.time()
     results = []
     for i in range(1, n_windows + 1):
-        # Each completed window: ends i*300s ago, starts (i+1)*300s ago
         end_target   = now - i * 300
         start_target = now - (i + 1) * 300
         end_tick   = min(hist, key=lambda x: abs(x[1] - end_target))
         start_tick = min(hist, key=lambda x: abs(x[1] - start_target))
-        # Only use if we have ticks within 60s of the target time
         if abs(end_tick[1] - end_target) > 60 or abs(start_tick[1] - start_target) > 60:
             continue
         if start_tick[0] <= 0:
@@ -249,7 +273,7 @@ def _consecutive_window_trend(symbol: str, n_windows: int = 12) -> float | None:
         results.append(1 if window_ret > 0 else -1)
     if len(results) < 2:
         return None
-    return sum(results) / len(results)   # -1.0 .. +1.0
+    return sum(results) / len(results)
 
 
 # ---------------------------------------------------------------------------
@@ -634,38 +658,58 @@ def _market_regime(symbol: str) -> str:
 
 def _alpha_decay_score(symbol: str | None = None) -> float:
     """
-    Reads session_log.jsonl to compute rolling signal accuracy trend.
-    Returns a score from -1.0 (decaying) to +1.0 (improving).
+    Reads session_log.jsonl to compute directional persistence trend.
+    Returns a score from -1.0 (decaying/mean-reverting) to +1.0 (improving/trending).
     0.0 = stable or insufficient data.
+
+    Uses actual_direction from ALL windows (not trade-filtered signal_accuracy).
+    Measures whether directional momentum is strengthening or weakening by
+    comparing the UP fraction of the last 10 windows vs. last 30 windows.
     """
     try:
-        from src.session_tracker import get_asset_stats, get_all_stats
-        if symbol:
-            stats = get_asset_stats(symbol, lookback=30)
-            recent = get_asset_stats(symbol, lookback=10)
-        else:
-            # Aggregate across all assets
-            all_stats = get_all_stats(lookback=30)
-            all_recent = get_all_stats(lookback=10)
-            if not all_stats:
-                return 0.0
-            # Weighted average by signal_windows
-            def _wavg(stats_dict):
-                total_w = sum(s.get("signal_windows", 0) for s in stats_dict.values())
-                if total_w == 0:
-                    return 0.0
-                return sum(
-                    s.get("signal_accuracy", 0) * s.get("signal_windows", 0)
-                    for s in stats_dict.values()
-                ) / total_w
-            acc_30 = _wavg(all_stats)
-            acc_10 = _wavg(all_recent)
-            return acc_10 - acc_30  # positive = improving, negative = decaying
-
-        if not stats or not recent:
+        import json as _json
+        from pathlib import Path as _Path
+        _log = _Path("data/session_log.jsonl")
+        if not _log.exists():
             return 0.0
-        acc_30 = stats.get("signal_accuracy", 0)
-        acc_10 = recent.get("signal_accuracy", 0)
-        return acc_10 - acc_30
+
+        # Collect actual_direction per symbol
+        by_sym: dict[str, list[str]] = {}
+        with _log.open() as fh:
+            for line in fh:
+                try:
+                    e = _json.loads(line)
+                    sym = e.get("symbol")
+                    d   = e.get("actual_direction")
+                    if sym and d:
+                        by_sym.setdefault(sym, []).append(d)
+                except Exception:
+                    pass
+
+        def _trend_score(dirs: list[str]) -> float:
+            """
+            Compare directional consistency of last 10 vs. last 30 windows.
+            Uses |net_direction| / n as the consistency measure:
+              1.0 = all same direction (perfect trend)
+              0.0 = perfectly mixed
+            """
+            if len(dirs) < 10:
+                return 0.0
+            def _consistency(window):
+                if not window:
+                    return 0.0
+                ups = sum(1 for d in window if d == "UP")
+                return abs(ups / len(window) - 0.5) * 2  # 0=random, 1=all same direction
+            recent_10 = _consistency(dirs[-10:])
+            recent_30 = _consistency(dirs[-30:]) if len(dirs) >= 30 else recent_10
+            return recent_10 - recent_30  # positive = more consistent recently
+
+        if symbol:
+            dirs = by_sym.get(symbol.upper(), [])
+            return _trend_score(dirs)
+        else:
+            scores = [_trend_score(d) for d in by_sym.values() if len(d) >= 10]
+            return float(sum(scores) / len(scores)) if scores else 0.0
+
     except Exception:
         return 0.0

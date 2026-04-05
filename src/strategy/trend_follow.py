@@ -34,6 +34,7 @@ from src.strategy.prob_stats import (
     _bayesian_win_rate_mult,
     _markov_persistence_mult,
     _binomial_streak_confidence,
+    _actual_direction_streak,
 )
 import config
 
@@ -170,16 +171,20 @@ class TrendFollowStrategy:
         )
 
         # ── Binomial significance gate ────────────────────────────────────────
-        confidence = _binomial_streak_confidence(streak)
-        _p_luck = 0.5 ** streak
+        # Use consecutive same-direction windows from session_log actual_direction
+        # NOT the TrendTracker trade-based streak (which only updates on trade closes).
+        actual_streak = _actual_direction_streak(symbol, direction)
+        confidence = _binomial_streak_confidence(actual_streak)
+        _p_luck = 0.5 ** max(actual_streak, 1)
         logger.debug(
-            f"[LOGIC:TREND:{symbol}] BINOMIAL — streak={streak} "
+            f"[LOGIC:TREND:{symbol}] BINOMIAL — actual_streak={actual_streak} "
+            f"(from session_log)  tracker_streak={streak}  "
             f"P(luck)={_p_luck:.4f} → confidence={confidence}"
         )
         if confidence == "LOW" and abs(window_return) < _MIN_WINDOW_RETURN_PCT * 2:
             logger.debug(
                 f"[LOGIC:TREND:{symbol}] LOW-CONF-GATE — LOW confidence + weak win_ret={window_return:+.4%} "
-                f"(need ≥{_MIN_WINDOW_RETURN_PCT*2:.4%}) → SKIP (too risky on fresh flip)"
+                f"(need ≥{_MIN_WINDOW_RETURN_PCT*2:.4%}) → SKIP"
             )
             return None
 
