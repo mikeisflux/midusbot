@@ -57,9 +57,12 @@ class SimMixin:
                         if mkt:
                             for tok in mkt.get("tokens") or []:
                                 if str(tok.get("token_id", "")) == sim["token_id"]:
-                                    p = float(tok.get("price") or 0)
-                                    if p > 0.95 or (0.0 < p < 0.05):
-                                        exit_price = p
+                                    _raw_p = tok.get("price")
+                                    if _raw_p is not None:
+                                        p = float(_raw_p)
+                                        # p==0.0 is a valid resolved-loss price
+                                        if p > 0.95 or p < 0.05:
+                                            exit_price = p
                                     break
                     except Exception:
                         pass

@@ -147,8 +147,9 @@ class ClobMixin:
                 if not tid:
                     continue
                 try:
-                    sz = float(t.get("size", 0) or 0)
-                    pr = float(t.get("price", 0) or 0)
+                    sz = float(t.get("size") or 0)
+                    _pr = t.get("price")
+                    pr = float(_pr) if _pr is not None else 0.0
                 except (ValueError, TypeError):
                     continue
                 side = (t.get("side") or "").upper()

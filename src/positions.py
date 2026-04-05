@@ -784,10 +784,10 @@ class PositionsMixin:
             )
             try:
                 size      = float(raw.get("size", 0) or 0)
-                avg_price = float(
-                    raw.get("avgPrice") or raw.get("avg_price") or
-                    raw.get("price") or 0.5
-                )
+                _price_raw = (raw.get("avgPrice") if raw.get("avgPrice") is not None
+                              else raw.get("avg_price") if raw.get("avg_price") is not None
+                              else raw.get("price"))
+                avg_price = float(_price_raw) if _price_raw is not None else 0.5
             except (ValueError, TypeError):
                 continue
 
