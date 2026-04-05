@@ -406,7 +406,7 @@ class ScannerMixin:
         # After any trade fires, enforce a 3-window cooldown (15 min) before
         # trading again — let the dust settle before the next entry.
         _MAX_TRADES_PER_WINDOW = 1
-        _POST_TRADE_COOLDOWN_WINDOWS = 3  # windows to skip after a trade
+        _POST_TRADE_COOLDOWN_WINDOWS = 0  # no forced cooldown — let signal quality gates do the filtering
         _current_window = int(time.time() // 300) * 300
         if not hasattr(self, "_last_traded_window"):
             self._last_traded_window: int = 0
