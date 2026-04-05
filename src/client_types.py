@@ -44,11 +44,17 @@ class OrderBook:
 
     @property
     def best_bid(self) -> float:
-        return float(self.bids[0]["price"]) if self.bids else 0.0
+        """Highest bid — robust to any CLOB sort order."""
+        if not self.bids:
+            return 0.0
+        return max(float(b["price"]) for b in self.bids)
 
     @property
     def best_ask(self) -> float:
-        return float(self.asks[0]["price"]) if self.asks else 1.0
+        """Lowest ask — robust to any CLOB sort order."""
+        if not self.asks:
+            return 1.0
+        return min(float(a["price"]) for a in self.asks)
 
     @property
     def mid(self) -> float:
