@@ -188,6 +188,19 @@ class PositionsMixin:
 
             position_snapshots.append((pos, current_price))
 
+            # Hard stop-loss: cut any position that has lost ≥40% of its entry
+            # value regardless of side or whether the position is external.
+            # Recovers remaining capital (60¢ on the dollar) rather than riding
+            # to near-zero. Applies even when the adaptive stop-loss is looser.
+            if pos.entry_price > 0 and pnl_pct <= -0.40:
+                to_close.append((token_id, current_price))
+                logger.warning(
+                    f"[STOP-40%] {pos.side} {pos.question[:45]}  "
+                    f"entry={pos.entry_price:.3f} → now={current_price:.3f}  "
+                    f"loss={pnl_pct:.1%} — selling to recover remaining capital"
+                )
+                continue
+
             # Early exit / loss cut — heuristic exits based on current price extremes.
             # Exits early to redeploy capital or lock in gains before potential revert.
             if current_price is not None and not pos.is_external:
