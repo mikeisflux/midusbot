@@ -220,7 +220,9 @@ class PositionsMixin:
 
             # Early exit / loss cut — heuristic exits based on current price extremes.
             # Exits early to redeploy capital or lock in gains before potential revert.
-            if current_price is not None and not pos.is_external:
+            # Apply to ALL positions (including those loaded from disk / reconciled externals)
+            # so that no position ever rides to zero without an attempted sell.
+            if current_price is not None:
                 if pos.side == "YES" and current_price < 0.20:
                     to_close.append((token_id, current_price))
                     logger.info(
@@ -250,7 +252,7 @@ class PositionsMixin:
                     )
                     continue
 
-            if not pos.is_external:
+            if not pos.is_external and pos.entry_price > 0:
                 if self._risk.should_stop_loss(pnl_pct):
                     logger.warning(f"STOP-LOSS {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
                     to_close.append((token_id, current_price))
@@ -321,11 +323,17 @@ class PositionsMixin:
                 sell_price = current_price
             else:
                 sell_price = pos.entry_price
+            # 5-min UpDown markets: use FOK so the sell either fills immediately
+            # or cancels. A GTC order sits on the book until market resolution,
+            # at which point it's cancelled unfilled — zero recovery. FOK guarantees
+            # we take whatever bid is available right now.
+            _is_updown = _detect_updown_market(pos.question) is not None
             resp = self._client.place_limit_order(
                 token_id=token_id,
                 side="SELL",
                 price=sell_price,
                 size=pos.shares,
+                fok=_is_updown,
             )
 
         if resp is None and pos.market_id and current_price is not None and current_price >= 0.97:
@@ -761,11 +769,10 @@ class PositionsMixin:
                 continue
 
             if token_id in self._positions:
-                if not self._positions[token_id].is_external:
-                    self._positions[token_id].is_external = True
-                    logger.info(f"  Fixed is_external=True: {token_id[:16]}…")
-                else:
-                    logger.debug(f"  Already tracked: {token_id[:16]}…")
+                # Position already tracked — don't touch is_external.
+                # Bot-opened positions (is_external=False) must stay that way so
+                # early-exit and stop-loss checks apply to them normally.
+                logger.debug(f"  Already tracked: {token_id[:16]}…")
                 continue
 
             question  = raw.get("title") or raw.get("question") or ""
