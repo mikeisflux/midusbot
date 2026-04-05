@@ -64,14 +64,24 @@ class RiskManager:
 
     def position_size(self, signal: TradeSignal) -> float:
         """Returns the USDC to spend. 0.0 = skip trade."""
-        # Daily loss breaker — use MAX_TOTAL_EXPOSURE_USDC ($100) as the fixed
-        # reference so the cap threshold stays stable regardless of wallet fluctuations.
-        ref = config.MAX_TOTAL_EXPOSURE_USDC
-        daily_pnl_pct = self._daily_pnl / ref if ref else 0
-        cap = DEFAULT_DAILY_LOSS_CAP_DRYRUN if config.DRY_RUN else DEFAULT_DAILY_LOSS_CAP_LIVE
-        if daily_pnl_pct <= cap:
-            logger.warning(f"Daily loss cap hit ({daily_pnl_pct:.1%}) — no new trades until reset.")
-            return 0.0
+        # Daily trading floor: halt if live wallet balance drops below the
+        # configured floor. Recovers automatically when wins push balance back up.
+        # Only active when wallet balance is known (>0); falls back to pct cap otherwise.
+        if self._wallet_balance > 0:
+            if self._wallet_balance < config.DAILY_LOSS_FLOOR_USDC:
+                logger.warning(
+                    f"Daily floor hit — wallet ${self._wallet_balance:.2f} < "
+                    f"${config.DAILY_LOSS_FLOOR_USDC:.0f} floor — no new trades until balance recovers."
+                )
+                return 0.0
+        else:
+            # Wallet not yet synced — fall back to percentage cap on daily P&L
+            ref = config.MAX_TOTAL_EXPOSURE_USDC
+            daily_pnl_pct = self._daily_pnl / ref if ref else 0
+            cap = DEFAULT_DAILY_LOSS_CAP_DRYRUN if config.DRY_RUN else DEFAULT_DAILY_LOSS_CAP_LIVE
+            if daily_pnl_pct <= cap:
+                logger.warning(f"Daily loss cap hit ({daily_pnl_pct:.1%}) — no new trades until reset.")
+                return 0.0
 
         # Multi-asset correlated exposure cap: limit total exposure across BTC/ETH/BNB/SOL/XRP/DOGE/HYPE.
         # These assets are 90%+ correlated — simultaneous exposure multiplies directional risk.

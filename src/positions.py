@@ -808,13 +808,13 @@ class PositionsMixin:
 
             if cur_price <= 0.03:
                 logger.info(f"  Resolved LOSS (price={cur_price:.2f}): {question[:55]}")
-                # Record the loss in the learner journal (returns 0.0 pnl if no
-                # open record exists — harmless for external positions).
-                _loss_pnl = self._learner.record_close(token_id, cur_price)
-                self._risk.record_close(pnl_usdc=_loss_pnl, cost_usdc=0.0)
-                self._dash_state.record_closed_trade(_loss_pnl, fee_usdc=0.0)
-                # Reset the trend tracker so the streak doesn't stay inflated
-                # after a resolved loss.
+                # Record in learner journal so adaptation sees it.
+                # Do NOT call risk.record_close here — reconciled losses may have
+                # happened in previous sessions and should not inflate today's
+                # daily P&L counter (which caused false cap triggers).
+                self._learner.record_close(token_id, cur_price)
+                self._dash_state.record_closed_trade(0.0, fee_usdc=0.0)
+                # Reset the trend tracker so the streak doesn't stay inflated.
                 _loss_sym = _detect_updown_market(question)
                 if _loss_sym:
                     _loss_dir = "UP" if side == "YES" else "DOWN"

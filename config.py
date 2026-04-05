@@ -30,6 +30,10 @@ TRADING_PAUSED: bool = os.getenv("TRADING_PAUSED", "false").lower() == "true"
 # Hard stop all new trades if wallet drops below this threshold (USDC).
 # Prevents trading to zero. Override via env: CAPITAL_FLOOR_USDC=20
 CAPITAL_FLOOR_USDC: float = float(os.getenv("CAPITAL_FLOOR_USDC", "15.0"))
+# Daily trading floor: halt new trades if live wallet balance drops below
+# this value. Resets automatically if wins push balance back above it.
+# Override via env: DAILY_LOSS_FLOOR_USDC=80
+DAILY_LOSS_FLOOR_USDC: float = float(os.getenv("DAILY_LOSS_FLOOR_USDC", "90.0"))
 
 # ── Position sizing ──────────────────────────────────────────────────────────
 MAX_POSITION_USDC: float = float(os.getenv("MAX_POSITION_USDC", "10"))
