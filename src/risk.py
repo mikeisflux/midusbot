@@ -64,10 +64,9 @@ class RiskManager:
 
     def position_size(self, signal: TradeSignal) -> float:
         """Returns the USDC to spend. 0.0 = skip trade."""
-        # Daily loss breaker — use actual wallet balance as the reference so
-        # the cap scales with real capital, not a static config constant.
-        # Fallback to MAX_TOTAL_EXPOSURE_USDC when wallet balance isn't known yet.
-        ref = self._wallet_balance if self._wallet_balance > 0 else config.MAX_TOTAL_EXPOSURE_USDC
+        # Daily loss breaker — use MAX_TOTAL_EXPOSURE_USDC ($100) as the fixed
+        # reference so the cap threshold stays stable regardless of wallet fluctuations.
+        ref = config.MAX_TOTAL_EXPOSURE_USDC
         daily_pnl_pct = self._daily_pnl / ref if ref else 0
         cap = DEFAULT_DAILY_LOSS_CAP_DRYRUN if config.DRY_RUN else DEFAULT_DAILY_LOSS_CAP_LIVE
         if daily_pnl_pct <= cap:
