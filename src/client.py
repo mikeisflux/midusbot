@@ -46,6 +46,12 @@ class PolymarketClient(GammaMixin, ClobMixin, RedeemMixin):
     def __init__(self) -> None:
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
+        # Bypass any system/env proxy (HTTP_PROXY / HTTPS_PROXY).
+        # The bot runs on a server with direct internet access — proxy env vars
+        # can be set by tools like Claude Code which use a restricted proxy that
+        # blocks Polymarket and Binance. Setting trust_env=False ensures we always
+        # connect directly regardless of environment.
+        self._session.trust_env = False
         self._clob_client = self._init_clob_client()
 
     # ------------------------------------------------------------------

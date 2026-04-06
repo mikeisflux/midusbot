@@ -196,6 +196,7 @@ class NewsArbStrategy:
                 r = requests.get(
                     url, timeout=8,
                     headers={"User-Agent": "Mozilla/5.0 (compatible; midusbot/1.0)"},
+                    proxies={"http": None, "https": None},  # bypass system proxy
                 )
                 r.raise_for_status()
                 try:

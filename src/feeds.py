@@ -111,7 +111,11 @@ class BinanceWSFeed:
                     on_close=self._on_close,
                     on_open=self._on_open,
                 )
-                self._ws.run_forever(ping_interval=20, ping_timeout=10)
+                # proxy=None bypasses HTTP_PROXY / HTTPS_PROXY env vars so
+                # restricted proxies (e.g. Claude Code egress control) don't
+                # block the Binance WebSocket connection.
+                self._ws.run_forever(ping_interval=20, ping_timeout=10,
+                                     http_proxy_host=None)
             except Exception as exc:
                 logger.warning(f"BinanceWSFeed error: {exc}")
             if not self._running:
