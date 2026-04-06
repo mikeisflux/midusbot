@@ -220,6 +220,27 @@ def register(app, get_state, get_learner, get_close_fn):
         except Exception as exc:
             return json.dumps({"error": str(exc)}), 500, {"Content-Type": "application/json"}
 
+    @app.route("/webhook/cryptopanic", methods=["POST"])
+    def webhook_cryptopanic():
+        """
+        Receives real-time news pushes from CryptoPanic's bot/webhook system.
+        CryptoPanic POSTs a JSON payload with a 'post' object containing 'title'.
+        The headline is injected into ClaudeNewsAnalyst immediately so the next
+        analysis cycle uses it — no polling delay.
+        """
+        try:
+            data = request.get_json(force=True, silent=True) or {}
+            # CryptoPanic payload: {"post": {"title": "...", "currencies": [...], ...}}
+            post  = data.get("post") or data
+            title = (post.get("title") or "").strip()
+            if title:
+                from src.claude_news import analyst as _analyst
+                _analyst.push_headline(title)
+                return jsonify({"ok": True, "headline": title}), 200
+            return jsonify({"ok": False, "reason": "no title"}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
     @app.route("/api/export")
     def api_export():
         """Download full training data as a JSON file for analysis."""

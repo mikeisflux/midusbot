@@ -17,6 +17,7 @@ import os
 import time
 import threading
 import xml.etree.ElementTree as ET
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -68,6 +69,14 @@ class ClaudeNewsAnalyst:
         self.pending:  list[AISignal] = []
         self._last_run = 0.0
         self._thread:  Optional[threading.Thread] = None
+        # CryptoPanic webhook pushes headlines here in real-time
+        self._incoming: deque[str] = deque(maxlen=50)
+
+    def push_headline(self, title: str) -> None:
+        """Called by the /webhook/cryptopanic endpoint to inject a breaking headline."""
+        if title:
+            self._incoming.append(title.strip())
+            logger.info(f"[CLAUDE-NEWS] Webhook headline received: {title[:80]}")
 
     @property
     def available(self) -> bool:
@@ -150,6 +159,13 @@ class ClaudeNewsAnalyst:
                         break
             except Exception as exc:
                 logger.debug(f"[CLAUDE-NEWS] {src_name} RSS failed: {exc}")
+
+        # Prepend any real-time webhook headlines (highest priority — most breaking)
+        webhook_headlines = list(self._incoming)
+        for h in reversed(webhook_headlines):
+            if h not in headlines:
+                headlines.insert(0, h)
+        self._incoming.clear()
 
         return headlines[:20]
 
