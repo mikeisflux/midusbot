@@ -126,17 +126,9 @@ class ChainlinkMonitor:
                     except Exception:
                         pass
 
-                # Resolve checksum address — try multiple web3 versions
-                try:
-                    from eth_utils import to_checksum_address as _cksum
-                    _addr = _cksum(_CHAINLINK_BTC_USD)
-                except Exception:
-                    try:
-                        _addr = Web3.to_checksum_address(_CHAINLINK_BTC_USD)
-                    except Exception:
-                        _addr = _CHAINLINK_BTC_USD
-
-                contract = w3.eth.contract(address=_addr, abi=_AGGREGATOR_ABI)
+                # web3 v6 requires checksummed address — convert via bytes to bypass string format check
+                _addr_bytes = bytes.fromhex(_CHAINLINK_BTC_USD[2:])
+                contract = w3.eth.contract(address=_addr_bytes, abi=_AGGREGATOR_ABI)
                 dec = contract.functions.decimals().call()
                 self._contract = contract
                 self._decimals = int(dec)
