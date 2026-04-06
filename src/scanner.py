@@ -185,7 +185,6 @@ class ScannerMixin:
         if not config.DRY_RUN and self._dash_state.loop_count % 20 == 0:
             self._reconcile_positions()
 
-        self._learner.maybe_run_analyst_timed()
         self._process_sim_queue()
         self._manage_positions()
 
