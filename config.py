@@ -128,6 +128,9 @@ CHAINLINK_ONLY:     bool  = _env("CHAINLINK_ONLY", "false").lower() == "true"
 # 5-strategy portfolio — must sum to 1.0.
 # News Arb 15% | Chainlink 13% | Arb 25% | Momentum/AI 30% | MM 17%
 NEWS_ARB_BUDGET_PCT:    float = float(_env("NEWS_ARB_BUDGET_PCT",   "0.15"))
+# News arb scalp exits — sell the repricing wave, don't hold to resolution
+NEWS_ARB_SCALP_TARGET: float = float(_env("NEWS_ARB_SCALP_TARGET", "0.07"))  # take profit +7pp above entry
+NEWS_ARB_SCALP_STOP:   float = float(_env("NEWS_ARB_SCALP_STOP",   "0.05"))  # stop loss  -5pp below entry
 CHAINLINK_BUDGET_PCT:   float = float(_env("CHAINLINK_BUDGET_PCT",  "0.13"))
 ARB_BUDGET_PCT:         float = float(_env("ARB_BUDGET_PCT",        "0.25"))
 MOMENTUM_BUDGET_PCT:    float = float(_env("MOMENTUM_BUDGET_PCT",   "0.30"))

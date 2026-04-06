@@ -141,6 +141,34 @@ class MonitoringMixin:
 
             position_snapshots.append((pos, current_price))
 
+            # ── News arb scalp exits (strategy="news_arb") ───────────────────
+            # We're trading the repricing wave, not holding to resolution.
+            # News breaks → market is mispriced → MMs reprice over next few minutes.
+            # Exit as soon as we've captured enough of that move. Win/loss of the
+            # underlying prediction is irrelevant — we've already banked the spread.
+            if getattr(pos, "strategy", "") in ("news_arb", "price_velocity") and current_price is not None:
+                _scalp_target = float(getattr(config, "NEWS_ARB_SCALP_TARGET", 0.07))
+                _scalp_stop   = float(getattr(config, "NEWS_ARB_SCALP_STOP",   0.05))
+                _price_move   = current_price - pos.entry_price
+
+                if _price_move >= _scalp_target:
+                    to_close.append((token_id, current_price))
+                    logger.info(
+                        f"[NEWS-SCALP] Taking profit: {pos.side} {pos.entry_price:.3f}"
+                        f"→{current_price:.3f} (+{_price_move:.3f}) "
+                        f"target={_scalp_target:.2f}  {pos.question[:50]}"
+                    )
+                    continue
+
+                if _price_move <= -_scalp_stop:
+                    to_close.append((token_id, current_price))
+                    logger.info(
+                        f"[NEWS-SCALP] Stop loss: {pos.side} {pos.entry_price:.3f}"
+                        f"→{current_price:.3f} ({_price_move:.3f}) "
+                        f"stop={_scalp_stop:.2f}  {pos.question[:50]}"
+                    )
+                    continue
+
             # ── Hard stop-loss: cut any position that lost ≥40% ──────────────
             if pos.entry_price > 0 and pnl_pct <= -0.40:
                 logger.warning(

@@ -404,7 +404,9 @@ class ExecutionMixin:
             # Tag strategy bucket for portfolio tracking
             _strategy = "momentum"
             if getattr(sig, "is_news_arb", False):
-                _strategy = "news_arb"
+                # Price velocity signals (smart money) tracked separately from RSS news arb
+                _reasoning = getattr(sig, "reasoning", "") or ""
+                _strategy = "price_velocity" if "[SMART-MONEY]" in _reasoning else "news_arb"
             elif getattr(sig, "confidence", "") == "AI":
                 _strategy = "momentum"   # AI signals are the momentum/AI bucket
             elif getattr(sig, "confidence", "") == "CHAINLINK":

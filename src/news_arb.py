@@ -28,13 +28,13 @@ from loguru import logger
 # ── Config ────────────────────────────────────────────────────────────────────
 HAIKU_MODEL           = "claude-haiku-4-5-20251001"  # Stage 1: cheap semantic screening
 OPUS_MODEL            = "claude-opus-4-6"            # Stage 2: probability assessment
-NEWS_ARB_EDGE         = 0.12   # minimum probability divergence to fire signal
-MIN_LIQUIDITY         = 300    # minimum market liquidity USDC
-POLL_INTERVAL         = 15     # poll RSS every 15 seconds (was 60 — faster catch)
+NEWS_ARB_EDGE         = 0.08   # minimum probability divergence to fire signal (was 0.12 — too strict)
+MIN_LIQUIDITY         = 100    # minimum market liquidity USDC (was 300 — too restrictive)
+POLL_INTERVAL         = 15     # poll RSS every 15 seconds
 MARKET_CACHE_TTL      = 300    # refresh market list every 5 min
 MAX_ARTICLE_AGE_SECS  = 3600   # ignore articles older than 1 hour
 HAIKU_BATCH_SIZE      = 25     # markets per Haiku screening call
-MAX_ARTICLES_PER_POLL = 5      # max new articles processed per poll cycle
+MAX_ARTICLES_PER_POLL = 10     # max new articles processed per poll cycle (was 5)
 
 # ── Price velocity (smart money) parameters ───────────────────────────────────
 VELOCITY_POLL_SECS     = 15    # check order book prices every 15 seconds
@@ -449,17 +449,22 @@ class NewsArbStrategy:
         signals: list[NewsArbSignal] = []
 
         for art in articles[:MAX_ARTICLES_PER_POLL]:
-            logger.debug(f"[NEWS-ARB] Screening: '{art.title[:65]}' ({art.source})")
+            logger.info(f"[NEWS-ARB] Screening: '{art.title[:65]}' ({art.source})")
 
             # Stage 1 — Haiku semantic screening across all markets
             confirmed = self._haiku_screen(art, markets, api_client)
             if not confirmed:
+                logger.debug(f"[NEWS-ARB] Haiku: no relevant markets for '{art.title[:55]}'")
                 continue
 
             # Stage 2 — Opus probability assessment on confirmed markets only
             art_signals = self._opus_assess(art, confirmed, api_client)
+            if not art_signals:
+                logger.info(f"[NEWS-ARB] Opus: edge too small on '{art.title[:55]}'")
             signals.extend(art_signals)
 
+        if not signals and articles:
+            logger.info(f"[NEWS-ARB] {len(articles)} article(s) processed — no signals above {NEWS_ARB_EDGE:.0%} edge")
         return signals
 
 

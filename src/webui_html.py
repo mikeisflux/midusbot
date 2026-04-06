@@ -92,7 +92,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 #strat-grid{
   display:grid;grid-template-columns:1fr 1fr;gap:10px;
 }
-#sc-news_arb{grid-column:1 / -1}  /* news arb spans full width */
+#sc-news_arb,#sc-price_velocity{grid-column:1 / -1}  /* bottom rows span full width */
 
 /* ── STRATEGY CARD ── */
 .sc{
@@ -515,11 +515,11 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
       </div>
     </div>
 
-    <!-- AP/REUTERS NEWS ARB -->
+    <!-- NEWS SCALP (RSS articles → buy mispricing → scalp repricing wave) -->
     <div class="sc" id="sc-news_arb" style="--sc-color:var(--s-news)">
       <div class="sc-header">
         <div class="sc-title">
-          <span class="sc-icon">&#128225;</span>AP / REUTERS NEWS ARB
+          <span class="sc-icon">&#128225;</span>NEWS SCALP &mdash; BUY BEFORE REPRICE
         </div>
         <div class="sc-alloc" id="sc-news_arb-alloc">15%</div>
       </div>
@@ -552,6 +552,47 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
         <div class="sc-meta-item">
           <div class="sc-meta-lbl">Worst Trade</div>
           <div class="sc-meta-val d" id="sc-news_arb-worst">$0.00</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SMART MONEY (price velocity — buy before news hits RSS) -->
+    <div class="sc" id="sc-price_velocity" style="--sc-color:#ff6f00">
+      <div class="sc-header">
+        <div class="sc-title">
+          <span class="sc-icon">&#9889;</span>SMART MONEY &mdash; PRE-PUBLICATION EDGE
+        </div>
+        <div class="sc-alloc" id="sc-price_velocity-alloc">10%</div>
+      </div>
+      <div class="sc-wr-row">
+        <div class="sc-wr" style="color:#ff6f00" id="sc-price_velocity-wr">—</div>
+        <div class="sc-wl">WIN RATE &nbsp;|&nbsp; <b id="sc-price_velocity-wl">0W / 0L</b></div>
+      </div>
+      <div class="sc-pnl-row">
+        <div class="sc-pnl d" id="sc-price_velocity-pnl">$0.00</div>
+        <div class="sc-status empty" id="sc-price_velocity-status">WATCHING BOOKS</div>
+      </div>
+      <div class="sc-bar-row">
+        <div class="sc-bar-labels">
+          <span id="sc-price_velocity-exp-lbl">$0 exposure</span>
+          <span id="sc-price_velocity-tgt-lbl">$0 target</span>
+        </div>
+        <div class="sc-bar-track">
+          <div class="sc-bar-fill" id="sc-price_velocity-bar" style="width:0%;background:#ff6f00"></div>
+        </div>
+      </div>
+      <div class="sc-meta-row">
+        <div class="sc-meta-item">
+          <div class="sc-meta-lbl">Avg P&amp;L</div>
+          <div class="sc-meta-val d" id="sc-price_velocity-avg">$0.00</div>
+        </div>
+        <div class="sc-meta-item">
+          <div class="sc-meta-lbl">Best Trade</div>
+          <div class="sc-meta-val d" id="sc-price_velocity-best">$0.00</div>
+        </div>
+        <div class="sc-meta-item">
+          <div class="sc-meta-lbl">Worst Trade</div>
+          <div class="sc-meta-val d" id="sc-price_velocity-worst">$0.00</div>
         </div>
       </div>
     </div>
@@ -777,13 +818,14 @@ async function refresh() {
 }
 
 // ── strategy stats (every 8s) ─────────────────────────────────────────────────
-var _strategyKeys = ['chainlink','arb','momentum','mm','news_arb'];
+var _strategyKeys = ['chainlink','arb','momentum','mm','news_arb','price_velocity'];
 var _strategyDefaults = {
-  chainlink: { color: '#40c4ff', targetPct: 13, label: 'CHAINLINK ORACLE'     },
-  arb:       { color: '#4caf50', targetPct: 25, label: 'ARBITRAGE'            },
-  momentum:  { color: '#ff9800', targetPct: 30, label: 'AI / MOMENTUM'        },
-  mm:        { color: '#9c27b0', targetPct: 17, label: 'MARKET MAKING'        },
-  news_arb:  { color: '#26c6da', targetPct: 15, label: 'AP/REUTERS NEWS ARB'  }
+  chainlink:       { color: '#40c4ff', targetPct: 13, label: 'CHAINLINK ORACLE'              },
+  arb:             { color: '#4caf50', targetPct: 25, label: 'ARBITRAGE'                     },
+  momentum:        { color: '#ff9800', targetPct: 30, label: 'AI / MOMENTUM'                 },
+  mm:              { color: '#9c27b0', targetPct: 17, label: 'MARKET MAKING'                 },
+  news_arb:        { color: '#26c6da', targetPct: 15, label: 'NEWS SCALP'                    },
+  price_velocity:  { color: '#ff6f00', targetPct: 10, label: 'SMART MONEY (PRE-PUBLICATION)' }
 };
 
 function updateStratCard(key, s, walletBal) {
