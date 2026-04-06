@@ -45,19 +45,21 @@ DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() != "false"
 TRADING_PAUSED: bool = os.getenv("TRADING_PAUSED", "false").lower() == "true"
 # Hard stop all new trades if wallet drops below this threshold (USDC).
 # Prevents trading to zero. Override via env: CAPITAL_FLOOR_USDC=20
-CAPITAL_FLOOR_USDC: float = float(_env("CAPITAL_FLOOR_USDC", "15.0"))
+CAPITAL_FLOOR_USDC: float = float(_env("CAPITAL_FLOOR_USDC", "100.0"))
 # Daily trading floor: halt new trades if live wallet balance drops below
 # this value. Resets automatically if wins push balance back above it.
-# Override via env: DAILY_LOSS_FLOOR_USDC=80
-DAILY_LOSS_FLOOR_USDC: float = float(_env("DAILY_LOSS_FLOOR_USDC", "90.0"))
+# Override via env: DAILY_LOSS_FLOOR_USDC=140
+DAILY_LOSS_FLOOR_USDC: float = float(_env("DAILY_LOSS_FLOOR_USDC", "135.0"))
 
 # ── Position sizing ──────────────────────────────────────────────────────────
-MAX_POSITION_USDC: float = float(_env("MAX_POSITION_USDC", "10"))
-MAX_TOTAL_EXPOSURE_USDC: float = float(_env("MAX_TOTAL_EXPOSURE_USDC", "100"))
+# Conservative starter sizing — raise MAX_POSITION_USDC as the bot proves itself.
+# With a $150 wallet: $2/trade, max $20 open at once, never below $100 floor.
+MAX_POSITION_USDC: float = float(_env("MAX_POSITION_USDC", "1"))
+MAX_TOTAL_EXPOSURE_USDC: float = float(_env("MAX_TOTAL_EXPOSURE_USDC", "10"))
 KELLY_FRACTION: float = float(_env("KELLY_FRACTION", "0.25"))
-# Max % of available wallet balance to deploy at once (0.30 = 30%).
+# Max % of available wallet balance to deploy at once.
 # Overrides MAX_TOTAL_EXPOSURE_USDC when wallet balance is known.
-MAX_EXPOSURE_PCT: float = float(_env("MAX_EXPOSURE_PCT", "0.60"))
+MAX_EXPOSURE_PCT: float = float(_env("MAX_EXPOSURE_PCT", "0.07"))  # 7% of $150 = ~$10 max deployed
 
 # ── Strategy ─────────────────────────────────────────────────────────────────
 MIN_EDGE: float = float(_env("MIN_EDGE", "0.03"))
@@ -147,7 +149,7 @@ COOLDOWN_SECS:      int = int(_env("COOLDOWN_SECS", "300"))
 GROUP_CAP_PCT:      float = float(_env("GROUP_CAP_PCT", "0.25"))
 
 # Bankroll-proportional position sizing (fraction of wallet per trade)
-POSITION_WALLET_PCT: float = float(_env("POSITION_WALLET_PCT", "0.12"))
+POSITION_WALLET_PCT: float = float(_env("POSITION_WALLET_PCT", "0.02"))  # 2% of wallet per trade — scales naturally as balance grows
 
 # Polymarket win fee (2% on winnings — adjusts Kelly payout ratio)
 POLY_WIN_FEE:       float = float(_env("POLY_WIN_FEE", "0.02"))
