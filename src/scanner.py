@@ -526,7 +526,10 @@ class ScannerMixin:
 
         # No window-level cooldown — per-asset 300s cooldown (COOLDOWN_SECS) and
         # signal quality gates (ENTRY_PRICE_GUARD, thresholds) are sufficient filters.
-        if not getattr(config, "CHAINLINK_ONLY", False):
+        if getattr(config, "PENNY_ONLY", False):
+            if pending_signals:
+                logger.debug(f"[PENNY-ONLY] Skipping {len(pending_signals)} oracle-lag signals")
+        elif not getattr(config, "CHAINLINK_ONLY", False):
             for sig, _asset in pending_signals:
                 if self._execute_signal(sig):
                     trades_placed += 1
@@ -534,52 +537,34 @@ class ScannerMixin:
         else:
             if pending_signals:
                 logger.debug(
-                    f"[CHAINLINK-ONLY] Skipping {len(pending_signals)} oracle-lag signals "
-                    f"— CHAINLINK_ONLY mode active"
+                    f"[CHAINLINK-ONLY] Skipping {len(pending_signals)} oracle-lag signals"
                 )
 
         # ── BTC penny bets ($0.01 tokens) — HIGHEST PRIORITY ─────────────────
-        # When a BTC 5-min UpDown token is priced at ≤0.01, buy it immediately.
-        # Runs before all other strategies. Max $10 per bet. Hold to resolution.
-        # Also refreshes the fast-watcher cache so the 2s background thread
-        # always has fresh token IDs to poll.
         self._scan_btc_penny_bets(updown_5m)
         self._start_penny_watcher()  # no-op after first call
 
-        # ── Chainlink close-watch launcher ────────────────────────────────────
-        # For BTC UPDOWN markets within 5-40s of close, launch an oracle watch.
-        # When the Chainlink feed fires a new round we know the resolution with
-        # certainty — enter the winning side at any price up to CHAINLINK_MAX_ENTRY.
-        self._launch_chainlink_watches(updown)
+        if getattr(config, "PENNY_ONLY", False):
+            # All other strategies disabled — penny bets only.
+            pass
+        else:
+            # ── Chainlink close-watch launcher ────────────────────────────────
+            self._launch_chainlink_watches(updown)
 
-        # ── Dual-side arbitrage scan ──────────────────────────────────────────
-        # Buy BOTH YES and NO when their combined ask < ARB_MAX_COST (default 0.97).
-        # At resolution one side pays $1.00, giving guaranteed profit regardless of
-        # direction. This is the "ballast" component — non-directional, consistent.
-        self._scan_dual_arb(updown_5m)
+            # ── Dual-side arbitrage scan ──────────────────────────────────────
+            self._scan_dual_arb(updown_5m)
 
-        # ── Claude AI/Momentum news analyst ──────────────────────────────────
-        # Polls CryptoPanic for headlines, asks Claude Opus to assess 5-min
-        # directional probability, signals when edge > 12% vs market price.
-        # Only fires when ANTHROPIC_API_KEY is set. Strategy tag: "momentum".
-        self._run_claude_news(updown_5m)
+            # ── Claude AI/Momentum news analyst ──────────────────────────────
+            self._run_claude_news(updown_5m)
 
-        # ── Market Making (20% bucket) ────────────────────────────────────────
-        # Post maker limit orders on both YES+NO sides at bid price.
-        # Earns spread vs takers; positions fill into tracking as strategy="mm".
-        self.run_market_maker(updown_5m)
+            # ── Market Making (20% bucket) ────────────────────────────────────
+            self.run_market_maker(updown_5m)
 
-        # ── Correlation / logical arbitrage (part of Arb 30% bucket) ─────────
-        # Detects impossible probabilities across related markets (milestone ordering,
-        # cumulative violations). Executes mispriced legs as strategy="arb".
-        self._run_corr_arb(all_markets)
+            # ── Correlation / logical arbitrage ───────────────────────────────
+            self._run_corr_arb(all_markets)
 
-        # ── AP/Reuters/BBC News Arbitrage (15% bucket) ────────────────────────
-        # Polls AP, Reuters, BBC, Politico RSS every 60s. When breaking news
-        # matches an open Polymarket question, Claude assesses the new probability.
-        # Enters before market makers reprice — typically 10-30 min window.
-        # Strategy tag: "news_arb". Requires ANTHROPIC_API_KEY.
-        self._run_news_arb()
+            # ── AP/Reuters/BBC News Arbitrage ─────────────────────────────────
+            self._run_news_arb()
 
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
