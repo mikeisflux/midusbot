@@ -910,7 +910,10 @@ class ScannerMixin:
                 continue
 
             _secs_left = _end_ts - _now
-            if not (5 < _secs_left <= 65):
+            # Launch as early as 4 minutes before close — the watch thread
+            # handles its own POLL_LEAD_SECS sleep. Launching early means we
+            # never miss a window due to scan loop timing jitter.
+            if not (5 < _secs_left <= 240):
                 continue
 
             # Look up BTC price at window open (300s before close)

@@ -112,10 +112,11 @@ class RedeemMixin:
             return -1.0
 
         rpc_urls = []
-        _cfg_rpc = getattr(config, "POLYGON_RPC_URL", "") or ""
-        if _cfg_rpc:
-            rpc_urls.append(_cfg_rpc)
-        rpc_urls.extend(_POLYGON_RPC_URLS)
+        for _k in ("POLYGON_RPC_PRIMARY", "POLYGON_RPC_SECONDARY", "POLYGON_RPC_URL"):
+            _v = getattr(config, _k, "") or ""
+            if _v and _v not in rpc_urls:
+                rpc_urls.append(_v)
+        rpc_urls.extend([u for u in _POLYGON_RPC_URLS if u not in rpc_urls])
 
         try:
             from web3 import Web3
@@ -268,10 +269,11 @@ class RedeemMixin:
             return False
 
         rpc_urls = []
-        _cfg_rpc = getattr(config, "POLYGON_RPC_URL", "") or ""
-        if _cfg_rpc:
-            rpc_urls.append(_cfg_rpc)
-        rpc_urls.extend(_POLYGON_RPC_URLS)
+        for _k in ("POLYGON_RPC_PRIMARY", "POLYGON_RPC_SECONDARY", "POLYGON_RPC_URL"):
+            _v = getattr(config, _k, "") or ""
+            if _v and _v not in rpc_urls:
+                rpc_urls.append(_v)
+        rpc_urls.extend([u for u in _POLYGON_RPC_URLS if u not in rpc_urls])
 
         for rpc_url in rpc_urls:
           try:
