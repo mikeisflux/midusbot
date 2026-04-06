@@ -935,7 +935,7 @@ async function resetTraining() {
 }
 
 function exportData() {
-  window.location.href = '/api/export_journal';
+  window.location.href = '/api/export';
 }
 
 // ── bootstrap ─────────────────────────────────────────────────────────────────
