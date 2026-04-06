@@ -439,38 +439,12 @@ class ScannerMixin:
         # exceeds a lower threshold — ensures per-asset calibration is respected.
         pending_signals.sort(key=lambda x: x[0].rel_strength, reverse=True)
 
-        # One trade per 5-minute window — take the best signal, then wait.
-        # After any trade fires, enforce a 3-window cooldown (15 min) before
-        # trading again — let the dust settle before the next entry.
-        _MAX_TRADES_PER_WINDOW = 1
-        _POST_TRADE_COOLDOWN_WINDOWS = 0  # no forced cooldown — let signal quality gates do the filtering
-        _current_window = int(time.time() // 300) * 300
-        if not hasattr(self, "_last_traded_window"):
-            self._last_traded_window: int = 0
-        if not hasattr(self, "_window_trade_count"):
-            self._window_trade_count: int = 0
-        if not hasattr(self, "_cooldown_until_window"):
-            self._cooldown_until_window: int = 0
-        if self._last_traded_window != _current_window:
-            self._window_trade_count = 0
-
-        _in_cooldown = _current_window < self._cooldown_until_window
-        _slots_left = _MAX_TRADES_PER_WINDOW - self._window_trade_count
-
-        if _in_cooldown:
-            _windows_remaining = (self._cooldown_until_window - _current_window) // 300
-            logger.debug(f"[WINDOW-LOCK] Post-trade cooldown — {_windows_remaining} window(s) remaining, holding {len(pending_signals)} signal(s)")
-        elif _slots_left <= 0:
-            logger.debug(f"[WINDOW-LOCK] Trade placed this window — holding remaining {len(pending_signals)} signal(s)")
-        else:
-            for sig, _asset in pending_signals[:_slots_left]:
-                if self._execute_signal(sig):
-                    trades_placed += 1
-                    self._last_traded_window = _current_window
-                    self._window_trade_count += 1
-                    self._asset_last_bet[_asset] = time.time()
-                    # Set cooldown: skip next N windows after this one
-                    self._cooldown_until_window = _current_window + (_POST_TRADE_COOLDOWN_WINDOWS + 1) * 300
+        # No window-level cooldown — per-asset 300s cooldown (COOLDOWN_SECS) and
+        # signal quality gates (ENTRY_PRICE_GUARD, thresholds) are sufficient filters.
+        for sig, _asset in pending_signals:
+            if self._execute_signal(sig):
+                trades_placed += 1
+                self._asset_last_bet[_asset] = time.time()
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure        = self._risk.total_exposure()
