@@ -39,7 +39,8 @@ class ScannerMixin:
                 n_updown_seen += 1
 
             if is_updown:
-                if not (0.01 <= m.yes_price <= 0.99):
+                # Allow prices down to 0.001 (0.1¢) — penny bets are valid entries
+                if not (0.001 <= m.yes_price <= 0.999):
                     n_price += 1; n_ud_price += 1; continue
             else:
                 if m.liquidity < config.MIN_LIQUIDITY_USDC:
@@ -955,61 +956,59 @@ class ScannerMixin:
 
     def _scan_btc_penny_bets(self, updown_5m: list) -> None:
         """
-        Buy any BTC 5-min UpDown token priced at ≤$0.01.
-        Max bet: $10. Position is held to resolution — no early exits applied.
-        Both YES and NO are checked; whichever side is ≤0.01 gets bought.
+        Buy ANY BTC 5-min UpDown token priced at ≤$0.01, in any direction,
+        in any window, at all costs. Max $10 per token. Both YES and NO in
+        the same window are bought independently if both are ≤$0.01.
+        Bypasses ALL normal rules: cooldowns, exposure caps, trading pause,
+        existing positions. Only skips if already holding that exact token.
         """
-        _MAX_BET = 10.0
-        _PENNY_PRICE = 0.01
+        _MAX_BET   = 10.0
+        _PENNY_MAX = 0.01   # ≤1¢ ask price triggers the buy
+
+        from src.bot import OpenPosition
 
         for _m in updown_5m:
             if _detect_updown_market(_m.question) != "BTC":
                 continue
 
-            # Don't enter if already holding this market
-            _yes_id = _m.yes_token.token_id
-            _no_id  = _m.no_token.token_id
-            if _yes_id in self._positions or _no_id in self._positions:
-                continue
-
             _mkt_id   = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
             _question = _m.question
 
-            for _side, _token_id, _price in [
-                ("YES", _yes_id, _m.yes_price),
-                ("NO",  _no_id,  1.0 - _m.yes_price),
-            ]:
-                if _price > _PENNY_PRICE:
+            # Check YES and NO independently — buy both if both are ≤$0.01
+            for _side, _token_id in [("YES", _m.yes_token.token_id),
+                                      ("NO",  _m.no_token.token_id)]:
+                # Only skip if already holding this exact token
+                if _token_id in self._positions:
                     continue
 
-                # Get live orderbook price
-                _ob = self._client.get_order_book(_token_id)
-                _ask = (_ob.best_ask if _ob else None) or _price
-                if _ask > _PENNY_PRICE:
+                # Get live ask from orderbook
+                _ob  = self._client.get_order_book(_token_id)
+                _ask = (_ob.best_ask if _ob else None)
+                if _ask is None or _ask > _PENNY_MAX:
                     continue
 
-                _usdc   = min(_MAX_BET, _MAX_BET)  # cap at $10
-                _shares = int(_usdc / max(_ask, 0.01))
+                _ask    = max(_ask, 0.001)   # floor to avoid divide-by-zero
+                _shares = int(_MAX_BET / _ask)
                 if _shares < config.MIN_ORDER_SHARES:
                     continue
 
                 logger.info(
-                    f"[BTC-PENNY] {_side} token @ ${_ask:.3f} — buying {_shares} shares "
-                    f"for ${_usdc:.2f}  {_question[:50]}"
+                    f"[BTC-PENNY] {_side} @ ${_ask:.4f} — buying {_shares} shares "
+                    f"for ${_MAX_BET:.2f} — ignoring all rules  {_question[:45]}"
                 )
 
                 resp = self._client.place_limit_order(
                     token_id=_token_id,
                     side="BUY",
-                    price=round(_ask, 2),
+                    price=round(_ask, 4),
                     size=float(_shares),
                     fok=False,
                 )
                 if not resp:
-                    logger.debug(f"[BTC-PENNY] Order rejected for {_question[:40]}")
+                    logger.warning(f"[BTC-PENNY] Order failed for {_side} {_question[:40]}")
                     continue
 
-                from src.bot import OpenPosition
+                _cost = _shares * _ask
                 self._positions[_token_id] = OpenPosition(
                     market_id=_mkt_id,
                     question=_question,
@@ -1017,7 +1016,7 @@ class ScannerMixin:
                     side=_side,
                     shares=float(_shares),
                     entry_price=_ask,
-                    cost_usdc=_usdc,
+                    cost_usdc=_cost,
                     momentum_signal=0.0,
                     imbalance_signal=0.0,
                     composite_signal=0.0,
@@ -1027,7 +1026,7 @@ class ScannerMixin:
                     strategy="btc_penny",
                 )
                 self._save_positions()
-                self._risk.record_open(cost_usdc=_usdc)
+                self._risk.record_open(cost_usdc=_cost)
                 self._dash_state.orders_placed += 1
                 self._learner.record_open(
                     market_id=_mkt_id,
@@ -1036,7 +1035,7 @@ class ScannerMixin:
                     question=_question,
                     entry_price=_ask,
                     shares=float(_shares),
-                    cost_usdc=_usdc,
+                    cost_usdc=_cost,
                     momentum_signal=0.0,
                     imbalance_signal=0.0,
                     composite_signal=0.0,
@@ -1044,7 +1043,6 @@ class ScannerMixin:
                     dry_run=config.DRY_RUN,
                     strategy="btc_penny",
                 )
-                break  # one side per market is enough
 
 
 def _record_error(msg: str) -> None:
