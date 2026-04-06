@@ -288,6 +288,54 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
         return len(recent), wins / len(recent)
 
     def _set_mode(self, dry_run: bool, reason: str) -> None:
+        """Switch between live and dry-run mode safely.
+
+        LIVE → DRY-RUN: close all open live positions at market before switching
+                        so real USDC isn't left unmanaged on Polymarket.
+        DRY-RUN → LIVE: discard pending sim trades (they're not real orders)
+                        and reconcile real positions from CLOB.
+        """
+        if dry_run == config.DRY_RUN:
+            return  # already in requested mode, nothing to do
+
+        # ── LIVE → DRY-RUN: liquidate real open positions first ──────────
+        if dry_run and self._positions:
+            open_count = len(self._positions)
+            logger.warning(
+                f"[MODE-SWITCH] Switching to DRY-RUN with {open_count} open live position(s) — "
+                f"closing all at market to protect real capital."
+            )
+            self._dash_state.add_exec_log(
+                "warning",
+                f"LIVE→DRY-RUN: closing {open_count} real position(s) before switching"
+            )
+            for token_id in list(self._positions.keys()):
+                try:
+                    self._close_position(token_id)
+                except Exception as exc:
+                    logger.error(f"[MODE-SWITCH] Could not close {token_id[:16]}… : {exc}")
+
+        # ── DRY-RUN → LIVE: discard sim state, reload real positions ─────
+        if not dry_run:
+            sim_count = len(getattr(self._sim, "_open", {}))
+            if sim_count:
+                logger.info(
+                    f"[MODE-SWITCH] Discarding {sim_count} pending sim trade(s) — "
+                    f"these were paper-only and have no corresponding CLOB orders."
+                )
+                self._sim._open.clear()
+                self._sim_queue.clear()
+                self._save_sim_queue()
+                self._sim._save()
+
+            # Re-reconcile so bot picks up any real open positions from Polymarket
+            logger.info("[MODE-SWITCH] Re-reconciling positions from CLOB after switch to LIVE…")
+            try:
+                self._positions.clear()
+                self._reconcile_positions()
+            except Exception as exc:
+                logger.warning(f"[MODE-SWITCH] Reconcile failed (positions may be stale): {exc}")
+
         config.DRY_RUN = dry_run
         try:
             env_path = Path(".env")

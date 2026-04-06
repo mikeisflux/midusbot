@@ -39,42 +39,44 @@ def register(app, get_state, get_learner, get_close_fn):
 
     @app.route("/api/toggle_mode", methods=["POST"])
     def api_toggle_mode():
-        """Toggle between DRY_RUN (sandbox) and live mode. Updates .env and in-process config."""
-        from pathlib import Path
+        """Toggle between DRY_RUN (sandbox) and live mode.
+        Routes through bot._set_mode() so position cleanup happens correctly:
+        - LIVE→DRY-RUN: closes all open real positions before switching
+        - DRY-RUN→LIVE: discards sim state and re-reconciles from CLOB
+        """
+        state = get_state()
+        # Use bot._set_mode if available (handles position cleanup)
+        from src.bot import PolymarketBot
+        import gc
+        bot_instance = next(
+            (obj for obj in gc.get_objects() if isinstance(obj, PolymarketBot)),
+            None
+        )
         new_dry_run = not config.DRY_RUN
-        config.DRY_RUN = new_dry_run
+        mode = "SANDBOX" if new_dry_run else "LIVE"
 
-        env_path = Path(".env")
-        if env_path.exists():
-            lines = env_path.read_text().splitlines()
-            found = False
-            new_lines = []
+        if bot_instance is not None:
+            # Full safe switch with position cleanup
+            bot_instance._set_mode(new_dry_run, reason="manual dashboard toggle")
+        else:
+            # Fallback: just flip the flag (bot not running, no positions to clean up)
+            from pathlib import Path
+            config.DRY_RUN = new_dry_run
+            env_path = Path(".env")
+            lines = env_path.read_text().splitlines() if env_path.exists() else []
+            new_lines, found = [], False
             for line in lines:
                 if line.startswith("DRY_RUN="):
-                    new_lines.append(f"DRY_RUN={'false' if not new_dry_run else 'true'}")
+                    new_lines.append(f"DRY_RUN={'true' if new_dry_run else 'false'}")
                     found = True
                 else:
                     new_lines.append(line)
             if not found:
-                new_lines.append(f"DRY_RUN={'false' if not new_dry_run else 'true'}")
+                new_lines.append(f"DRY_RUN={'true' if new_dry_run else 'false'}")
             env_path.write_text("\n".join(new_lines) + "\n")
+            if state:
+                state.add_exec_log("info", f"Mode switched to {mode}")
 
-        mode = "SANDBOX" if new_dry_run else "LIVE"
-        state = get_state()
-        if state:
-            state.add_exec_log("info", f"Mode switched to {mode}")
-            if not new_dry_run and state.wallet_balance > 0:
-                state._seed        = state.wallet_balance
-                state.total_pnl    = 0.0
-                state.total_trades = 0
-                state.wins         = 0
-                state.total_fees   = 0.0
-                state.daily_pnl    = 0.0
-                state.pnl_history  = []
-                state.equity_curve = []
-                state.add_equity_point()
-                state.add_exec_log("info",
-                    f"P&L reset — baseline set to wallet: ${state.wallet_balance:.2f} USDC")
         return jsonify({"ok": True, "dry_run": new_dry_run, "mode": mode})
 
     @app.route("/api/close_position", methods=["POST"])
