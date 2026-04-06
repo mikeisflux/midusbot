@@ -322,15 +322,52 @@ class ScannerMixin:
                 logger.debug(f"[STALE] {market.question[:40]} — empty order book, skipping")
                 continue
 
+            _mid_now = ob.mid if ob else market.yes_price
+
             # Competing bot indicator: if mid is already repriced within 5s of window open
             if _secs < 5 and ob:
-                _mid = ob.mid
-                if _mid > 0.54 or _mid < 0.46:
+                if _mid_now > 0.54 or _mid_now < 0.46:
                     logger.debug(
-                        f"[BOT-DETECT] {market.question[:40]} — mid={_mid:.3f} "
+                        f"[BOT-DETECT] {market.question[:40]} — mid={_mid_now:.3f} "
                         f"repriced in <5s: competing bots active"
                     )
                     continue
+
+            # ── Bounce-trap guard ─────────────────────────────────────────────
+            # Track the min/max mid seen per market per 5-minute window.
+            # If the mid was previously extreme (>0.14 from 0.50) but has since
+            # bounced back inside the entry guard, MMs already had strong conviction
+            # in one direction — entering the "bounce" is a trap.
+            # XRP example: mid went 0.50→0.31→0.52. Bot entered UP at 0.52 and lost -30%.
+            if not hasattr(self, "_window_mid_range"):
+                self._window_mid_range: dict = {}  # token_id → (win_ts, min_mid, max_mid)
+            _win_ts = int(time.time() // 300) * 300
+            _tok_key = market.yes_token.token_id
+            _prev_range = self._window_mid_range.get(_tok_key, (0, _mid_now, _mid_now))
+            if _prev_range[0] != _win_ts:
+                # New window — reset tracking for this market
+                self._window_mid_range[_tok_key] = (_win_ts, _mid_now, _mid_now)
+            else:
+                self._window_mid_range[_tok_key] = (
+                    _win_ts,
+                    min(_prev_range[1], _mid_now),
+                    max(_prev_range[2], _mid_now),
+                )
+            _wmin = self._window_mid_range[_tok_key][1]
+            _wmax = self._window_mid_range[_tok_key][2]
+            _BOUNCE_EXTREME = 0.14   # mid was 0.36 or below / 0.64 or above
+            _in_entry_range = 0.46 <= _mid_now <= 0.54
+            _was_low  = _wmin < 0.50 - _BOUNCE_EXTREME  # market priced DOWN hard
+            _was_high = _wmax > 0.50 + _BOUNCE_EXTREME  # market priced UP hard
+            if _in_entry_range and (_was_low or _was_high):
+                _extreme_val = _wmin if _was_low else _wmax
+                _direction = "DOWN" if _was_low else "UP"
+                logger.debug(
+                    f"[BOUNCE-TRAP] {market.question[:40]} — "
+                    f"mid was {_extreme_val:.3f} ({_direction} conviction earlier this window), "
+                    f"now bounced to {_mid_now:.3f} → SKIP"
+                )
+                continue
 
             try:
                 sig = self._trend.analyse(market, ob)

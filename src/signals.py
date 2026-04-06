@@ -31,7 +31,8 @@ _BINANCE_FEEDS: dict[str, str] = {
     "SOL":  "https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT",
     "DOGE": "https://api.binance.com/api/v3/ticker/price?symbol=DOGEUSDT",
     "BNB":  "https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT",
-    "HYPE": "https://api.binance.com/api/v3/ticker/price?symbol=HYPEUSDT",
+    # HYPE trades on Binance futures, not spot — use fapi endpoint
+    "HYPE": "https://fapi.binance.com/fapi/v1/ticker/price?symbol=HYPEUSDT",
     "AVAX": "https://api.binance.com/api/v3/ticker/price?symbol=AVAXUSDT",
     "LINK": "https://api.binance.com/api/v3/ticker/price?symbol=LINKUSDT",
     "ADA":  "https://api.binance.com/api/v3/ticker/price?symbol=ADAUSDT",
@@ -70,10 +71,11 @@ _COINGECKO_IDS: dict[str, str] = {
 _PRICE_CACHE: dict[str, tuple[float, float]] = {}     # symbol → (price, timestamp)
 _EXCHANGE_PRESSURE: dict[str, float] = {}            # symbol → bid/ask imbalance (-1..+1)
 _CACHE_TTL       = 2.0   # seconds — fresh price window (WS keeps this hot)
-_CACHE_TTL_STALE = 30.0  # seconds — stale-but-usable fallback when WS/REST fail
-# NOTE: 5-min UpDown oracle lag edge exists only in the first ~90s of a window.
-# A 60s stale price would consume 2/3 of the edge window before trading. 30s is
-# the upper bound — if price is older than this, skip rather than trade on fiction.
+_CACHE_TTL_STALE = 90.0  # seconds — stale-but-usable fallback when WS/REST fail
+# NOTE: The stale cache is only used for direction confirmation, not momentum
+# computation (which uses _PRICE_HISTORY). HYPE has persistent WS silence but
+# REST polls succeed every ~15s, so 90s allows up to 6 failed REST calls before
+# giving up — enough to survive transient connectivity hiccups.
 
 # Feed health: track last WS tick time per symbol for diagnostics
 _LAST_WS_TICK: dict[str, float] = {}  # symbol → timestamp of last WS aggTrade
