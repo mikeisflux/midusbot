@@ -134,6 +134,85 @@ class ScannerMixin:
         window_secs = window_mins * 60
         return window_secs - (now % window_secs)
 
+    def _start_penny_watcher(self) -> None:
+        """
+        Dedicated background thread that scans BTC orderbooks every 2 seconds
+        for penny-price tokens (≤$0.01). Runs independently of the main loop
+        so we never miss a penny window due to 15-second loop timing.
+        Uses _btc_penny_token_cache populated by the main loop each iteration.
+        """
+        import threading
+
+        if getattr(self, "_penny_watcher_started", False):
+            return
+        self._penny_watcher_started = True
+        self._btc_penny_token_cache: list = []  # [(side, token_id, market_id, question)]
+
+        def _watch():
+            _PENNY_MAX = 0.01
+            _MAX_BET   = 10.0
+            from src.bot import OpenPosition
+            while getattr(self, "_running", True):
+                try:
+                    for _side, _token_id, _mkt_id, _question in list(self._btc_penny_token_cache):
+                        if _token_id in self._positions:
+                            continue
+                        _ob  = self._client.get_order_book(_token_id)
+                        _ask = _ob.best_ask if _ob else None
+                        if _ask is None or _ask > _PENNY_MAX:
+                            continue
+                        _ask    = max(_ask, 0.001)
+                        _shares = int(_MAX_BET / _ask)
+                        if _shares < config.MIN_ORDER_SHARES:
+                            continue
+                        logger.info(
+                            f"[BTC-PENNY-FAST] {_side} @ ${_ask:.4f} — buying {_shares} shares "
+                            f"for ${_MAX_BET:.2f}  {_question[:45]}"
+                        )
+                        resp = self._client.place_limit_order(
+                            token_id=_token_id,
+                            side="BUY",
+                            price=round(_ask, 4),
+                            size=float(_shares),
+                            fok=False,
+                        )
+                        if not resp:
+                            continue
+                        _cost = _shares * _ask
+                        self._positions[_token_id] = OpenPosition(
+                            market_id=_mkt_id,
+                            question=_question,
+                            token_id=_token_id,
+                            side=_side,
+                            shares=float(_shares),
+                            entry_price=_ask,
+                            cost_usdc=_cost,
+                            momentum_signal=0.0,
+                            imbalance_signal=0.0,
+                            composite_signal=0.0,
+                            confidence="PENNY",
+                            order_id=resp.get("id") if isinstance(resp, dict) else None,
+                            entry_time=time.time(),
+                            strategy="btc_penny",
+                        )
+                        self._save_positions()
+                        self._risk.record_open(cost_usdc=_cost)
+                        self._dash_state.orders_placed += 1
+                        self._learner.record_open(
+                            market_id=_mkt_id, token_id=_token_id, side=_side,
+                            question=_question, entry_price=_ask, shares=float(_shares),
+                            cost_usdc=_cost, momentum_signal=0.0, imbalance_signal=0.0,
+                            composite_signal=0.0, confidence="PENNY",
+                            dry_run=config.DRY_RUN, strategy="btc_penny",
+                        )
+                except Exception as exc:
+                    logger.debug(f"[BTC-PENNY-FAST] watcher error: {exc}")
+                time.sleep(2.0)
+
+        t = threading.Thread(target=_watch, daemon=True, name="btc-penny-watcher")
+        t.start()
+        logger.info("[BTC-PENNY-FAST] Dedicated penny watcher started — scanning every 2s")
+
     def _smart_sleep(self) -> None:
         BURST_LEAD_SECS     = 6
         BURST_LOOPS         = 4
@@ -462,7 +541,10 @@ class ScannerMixin:
         # ── BTC penny bets ($0.01 tokens) — HIGHEST PRIORITY ─────────────────
         # When a BTC 5-min UpDown token is priced at ≤0.01, buy it immediately.
         # Runs before all other strategies. Max $10 per bet. Hold to resolution.
+        # Also refreshes the fast-watcher cache so the 2s background thread
+        # always has fresh token IDs to poll.
         self._scan_btc_penny_bets(updown_5m)
+        self._start_penny_watcher()  # no-op after first call
 
         # ── Chainlink close-watch launcher ────────────────────────────────────
         # For BTC UPDOWN markets within 5-40s of close, launch an oracle watch.
@@ -969,6 +1051,17 @@ class ScannerMixin:
         _PENNY_MAX = 0.01   # ≤1¢ ask price triggers the buy
 
         from src.bot import OpenPosition
+
+        # Rebuild the fast-watcher cache with current BTC token IDs
+        _new_cache = []
+        for _m in updown_5m:
+            if _detect_updown_market(_m.question) != "BTC":
+                continue
+            _mkt_id_c = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
+            _new_cache.append(("YES", _m.yes_token.token_id, _mkt_id_c, _m.question))
+            _new_cache.append(("NO",  _m.no_token.token_id,  _mkt_id_c, _m.question))
+        if hasattr(self, "_btc_penny_token_cache"):
+            self._btc_penny_token_cache = _new_cache
 
         for _m in updown_5m:
             if _detect_updown_market(_m.question) != "BTC":
