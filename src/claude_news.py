@@ -33,7 +33,7 @@ MAX_NEWS_AGE_SECS   = 600                  # ignore headlines older than 10 minu
 
 # Free public news sources — no API keys required
 _SOURCES = {
-    "cryptopanic": "https://cryptopanic.com/api/v1/posts/?public=true&currencies=BTC,ETH,SOL,XRP,BNB&filter=important&kind=news",
+    "cryptopanic": "https://cryptopanic.com/api/developer/v2/posts/?currencies=BTC,ETH,SOL,XRP,BNB&filter=important&kind=news",
     "coindesk_rss": "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "decrypt_rss":  "https://decrypt.co/feed",
 }
@@ -103,25 +103,37 @@ class ClaudeNewsAnalyst:
         headlines: list[str] = []
         cutoff = time.time() - MAX_NEWS_AGE_SECS
 
-        # Source 1: CryptoPanic JSON API
-        try:
-            r = requests.get(_SOURCES["cryptopanic"], timeout=8)
-            r.raise_for_status()
-            for post in (r.json().get("results") or [])[:15]:
-                try:
-                    import datetime
-                    ts = datetime.datetime.fromisoformat(
-                        post.get("created_at", "").replace("Z", "+00:00")
-                    ).timestamp()
-                    if ts < cutoff:
-                        continue
-                except Exception:
-                    pass
-                title = (post.get("title") or "").strip()
-                if title:
-                    headlines.append(title)
-        except Exception as exc:
-            logger.debug(f"[CLAUDE-NEWS] CryptoPanic failed: {exc}")
+        # Source 1: CryptoPanic JSON API (requires free auth_token — set CRYPTOPANIC_TOKEN in .env)
+        import os as _os
+        _cp_token = _os.getenv("CRYPTOPANIC_TOKEN", "")
+        if _cp_token:
+            try:
+                url = _SOURCES["cryptopanic"] + "&auth_token=" + _cp_token
+                r = requests.get(url, timeout=8)
+                r.raise_for_status()
+            except Exception as exc:
+                logger.debug(f"[CLAUDE-NEWS] CryptoPanic failed: {exc}")
+                r = None
+        else:
+            logger.debug("[CLAUDE-NEWS] CryptoPanic skipped — set CRYPTOPANIC_TOKEN in .env for this source")
+            r = None
+        if r is not None:
+            try:
+                for post in (r.json().get("results") or [])[:15]:
+                    try:
+                        import datetime
+                        ts = datetime.datetime.fromisoformat(
+                            post.get("created_at", "").replace("Z", "+00:00")
+                        ).timestamp()
+                        if ts < cutoff:
+                            continue
+                    except Exception:
+                        pass
+                    title = (post.get("title") or "").strip()
+                    if title:
+                        headlines.append(title)
+            except Exception as exc:
+                logger.debug(f"[CLAUDE-NEWS] CryptoPanic parse error: {exc}")
 
         # Sources 2 & 3: RSS feeds (CoinDesk, Decrypt)
         for src_name, url in [("coindesk_rss", _SOURCES["coindesk_rss"]),
