@@ -222,9 +222,12 @@ class MarketMakerMixin:
             if yes_post + no_post >= 0.96:
                 continue   # no spread left after fees
 
-            # Size per leg
-            per_leg_usdc = min(budget / 2, config.MAX_POSITION_USDC / 2)
-            shares = _math.floor(per_leg_usdc / max(yes_post, no_post))
+            # Size per leg — MM has its own budget (MM_BUDGET_PCT), don't cap at
+            # MAX_POSITION_USDC. Ensure we can clear the 5-share minimum.
+            _max_price    = max(yes_post, no_post)
+            _min_leg_usdc = _math.ceil(config.MIN_ORDER_SHARES * _max_price * 1.05 * 100) / 100
+            per_leg_usdc  = max(_min_leg_usdc, min(budget / 2, 10.0))
+            shares = _math.floor(per_leg_usdc / _max_price)
             if shares < config.MIN_ORDER_SHARES:
                 continue
 

@@ -788,11 +788,14 @@ class ScannerMixin:
                 continue
 
             # Size: equal split across both legs, respecting arb budget
-            remaining_budget = min(_arb_budget - _arb_exposure, config.MAX_POSITION_USDC)
-            usdc_per_leg = remaining_budget / 2
-            # Shares: floored integer (Polymarket requirement)
+            # Don't cap at MAX_POSITION_USDC — arb has its own budget (ARB_BUDGET_PCT).
+            # Ensure each leg can buy at least MIN_ORDER_SHARES (5 shares).
             import math as _math
-            shares = _math.floor(usdc_per_leg / (total_cost / 2))
+            avg_price    = total_cost / 2
+            min_leg_usdc = _math.ceil(config.MIN_ORDER_SHARES * avg_price * 1.05 * 100) / 100
+            remaining_budget = _arb_budget - _arb_exposure
+            usdc_per_leg = max(min_leg_usdc, min(remaining_budget / 2, 10.0))
+            shares = _math.floor(usdc_per_leg / avg_price)
             if shares < config.MIN_ORDER_SHARES:
                 continue
 
