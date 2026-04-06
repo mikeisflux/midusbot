@@ -199,7 +199,6 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
         commander.do_resume    = lambda: setattr(config, "TRADING_PAUSED", False)
         commander.do_live      = lambda: self._set_mode(dry_run=False, reason="Discord command")
         commander.do_dry       = lambda: self._set_mode(dry_run=True,  reason="Discord command")
-        commander.do_refactor  = self._discord_refactor
         commander.do_reset_dry = self._reset_sim_wallet
         commander.start()
 

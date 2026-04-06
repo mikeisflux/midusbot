@@ -86,7 +86,6 @@ class DiscordCommander:
         self.do_resume:    Callable[[], None]   = lambda: None
         self.do_live:      Callable[[], None]   = lambda: None
         self.do_dry:       Callable[[], None]   = lambda: None
-        self.do_refactor:  Callable[[str], None] = lambda _: None
         self.do_reset_dry: Callable[[], str]    = lambda: "Not available"
 
     # ------------------------------------------------------------------
@@ -267,13 +266,6 @@ class DiscordCommander:
         elif cmd == "!dry":
             self.do_dry()
             self.send("🟡 Switched to DRY-RUN.")
-
-        elif cmd == "!refactor":
-            if not arg:
-                self.send("Usage: `!refactor <description of what to improve>`")
-                return
-            self.send(f"🤖 Queuing LLM refactor: _{arg}_")
-            self.do_refactor(arg)
 
         elif cmd == "!resetdryrun":
             self.send("🔄 Resetting sim wallet…")
