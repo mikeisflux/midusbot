@@ -98,11 +98,6 @@ class UpDownMomentumStrategy:
                 f"(max={effective_max_secs}s) → SKIP (too late, oracle lag gone)"
             )
             return None
-        logger.debug(
-            f"[LOGIC:UPDOWN:{symbol}] TIMING — {secs_in:.0f}s into {window_mins}min window "
-            f"(max={effective_max_secs}s) → PASS"
-        )
-
         # Time-of-day skip
         _tod_skip = _ap.get("time_of_day_skip", [])
         if _tod_skip and time.gmtime().tm_hour in _tod_skip:
@@ -130,11 +125,6 @@ class UpDownMomentumStrategy:
                 f"(need {_min_hist}s) → SKIP"
             )
             return None
-        logger.debug(
-            f"[LOGIC:UPDOWN:{symbol}] WARMUP — {hist_span:.0f}s price history  "
-            f"live_price={live_price:.4f} → PASS"
-        )
-
         # ── Guard 2: Entry price must still be near 0.50 ─────────────────────
         mid = order_book.mid if order_book else market.yes_price
         if mid > config.ENTRY_PRICE_GUARD or mid < (1.0 - config.ENTRY_PRICE_GUARD):
@@ -155,8 +145,6 @@ class UpDownMomentumStrategy:
                     f"(no real market, ask-guard would block anyway) → SKIP"
                 )
                 return None
-        logger.debug(f"[LOGIC:UPDOWN:{symbol}] ENTRY-GUARD — mid={mid:.3f} within range → PASS")
-
         # Skip assets on analyst block-list
         if symbol.upper() in [s.upper() for s in _ap.get("skip_assets", [])]:
             logger.debug(f"[LOGIC:UPDOWN:{symbol}] SKIP-ASSETS — analyst blocked this asset → SKIP")
@@ -192,11 +180,6 @@ class UpDownMomentumStrategy:
                 f"thresh={_sig_thresh:.4%} ({_thresh_src}) ratio={_ratio:.2f}× → SKIP (below threshold)"
             )
             return None
-        logger.debug(
-            f"[LOGIC:UPDOWN:{symbol}] THRESHOLD — win_ret={window_return:+.4%} "
-            f"thresh={_sig_thresh:.4%} ({_thresh_src}) ratio={_ratio:.2f}× → PASS"
-        )
-
         # ── Conviction filter ─────────────────────────────────────────────────
         _rate_30s = _get_trade_rate(symbol, window_secs=30)
         _rate_avg = _get_avg_trade_rate(symbol)
@@ -208,11 +191,6 @@ class UpDownMomentumStrategy:
                     f"avg={_rate_avg:.2f}/s ratio={_rate_ratio:.2f}× (need ≥0.5×) → SKIP (low conviction)"
                 )
                 return None
-            logger.debug(
-                f"[LOGIC:UPDOWN:{symbol}] CONVICTION — rate={_rate_30s:.2f}/s "
-                f"avg={_rate_avg:.2f}/s ratio={_rate_ratio:.2f}× → PASS"
-            )
-
         # ── Market regime filter ──────────────────────────────────────────────
         regime = _market_regime(symbol)
         signal_dir = "UP" if window_return > 0 else "DOWN"
@@ -227,8 +205,6 @@ class UpDownMomentumStrategy:
         if regime == "TRENDING_DOWN" and signal_dir == "UP":
             logger.info(f"[LOGIC:UPDOWN:{symbol}] REGIME — {regime} contradicts UP signal → SKIP")
             return None
-        logger.debug(f"[LOGIC:UPDOWN:{symbol}] REGIME — {regime} compatible with {signal_dir} → PASS")
-
         # ── Mean reversion check ──────────────────────────────────────────────
         _is_extreme_move = abs(window_return) >= 0.003  # 0.3%
         if _is_extreme_move:
@@ -276,12 +252,7 @@ class UpDownMomentumStrategy:
                         f"accel={accel:+.4%} DECELERATING at t={secs_in:.0f}s → SKIP (mean reversion likely)"
                     )
                     return None
-                logger.debug(
-                    f"[LOGIC:UPDOWN:{symbol}] ACCEL — win_ret={window_return:+.4%} "
-                    f"accel={accel:+.4%} still accelerating → PASS"
-                )
-        else:
-            logger.debug(f"[LOGIC:UPDOWN:{symbol}] ACCEL — t={secs_in:.0f}s < 45s, check skipped")
+                pass
 
         # ── Multi-timeframe consensus ─────────────────────────────────────────
         consensus_score, consensus_conf = _multitf_consensus(symbol)
@@ -294,15 +265,6 @@ class UpDownMomentumStrategy:
                     f"consensus={consensus_dir} vs signal={signal_dir} → SKIP (timeframes disagree)"
                 )
                 return None
-            logger.debug(
-                f"[LOGIC:UPDOWN:{symbol}] MULTITF — score={consensus_score:+.2f} conf={consensus_conf} "
-                f"consensus={consensus_dir} agrees with signal → PASS"
-            )
-        else:
-            logger.debug(
-                f"[LOGIC:UPDOWN:{symbol}] MULTITF — score={consensus_score:+.2f} conf={consensus_conf} "
-                f"→ no strong consensus, proceeding"
-            )
 
         # ── Consecutive window trend ──────────────────────────────────────────
         trend_score = _consecutive_window_trend(symbol)
@@ -318,13 +280,6 @@ class UpDownMomentumStrategy:
                 )
                 return None
             trend_dir_ok = trend_direction == signal_direction
-            logger.debug(
-                f"[LOGIC:UPDOWN:{symbol}] CW-TREND — score={trend_score:+.2f} "
-                f"trend={trend_direction} signal={signal_direction} "
-                f"aligned={'YES' if trend_dir_ok else 'NO (weak, not blocking)'}"
-            )
-        else:
-            logger.debug(f"[LOGIC:UPDOWN:{symbol}] CW-TREND — no data (neutral, not blocking)")
         if _min_trend > 0 and (trend_score is None or abs(trend_score) < _min_trend):
             logger.debug(
                 f"[LOGIC:UPDOWN:{symbol}] MIN-TREND — score={trend_score} < required {_min_trend} → SKIP"
@@ -340,12 +295,6 @@ class UpDownMomentumStrategy:
                 f"combined={combined:+.4%} REVERSES signal direction → SKIP"
             )
             return None
-        logger.debug(
-            f"[LOGIC:UPDOWN:{symbol}] BTC-LEAD — btc={btc_lead:+.4%} "
-            f"win_ret={window_return:+.4%} combined={combined:+.4%} → PASS "
-            f"direction={'UP' if combined > 0 else 'DOWN'}"
-        )
-
         direction = "UP" if combined > 0 else "DOWN"
 
         # ── Fair value + edge ─────────────────────────────────────────────────

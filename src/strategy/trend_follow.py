@@ -77,10 +77,6 @@ class TrendFollowStrategy:
 
         streak = self._tracker.get_streak(symbol)
         mid = order_book.mid if order_book else market.yes_price
-        logger.debug(
-            f"[LOGIC:TREND:{symbol}] STATE — direction={direction} streak={streak} "
-            f"mid={mid:.3f} t={secs_in:.0f}s"
-        )
 
         # ── Price guard: YES mid must still be near 0.50 ──────────────────────
         # This checks the YES mid directly — not the side-adjusted mkt_price.
@@ -114,11 +110,6 @@ class TrendFollowStrategy:
                 )
                 return None
 
-        logger.debug(
-            f"[LOGIC:TREND:{symbol}] PRICE-GUARD — mid={mid:.3f} within "
-            f"[{1.0 - _guard:.2f}–{_guard:.2f}] → PASS"
-        )
-
         # ── Window-relative confirmation ──────────────────────────────────────
         # Current Binance move must agree with streak direction.
         window_return = _window_return(symbol, int(secs_in))
@@ -132,18 +123,8 @@ class TrendFollowStrategy:
                 f"dir={window_dir} contradicts streak direction={direction} → SKIP"
             )
             return None
-        logger.debug(
-            f"[LOGIC:TREND:{symbol}] WINDOW-CONFIRM — win_ret={window_return:+.4%} "
-            f"dir={window_dir} agrees with streak={direction} → PASS"
-        )
-
         btc_lead = _btc_leadership_signal(symbol)
         combined = window_return + btc_lead
-        logger.debug(
-            f"[LOGIC:TREND:{symbol}] BTC-LEAD — btc={btc_lead:+.4%} "
-            f"win_ret={window_return:+.4%} combined={combined:+.4%}"
-        )
-
         # ── Consecutive-window trend boost ────────────────────────────────────
         cw_trend = _consecutive_window_trend(symbol)
         cw_boost = 0
@@ -151,11 +132,6 @@ class TrendFollowStrategy:
             cw_dir = "UP" if cw_trend > 0 else "DOWN"
             if cw_dir == direction and abs(cw_trend) >= 0.5:
                 cw_boost = 1
-        logger.debug(
-            f"[LOGIC:TREND:{symbol}] CW-TREND — score={cw_trend} boost={cw_boost} "
-            f"(+1 to streak if recent windows align)"
-        )
-
         # ── Fair value + edge ─────────────────────────────────────────────────
         fair_value = compute_trendfollow_fair_value(streak, cw_boost)
         edge = fair_value - mkt_price
@@ -165,22 +141,12 @@ class TrendFollowStrategy:
                 f"edge={edge:+.3f} < MIN_EDGE={config.MIN_EDGE:.3f} → SKIP"
             )
             return None
-        logger.debug(
-            f"[LOGIC:TREND:{symbol}] EDGE — fair={fair_value:.3f} mkt={mkt_price:.3f} "
-            f"edge={edge:+.3f} ≥ MIN_EDGE={config.MIN_EDGE:.3f} → PASS"
-        )
-
         # ── Binomial significance gate ────────────────────────────────────────
         # Use consecutive same-direction windows from session_log actual_direction
         # NOT the TrendTracker trade-based streak (which only updates on trade closes).
         actual_streak = _actual_direction_streak(symbol, direction)
         confidence = _binomial_streak_confidence(actual_streak)
         _p_luck = 0.5 ** max(actual_streak, 1)
-        logger.debug(
-            f"[LOGIC:TREND:{symbol}] BINOMIAL — actual_streak={actual_streak} "
-            f"(from session_log)  tracker_streak={streak}  "
-            f"P(luck)={_p_luck:.4f} → confidence={confidence}"
-        )
         if confidence == "LOW" and abs(window_return) < _MIN_WINDOW_RETURN_PCT * 2:
             logger.debug(
                 f"[LOGIC:TREND:{symbol}] LOW-CONF-GATE — LOW confidence + weak win_ret={window_return:+.4%} "
@@ -193,12 +159,6 @@ class TrendFollowStrategy:
         _tf_markov = _markov_persistence_mult(symbol, direction)
         _tf_prob   = _tf_bayes * _tf_markov
         _tf_rel_strength = (edge / config.MIN_EDGE) * (1.0 + streak * 0.1) * _tf_prob
-        logger.debug(
-            f"[LOGIC:TREND:{symbol}] PROB-MULTS — "
-            f"bayes={_tf_bayes:.3f}×  markov={_tf_markov:.3f}×  combined={_tf_prob:.3f}×  "
-            f"rel_strength={_tf_rel_strength:.3f} "
-            f"(base={edge/config.MIN_EDGE:.2f}× × streak_factor={1.0+streak*0.1:.2f}× × prob={_tf_prob:.3f}×)"
-        )
         _PROB_GATE = 0.75
         if _tf_prob < _PROB_GATE:
             logger.info(
