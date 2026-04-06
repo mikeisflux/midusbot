@@ -114,7 +114,7 @@ ENTRY_PRICE_GUARD:   float = float(_env("ENTRY_PRICE_GUARD",   "0.54"))  # src/s
 
 # Early exit thresholds: exit positions at these price extremes mid-window
 EARLY_EXIT_LOSS_THRESHOLD:   float = float(_env("EARLY_EXIT_LOSS_THRESHOLD",   "0.38"))
-EARLY_EXIT_GAIN_THRESHOLD:   float = float(_env("EARLY_EXIT_GAIN_THRESHOLD",   "0.72"))
+EARLY_EXIT_GAIN_THRESHOLD:   float = float(_env("EARLY_EXIT_GAIN_THRESHOLD",   "0.88"))
 
 # Order book thinness: skip if YES spread < this (MMs repricing aggressively)
 OB_MIN_SPREAD:      float = float(_env("OB_MIN_SPREAD", "0.005"))

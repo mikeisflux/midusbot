@@ -193,29 +193,17 @@ class MonitoringMixin:
             # Both sides use the same direction: low price = loss, high price = gain.
             if current_price is not None:
                 if current_price < config.EARLY_EXIT_LOSS_THRESHOLD:
-                    # Time gate: only cut in the second half of the window.
-                    # In the first 150s the market can recover — cutting at 0.38 after
-                    # 60s has lost us real winners (journal shows ETH YES cut at 0.205
-                    # after 56s → resolved YES=1.00; XRP YES cut at 0.37 after 83s → resolved YES=1.00).
-                    # Exception: catastrophic price (< 0.22) exits immediately regardless.
+                    # Cut immediately — losers resolve to 0.00 at window close.
+                    # Time gate removed: holding until midpoint was letting losers
+                    # bleed to near-zero (data shows -93% to -100% losses on held positions).
                     _elapsed_s = time.time() - getattr(pos, "entry_time", 0)
-                    _window_s = (_updown_window_mins(pos.question) or 5) * 60
-                    _past_midpoint = _elapsed_s >= _window_s * 0.50  # past 150s in 5-min window
-                    _catastrophic = current_price < 0.22
-                    if _past_midpoint or _catastrophic:
-                        to_close.append((token_id, current_price))
-                        logger.info(
-                            f"[EARLY-EXIT] Cutting losing {pos.side} position at {current_price:.3f} "
-                            f"({pnl_pct:+.1%}) {_elapsed_s:.0f}s in — {pos.question[:40]}"
-                        )
-                        continue
-                    else:
-                        logger.debug(
-                            f"[EARLY-EXIT DEFERRED] {pos.side} {current_price:.3f} ({pnl_pct:+.1%}) "
-                            f"only {_elapsed_s:.0f}s in window — holding until midpoint "
-                            f"({_window_s * 0.50:.0f}s)"
-                        )
-                        # fall through — don't exit yet
+                    to_close.append((token_id, current_price))
+                    logger.info(
+                        f"[EARLY-EXIT] Cutting losing {pos.side} position at {current_price:.3f} "
+                        f"({pnl_pct:+.1%}) {_elapsed_s:.0f}s in — {pos.question[:40]}"
+                    )
+                    continue
+
                 # ── Update high-water mark ────────────────────────────────────
                 if current_price > pos.high_water_mark:
                     pos.high_water_mark = current_price
@@ -235,7 +223,10 @@ class MonitoringMixin:
                         )
                         continue
 
-                if pnl_pct >= 0.25 or current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
+                # Winners go to 1.00 and are auto-claimed at ≥0.90. Only exit
+                # early if price has retreated significantly from a high peak
+                # (handled by trailing stop above) or hit the gain threshold.
+                if current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
                     to_close.append((token_id, current_price))
                     logger.info(
                         f"[EARLY-EXIT] Locking in {pos.side} gain at {current_price:.3f} "
