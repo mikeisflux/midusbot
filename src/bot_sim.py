@@ -220,7 +220,12 @@ class SimMixin:
                     # _close_position() already recorded the real PnL via record_close().
                     # Calling it again here would double-count daily P&L.
                     self._risk.record_close(pnl_usdc=net_pnl, cost_usdc=sim_cost)
-                self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
+                # Only count simulation results in the dashboard when actually
+                # running in DRY_RUN mode. In LIVE mode, real trades are
+                # recorded by _close_position() — counting sim trades here
+                # too would inflate Total P&L with phantom paper profits.
+                if config.DRY_RUN:
+                    self._dash_state.record_closed_trade(gross_pnl, fee_usdc=fee)
 
                 self._positions.pop(sim["token_id"], None)
 

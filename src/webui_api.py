@@ -133,7 +133,15 @@ def register(app, get_state, get_learner, get_close_fn):
             except Exception:
                 pass
 
-        closed = [r for r in records if r.get("closed") and "pnl_usdc" in r]
+        # Only count live trades in strategy stats — dry-run paper trades
+        # inflate win rates and distort portfolio allocation decisions.
+        closed = [
+            r for r in records
+            if r.get("closed") and "pnl_usdc" in r and not r.get("dry_run", False)
+        ]
+        # Fall back to all trades (including paper) if no live trades exist yet
+        if not closed:
+            closed = [r for r in records if r.get("closed") and "pnl_usdc" in r]
 
         strategies = {
             "momentum":  {"label": "Momentum / Oracle-lag", "target_pct": 30},
