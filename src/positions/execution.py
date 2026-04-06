@@ -85,17 +85,26 @@ class ExecutionMixin:
                     if _m:
                         _real_shares = int(_m.group(1)) / 1_000_000
                         if 0 < _real_shares < sell_shares:
-                            logger.info(
-                                f"[BALANCE-RETRY] tracked={sell_shares:.4f} "
-                                f"actual={_real_shares:.4f} — retrying with real balance"
-                            )
-                            resp = self._client.place_limit_order(
-                                token_id=token_id,
-                                side="SELL",
-                                price=sell_price,
-                                size=_real_shares,
-                                fok=_is_updown,
-                            )
+                            if _real_shares < config.MIN_ORDER_SHARES:
+                                # Balance too small to place a valid order — treat as ghost.
+                                logger.warning(
+                                    f"[GHOST-POS] Real balance {_real_shares:.6f} < "
+                                    f"MIN_ORDER_SHARES ({config.MIN_ORDER_SHARES}) "
+                                    f"— force-removing {token_id[:20]}…"
+                                )
+                                resp = {"force_closed": True}
+                            else:
+                                logger.info(
+                                    f"[BALANCE-RETRY] tracked={sell_shares:.4f} "
+                                    f"actual={_real_shares:.4f} — retrying with real balance"
+                                )
+                                resp = self._client.place_limit_order(
+                                    token_id=token_id,
+                                    side="SELL",
+                                    price=sell_price,
+                                    size=_real_shares,
+                                    fok=_is_updown,
+                                )
                             # FOK killed on balance-corrected order — retry without FOK
                             if resp is None and _is_updown:
                                 _err2 = getattr(self._client, "_last_order_error", "") or ""

@@ -904,7 +904,7 @@ class ScannerMixin:
                 continue
 
             _secs_left = _end_ts - _now
-            if not (5 < _secs_left <= 40):
+            if not (5 < _secs_left <= 65):
                 continue
 
             # Look up BTC price at window open (300s before close)

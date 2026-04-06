@@ -53,10 +53,10 @@ _AGGREGATOR_ABI = [
 CHAINLINK_MAX_ENTRY = 0.92
 
 # Start intensive polling this many seconds before expected window close.
-POLL_LEAD_SECS = 35
+POLL_LEAD_SECS = 60
 
 # Give up this many seconds after expected close (oracle may be slow).
-POLL_TRAIL_SECS = 20
+POLL_TRAIL_SECS = 30
 
 # Poll interval during watch window.
 POLL_INTERVAL_SECS = 0.5
@@ -224,7 +224,11 @@ class ChainlinkMonitor:
 
             new_round   = r.round_id   != baseline.round_id
             fresh_data  = r.updated_at != prev_updated_at
-            near_close  = r.updated_at >= window_close_ts - 10  # oracle fired ≤10s before close
+            # Accept any oracle update within 60s before or 30s after window close.
+            # BTC/USD on Polygon updates every ~27s so a strict 10s window missed
+            # almost every real resolution — the update gets logged, prev_updated_at
+            # advances, and the signal is permanently lost.
+            near_close  = r.updated_at >= window_close_ts - 60
 
             if (new_round or fresh_data) and near_close:
                 direction = "YES" if r.price > start_price else "NO"
@@ -237,6 +241,12 @@ class ChainlinkMonitor:
                 on_resolution(direction, r.price)
                 return
 
+            if fresh_data:
+                logger.debug(
+                    f"[CHAINLINK] {tag} oracle updated but not near close "
+                    f"(updated_at={r.updated_at}, close={window_close_ts:.0f}, "
+                    f"delta={r.updated_at - window_close_ts:.0f}s)"
+                )
             prev_updated_at = r.updated_at
 
         logger.debug(
