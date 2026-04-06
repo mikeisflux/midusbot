@@ -96,6 +96,14 @@ class SimMixin:
                     # would produce a synthetic win every time.
                     exit_price = sim["entry"]
 
+                # Guard: skip if already closed (e.g., via EARLY-EXIT in monitoring)
+                if sim["token_id"] not in self._sim._open:
+                    logger.debug(
+                        f"[SIM-QUEUE] {sim['token_id'][:12]}… already closed — "
+                        "skipping phantom double-close"
+                    )
+                    continue
+
                 self._sim.close_position(sim["token_id"], exit_price)
 
                 gross_pnl  = round(sim["shares"] * (exit_price - sim["entry"]), 4)
