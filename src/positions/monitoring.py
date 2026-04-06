@@ -235,7 +235,7 @@ class MonitoringMixin:
                         )
                         continue
 
-                if current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
+                if pnl_pct >= 0.20 or current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
                     to_close.append((token_id, current_price))
                     logger.info(
                         f"[EARLY-EXIT] Locking in {pos.side} gain at {current_price:.3f} "

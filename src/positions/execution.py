@@ -95,6 +95,14 @@ class ExecutionMixin:
                                 size=_real_shares,
                                 fok=_is_updown,
                             )
+                        elif _real_shares == 0:
+                            # Token already redeemed/transferred on-chain — nothing to sell.
+                            # Force-close to prevent this position spamming every loop.
+                            logger.warning(
+                                f"[GHOST-POS] On-chain balance is 0 for {token_id[:20]}… "
+                                f"— already redeemed externally, force-removing."
+                            )
+                            resp = {"force_closed": True}
 
         # Redeem fallback: if sell failed/skipped and orderbook is gone, always try redeem.
         # Win positions get paid out; loss positions get $0 but the stuck position is cleared.
