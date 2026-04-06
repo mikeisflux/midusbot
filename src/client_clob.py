@@ -305,6 +305,7 @@ class ClobMixin:
                     _delay *= 2
                 else:
                     logger.error(f"place_limit_order failed after {_attempt + 1} attempt(s): {exc}")
+                    self._last_order_error = str(exc)
                     return None
         return None
 

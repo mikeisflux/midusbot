@@ -61,20 +61,8 @@ class ExecutionMixin:
                 sell_price = pos.entry_price
             _is_updown = _detect_updown_market(pos.question) is not None
 
-            # ── Use actual on-chain balance to avoid "not enough balance" errors ──
-            # The bot tracks pos.shares from the order size, but the actual token
-            # balance may differ due to partial fills, fees, or precision.
-            sell_shares = pos.shares
-            if not config.DRY_RUN:
-                _actual = self._client.get_ctf_token_balance(token_id)
-                if _actual >= 0 and _actual < sell_shares:
-                    logger.info(
-                        f"[BALANCE-CHECK] tracked={sell_shares:.4f} "
-                        f"on-chain={_actual:.4f} — using actual balance"
-                    )
-                    sell_shares = _actual
-            # Floor to 6 decimal places to avoid sub-cent USDC precision errors
-            sell_shares = _math.floor(sell_shares * 1_000_000) / 1_000_000
+            # Floor tracked shares to 6 decimal places (avoid sub-cent precision errors)
+            sell_shares = _math.floor(pos.shares * 1_000_000) / 1_000_000
 
             if not _ob_dead and sell_shares > 0:
                 resp = self._client.place_limit_order(
@@ -84,6 +72,29 @@ class ExecutionMixin:
                     size=sell_shares,
                     fok=_is_updown,
                 )
+
+                # ── Balance mismatch retry ─────────────────────────────────────
+                # If the CLOB rejects with "not enough balance", the error message
+                # contains the actual on-chain balance (e.g. "balance: 4834400").
+                # Parse it and retry once with the correct amount.
+                if resp is None:
+                    import re as _re
+                    _last_err = getattr(self._client, "_last_order_error", "") or ""
+                    _m = _re.search(r"balance:\s*(\d+)", str(_last_err))
+                    if _m:
+                        _real_shares = int(_m.group(1)) / 1_000_000
+                        if 0 < _real_shares < sell_shares:
+                            logger.info(
+                                f"[BALANCE-RETRY] tracked={sell_shares:.4f} "
+                                f"actual={_real_shares:.4f} — retrying with real balance"
+                            )
+                            resp = self._client.place_limit_order(
+                                token_id=token_id,
+                                side="SELL",
+                                price=sell_price,
+                                size=_real_shares,
+                                fok=_is_updown,
+                            )
 
         # Redeem fallback: if sell failed/skipped and orderbook is gone, always try redeem.
         # Win positions get paid out; loss positions get $0 but the stuck position is cleared.
