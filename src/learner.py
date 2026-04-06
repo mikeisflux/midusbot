@@ -295,7 +295,6 @@ class AdaptiveLearner:
         if len(journal) < 3:
             return   # not enough data for analyst to make any decision
         if not config.ANALYST_ENABLED:
-            logger.debug("[Learner] Analyst disabled (ANALYST_ENABLED=false) — skipping timed run")
             return
         logger.info("[Learner] 4h analyst trigger — running timed LLM analysis")
         self._last_analyst_run = time.time()
@@ -479,7 +478,7 @@ class AdaptiveLearner:
             threading.Thread(target=_run_analyst, daemon=True, name="analyst").start()
             logger.info("[Learner] LLM analyst started in background thread")
         else:
-            logger.debug("[Learner] Analyst disabled (ANALYST_ENABLED=false) — skipping")
+            pass  # Ollama analyst disabled — not needed for 4-strategy portfolio
         self._save_params()
 
     # ------------------------------------------------------------------
