@@ -110,37 +110,14 @@ class MonitoringMixin:
             if not config.DRY_RUN:
                 if current_price >= 0.90:
                     logger.info(
-                        f"AUTO-CLAIM: resolved WIN @ {current_price:.3f} "
-                        f"({pos.shares:.2f} shares)  {pos.question[:50]}"
+                        f"AUTO-CLAIM: WIN @ {current_price:.3f} "
+                        f"({pos.shares:.2f} shares) — selling at market price  {pos.question[:50]}"
                     )
-                    try:
-                        mkt = self._client.get_clob_market(pos.market_id) if pos.market_id else None
-                        neg_risk = bool(mkt.get("neg_risk", False)) if mkt else False
-                    except Exception:
-                        neg_risk = False
-                    redeemed = self._client.redeem_position(pos.market_id, neg_risk=neg_risk)
-                    if redeemed:
-                        exit_price = current_price
-                        exit_usdc  = exit_price * pos.shares
-                        pnl = self._learner.record_close(token_id, exit_price)
-                        cost = pos.cost_usdc if not pos.is_external else 0.0
-                        fee  = self._risk.trade_fee(cost, exit_usdc)
-                        self._risk.record_close(pnl_usdc=pnl - fee, cost_usdc=cost)
-                        self._dash_state.record_closed_trade(pnl, fee_usdc=fee)
-                        symbol = _detect_updown_market(pos.question)
-                        if symbol:
-                            direction_bet = "UP" if pos.side == "YES" else "DOWN"
-                            self._trend_tracker.record_result(symbol, direction_bet, won=True)
-                        if pos.market_id:
-                            self._mark_market_closed(pos.market_id)
-                        del self._positions[token_id]
-                        self._save_positions()
-                        logger.info(
-                            f"CLAIMED: {pos.side} {pos.question[:40]}  "
-                            f"P&L=${pnl:+.2f}  net=${pnl - fee:+.2f}"
-                        )
-                    else:
-                        self._close_position(token_id, current_price=current_price, manual=True)
+                    # Sell at current market price first — faster and avoids
+                    # "result for condition not received yet" if market hasn't
+                    # fully resolved. _close_position falls back to redeem only
+                    # if the orderbook is gone (market already settled).
+                    self._close_position(token_id, current_price=current_price)
                     continue
 
                 if current_price <= 0.03:

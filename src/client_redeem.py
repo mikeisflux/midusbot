@@ -234,6 +234,16 @@ class RedeemMixin:
                         logger.info(f"[RELAYER] Redeemed {condition_id[:16]}  receipt={receipt}")
                         return True
                     except Exception as exc:
+                        _exc_str = str(exc)
+                        # "result for condition not received yet" = market hasn't resolved.
+                        # Stop immediately — retrying won't help, and web3 fallback will
+                        # also fail. The next monitoring loop will retry when resolved.
+                        if "not received yet" in _exc_str or "result for condition" in _exc_str:
+                            logger.info(
+                                f"[RELAYER] Market not resolved yet — "
+                                f"will retry redeem next cycle ({condition_id[:16]}…)"
+                            )
+                            return False
                         wait = 3 * (2 ** (attempt - 1))
                         if attempt < 3:
                             logger.warning(f"[RELAYER] attempt {attempt}/3 failed: {exc} — retry in {wait}s")
@@ -253,16 +263,18 @@ class RedeemMixin:
 
     def _redeem_via_web3(self, condition_id: str) -> bool:
         """Direct on-chain redemption via web3.py + CTF contract."""
-        rpc_url = getattr(config, "POLYGON_RPC_URL", "") or ""
-        if not rpc_url:
-            # polygon-rpc.com now requires auth; use free public alternatives
-            rpc_url = "https://rpc.ankr.com/polygon"
-
         if not config.PRIVATE_KEY:
             logger.warning("_redeem_via_web3: PRIVATE_KEY not set — cannot redeem")
             return False
 
-        try:
+        rpc_urls = []
+        _cfg_rpc = getattr(config, "POLYGON_RPC_URL", "") or ""
+        if _cfg_rpc:
+            rpc_urls.append(_cfg_rpc)
+        rpc_urls.extend(_POLYGON_RPC_URLS)
+
+        for rpc_url in rpc_urls:
+          try:
             from web3 import Web3
 
             w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
@@ -309,13 +321,24 @@ class RedeemMixin:
             )
             return receipt.status == 1
 
-        except ImportError:
+          except ImportError:
             logger.warning(
                 "web3 not installed — cannot use direct CTF redemption. "
                 "Run: pip install web3"
             )
-        except Exception as exc:
-            logger.warning(f"_redeem_via_web3 failed: {exc}")
+            return False
+          except Exception as exc:
+            _exc_str = str(exc)
+            if "not received yet" in _exc_str or "result for condition" in _exc_str:
+                logger.info(
+                    f"[CTF] Market not resolved yet via {rpc_url} — "
+                    "will retry redeem next cycle"
+                )
+                return False
+            logger.warning(f"_redeem_via_web3 via {rpc_url} failed: {exc}")
+            continue  # try next RPC
+
+        logger.warning("_redeem_via_web3: all RPCs exhausted")
         return False
 
     def sell_via_swaps(
