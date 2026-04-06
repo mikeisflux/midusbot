@@ -112,7 +112,7 @@ class ExecutionMixin:
             _redeem_size = _actual_bal if _actual_bal > 0 else sell_shares
             logger.info(
                 f"No orderbook for {pos.question[:40]} — attempting redeem "
-                f"(price={current_price:.3f if current_price else 'n/a'}, "
+                f"(price={f'{current_price:.3f}' if current_price else 'n/a'}, "
                 f"shares={_redeem_size:.4f})"
             )
             redeemed = self._client.redeem_position(

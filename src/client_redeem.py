@@ -119,10 +119,10 @@ class RedeemMixin:
 
         try:
             from web3 import Web3
-            _tok_int: int
-            _stripped = token_id.lstrip("0x")
-            if all(c in "0123456789abcdefABCDEF" for c in _stripped):
-                _tok_int = int(_stripped, 16)
+            # Polymarket token IDs are decimal integers (not hex).
+            # Only parse as hex when the string has an explicit 0x prefix.
+            if token_id.lower().startswith("0x"):
+                _tok_int = int(token_id, 16)
             else:
                 _tok_int = int(token_id)
         except (ValueError, ImportError) as exc:
