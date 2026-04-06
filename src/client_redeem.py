@@ -239,7 +239,8 @@ class RedeemMixin:
                         # "result for condition not received yet" = market hasn't resolved.
                         # Stop immediately — retrying won't help, and web3 fallback will
                         # also fail. The next monitoring loop will retry when resolved.
-                        if "not received yet" in _exc_str or "result for condition" in _exc_str:
+                        if ("not received yet" in _exc_str or "result for condition" in _exc_str
+                                or "726573756c7420666f7220636f6e646974696f6e" in _exc_str):
                             logger.info(
                                 f"[RELAYER] Market not resolved yet — "
                                 f"will retry redeem next cycle ({condition_id[:16]}…)"
@@ -331,7 +332,8 @@ class RedeemMixin:
             return False
           except Exception as exc:
             _exc_str = str(exc)
-            if "not received yet" in _exc_str or "result for condition" in _exc_str:
+            if ("not received yet" in _exc_str or "result for condition" in _exc_str
+                    or "726573756c7420666f7220636f6e646974696f6e" in _exc_str):
                 logger.info(
                     f"[CTF] Market not resolved yet via {rpc_url} — "
                     "will retry redeem next cycle"
