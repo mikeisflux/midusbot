@@ -458,6 +458,11 @@ class ScannerMixin:
                     f"— CHAINLINK_ONLY mode active"
                 )
 
+        # ── BTC penny bets ($0.01 tokens) — HIGHEST PRIORITY ─────────────────
+        # When a BTC 5-min UpDown token is priced at ≤0.01, buy it immediately.
+        # Runs before all other strategies. Max $10 per bet. Hold to resolution.
+        self._scan_btc_penny_bets(updown_5m)
+
         # ── Chainlink close-watch launcher ────────────────────────────────────
         # For BTC UPDOWN markets within 5-40s of close, launch an oracle watch.
         # When the Chainlink feed fires a new round we know the resolution with
@@ -947,6 +952,99 @@ class ScannerMixin:
                 f"[CHAINLINK] Watch launched — {_m.question[:45]} | "
                 f"{_secs_left:.0f}s to close | start_btc=${_start_btc:,.2f}"
             )
+
+    def _scan_btc_penny_bets(self, updown_5m: list) -> None:
+        """
+        Buy any BTC 5-min UpDown token priced at ≤$0.01.
+        Max bet: $10. Position is held to resolution — no early exits applied.
+        Both YES and NO are checked; whichever side is ≤0.01 gets bought.
+        """
+        _MAX_BET = 10.0
+        _PENNY_PRICE = 0.01
+
+        for _m in updown_5m:
+            if _detect_updown_market(_m.question) != "BTC":
+                continue
+
+            # Don't enter if already holding this market
+            _yes_id = _m.yes_token.token_id
+            _no_id  = _m.no_token.token_id
+            if _yes_id in self._positions or _no_id in self._positions:
+                continue
+
+            _mkt_id   = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
+            _question = _m.question
+
+            for _side, _token_id, _price in [
+                ("YES", _yes_id, _m.yes_price),
+                ("NO",  _no_id,  1.0 - _m.yes_price),
+            ]:
+                if _price > _PENNY_PRICE:
+                    continue
+
+                # Get live orderbook price
+                _ob = self._client.get_order_book(_token_id)
+                _ask = (_ob.best_ask if _ob else None) or _price
+                if _ask > _PENNY_PRICE:
+                    continue
+
+                _usdc   = min(_MAX_BET, _MAX_BET)  # cap at $10
+                _shares = int(_usdc / max(_ask, 0.01))
+                if _shares < config.MIN_ORDER_SHARES:
+                    continue
+
+                logger.info(
+                    f"[BTC-PENNY] {_side} token @ ${_ask:.3f} — buying {_shares} shares "
+                    f"for ${_usdc:.2f}  {_question[:50]}"
+                )
+
+                resp = self._client.place_limit_order(
+                    token_id=_token_id,
+                    side="BUY",
+                    price=round(_ask, 2),
+                    size=float(_shares),
+                    fok=False,
+                )
+                if not resp:
+                    logger.debug(f"[BTC-PENNY] Order rejected for {_question[:40]}")
+                    continue
+
+                from src.bot import OpenPosition
+                self._positions[_token_id] = OpenPosition(
+                    market_id=_mkt_id,
+                    question=_question,
+                    token_id=_token_id,
+                    side=_side,
+                    shares=float(_shares),
+                    entry_price=_ask,
+                    cost_usdc=_usdc,
+                    momentum_signal=0.0,
+                    imbalance_signal=0.0,
+                    composite_signal=0.0,
+                    confidence="PENNY",
+                    order_id=resp.get("id") if isinstance(resp, dict) else None,
+                    entry_time=time.time(),
+                    strategy="btc_penny",
+                )
+                self._save_positions()
+                self._risk.record_open(cost_usdc=_usdc)
+                self._dash_state.orders_placed += 1
+                self._learner.record_open(
+                    market_id=_mkt_id,
+                    token_id=_token_id,
+                    side=_side,
+                    question=_question,
+                    entry_price=_ask,
+                    shares=float(_shares),
+                    cost_usdc=_usdc,
+                    momentum_signal=0.0,
+                    imbalance_signal=0.0,
+                    composite_signal=0.0,
+                    confidence="PENNY",
+                    dry_run=config.DRY_RUN,
+                    strategy="btc_penny",
+                )
+                break  # one side per market is enough
 
 
 def _record_error(msg: str) -> None:

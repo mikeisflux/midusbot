@@ -106,6 +106,21 @@ class MonitoringMixin:
             else:
                 current_price = ob.mid
 
+            # ── BTC penny bets: hold to resolution, no early exits ───────────
+            # These are bought at ≤$0.01. AUTO-CLEAR would fire immediately
+            # (price is already ≤0.03), wiping a potential $1000+ payout.
+            # Only exit on WIN (≥0.90). Let everything else resolve naturally.
+            if getattr(pos, "strategy", "") == "btc_penny":
+                if not config.DRY_RUN and current_price >= 0.90:
+                    logger.info(
+                        f"[BTC-PENNY] WIN @ {current_price:.3f} "
+                        f"({pos.shares:.2f} shares) — claiming  {pos.question[:50]}"
+                    )
+                    self._close_position(token_id, current_price=current_price)
+                else:
+                    position_snapshots.append((pos, current_price))
+                continue
+
             # ── WIN auto-claim ────────────────────────────────────────────────
             if not config.DRY_RUN:
                 if current_price >= 0.90:
