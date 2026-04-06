@@ -465,6 +465,18 @@ class ScannerMixin:
         # certainty — enter the winning side at any price up to CHAINLINK_MAX_ENTRY.
         self._launch_chainlink_watches(updown)
 
+        # ── Dual-side arbitrage scan ──────────────────────────────────────────
+        # Buy BOTH YES and NO when their combined ask < ARB_MAX_COST (default 0.97).
+        # At resolution one side pays $1.00, giving guaranteed profit regardless of
+        # direction. This is the "ballast" component — non-directional, consistent.
+        self._scan_dual_arb(updown_5m)
+
+        # ── Claude AI/Momentum news analyst ──────────────────────────────────
+        # Polls CryptoPanic for headlines, asks Claude Opus to assess 5-min
+        # directional probability, signals when edge > 12% vs market price.
+        # Only fires when ANTHROPIC_API_KEY is set. Strategy tag: "momentum".
+        self._run_claude_news(updown_5m)
+
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure        = self._risk.total_exposure()
 
@@ -478,6 +490,199 @@ class ScannerMixin:
             f"exposure=${self._risk.total_exposure():.2f} --"
         )
 
+
+    def _run_claude_news(self, updown_5m: list) -> None:
+        """
+        Trigger the Claude AI/Momentum news analyst and execute any emitted signals.
+        Reuses the existing _execute_signal path — signals are tagged strategy='momentum'.
+        """
+        try:
+            from src.claude_news import analyst as _claude
+        except Exception:
+            return
+        if not _claude.available:
+            return
+
+        # Build asset→YES_mid map from live markets
+        _prices: dict[str, float] = {}
+        for m in updown_5m:
+            from src.strategy import _detect_updown_market
+            sym = _detect_updown_market(m.question)
+            if sym and 0.01 < m.yes_price < 0.99:
+                _prices[sym] = m.yes_price
+
+        _claude.maybe_run(_prices)
+
+        # Consume any signals that came back from the previous cycle
+        ai_signals = _claude.pop_signals()
+        for ai_sig in ai_signals:
+            # Find the matching market and build a TradingSignal-compatible object
+            _target_market = None
+            for m in updown_5m:
+                from src.strategy import _detect_updown_market
+                if _detect_updown_market(m.question) == ai_sig.asset:
+                    _target_market = m
+                    break
+            if _target_market is None:
+                continue
+
+            tok = (
+                _target_market.yes_token.token_id if ai_sig.direction == "YES"
+                else _target_market.no_token.token_id
+            )
+            mkt_mid = ai_sig.market_price if ai_sig.direction == "YES" else 1.0 - ai_sig.market_price
+
+            from src.strategy import TradingSignal, _updown_window_mins, _market_seconds_into_window
+            sig = TradingSignal(
+                token_id       = tok,
+                market_id      = getattr(_target_market, "market_id", "") or getattr(_target_market, "id", "") or "",
+                question       = _target_market.question,
+                side           = ai_sig.direction,
+                fair_value     = ai_sig.ai_probability if ai_sig.direction == "YES" else 1.0 - ai_sig.ai_probability,
+                market_price   = mkt_mid,
+                edge           = ai_sig.edge,
+                confidence     = "AI",
+                momentum_signal= 0.0,
+                imbalance_signal= 0.0,
+                signal         = ai_sig.edge,
+                rel_strength   = ai_sig.edge * 100,
+                secs_into_window= _market_seconds_into_window(_target_market) or 0,
+                win_mins       = _updown_window_mins(_target_market.question) or 5,
+                hours_to_close = None,
+                is_latency_arb = False,
+                best_ask       = None,
+                best_bid       = None,
+                no_best_ask    = None,
+            )
+            logger.info(
+                f"[CLAUDE-NEWS] AI signal: {ai_sig.asset} {ai_sig.direction} "
+                f"ai_prob={ai_sig.ai_probability:.2f} market={ai_sig.market_price:.2f} "
+                f"edge={ai_sig.edge:.1%} | {ai_sig.reasoning[:60]}"
+            )
+            if self._execute_signal(sig):
+                self._asset_last_bet[ai_sig.asset] = time.time()
+
+    def _scan_dual_arb(self, updown_5m: list) -> None:
+        """
+        Dual-side arbitrage: buy BOTH YES and NO tokens when combined ask < ARB_MAX_COST.
+
+        YES + NO always resolves to exactly $1.00. If we buy both for $0.94 total,
+        we earn $0.06 = 6.4% guaranteed regardless of direction.
+
+        Allocation: ARB_BUDGET_PCT of wallet (default 30%). Tracks as strategy="arb".
+        """
+        _arb_max  = float(getattr(config, "ARB_MAX_COST", 0.97))
+        _arb_pct  = float(getattr(config, "ARB_BUDGET_PCT", 0.30))
+        _wallet   = self._dash_state.wallet_balance or 0.0
+
+        # Cap arb exposure: count existing arb positions
+        _arb_exposure = sum(
+            p.cost_usdc for p in self._positions.values()
+            if getattr(p, "strategy", "") == "arb"
+        )
+        _arb_budget = _wallet * _arb_pct
+        if _arb_exposure >= _arb_budget:
+            return  # arb bucket full
+
+        for market in updown_5m:
+            if not self._running:
+                break
+
+            # Skip if we already have a position in this market
+            yes_tid = market.yes_token.token_id
+            no_tid  = market.no_token.token_id
+            if yes_tid in self._positions or no_tid in self._positions:
+                continue
+
+            # Capital floor check
+            _floor = float(getattr(config, "CAPITAL_FLOOR_USDC", 15.0))
+            if _wallet > 0 and _wallet < _floor:
+                break
+
+            yes_ob = self._client.get_order_book(yes_tid)
+            no_ob  = self._client.get_order_book(no_tid)
+            if not yes_ob or not no_ob:
+                continue
+
+            yes_ask = yes_ob.best_ask
+            no_ask  = no_ob.best_ask
+            if yes_ask <= 0 or no_ask <= 0:
+                continue
+
+            total_cost = yes_ask + no_ask
+            if total_cost >= _arb_max:
+                continue
+
+            profit_pct = (1.0 - total_cost) / total_cost
+            # Only trade if profit margin > 3% (covers 2% Poly fee + gas slop)
+            if profit_pct < 0.03:
+                continue
+
+            # Size: equal split across both legs, respecting arb budget
+            remaining_budget = min(_arb_budget - _arb_exposure, config.MAX_POSITION_USDC)
+            usdc_per_leg = remaining_budget / 2
+            # Shares: floored integer (Polymarket requirement)
+            import math as _math
+            shares = _math.floor(usdc_per_leg / (total_cost / 2))
+            if shares < config.MIN_ORDER_SHARES:
+                continue
+
+            logger.info(
+                f"[DUAL-ARB] YES={yes_ask:.3f} + NO={no_ask:.3f} = {total_cost:.3f} "
+                f"→ {profit_pct:.1%} guaranteed  {market.question[:45]}"
+            )
+
+            if config.DRY_RUN:
+                logger.info(
+                    f"[DUAL-ARB DRY-RUN] Would buy {shares} YES@{yes_ask:.3f} + "
+                    f"{shares} NO@{no_ask:.3f}  {market.question[:40]}"
+                )
+                continue
+
+            # Place YES leg (FOK — guaranteed fill at this price or skip)
+            resp_yes = self._client.place_limit_order(
+                token_id=yes_tid, side="BUY", price=yes_ask, size=shares, fok=True
+            )
+            if not resp_yes:
+                logger.debug(f"[DUAL-ARB] YES leg rejected — skip {market.question[:40]}")
+                continue
+
+            # Place NO leg immediately after
+            resp_no = self._client.place_limit_order(
+                token_id=no_tid, side="BUY", price=no_ask, size=shares, fok=True
+            )
+            if not resp_no:
+                logger.warning(
+                    f"[DUAL-ARB] YES filled but NO rejected — directional YES exposure! "
+                    f"{market.question[:40]}"
+                )
+                # Still track the YES we bought — monitoring will manage it
+
+            mid = getattr(market, "market_id", "") or getattr(market, "id", "") or ""
+            from src.bot import OpenPosition
+            cost_yes = shares * yes_ask
+            cost_no  = shares * no_ask if resp_no else 0.0
+
+            if resp_yes:
+                self._positions[yes_tid] = OpenPosition(
+                    market_id=mid, question=market.question, token_id=yes_tid,
+                    side="YES", shares=shares, entry_price=yes_ask,
+                    cost_usdc=cost_yes, entry_time=time.time(), strategy="arb",
+                )
+            if resp_no:
+                self._positions[no_tid] = OpenPosition(
+                    market_id=mid, question=market.question, token_id=no_tid,
+                    side="NO", shares=shares, entry_price=no_ask,
+                    cost_usdc=cost_no, entry_time=time.time(), strategy="arb",
+                )
+
+            self._save_positions()
+            self._risk.record_open(cost_usdc=cost_yes + cost_no)
+            _arb_exposure += cost_yes + cost_no
+            logger.info(
+                f"[DUAL-ARB] Opened YES+NO {shares}@{yes_ask:.3f}+{no_ask:.3f} "
+                f"cost=${cost_yes+cost_no:.2f}  guaranteed {profit_pct:.1%} profit"
+            )
 
     def _launch_chainlink_watches(self, updown_markets: list) -> None:
         """

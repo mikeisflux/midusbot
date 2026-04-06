@@ -188,6 +188,25 @@ class MonitoringMixin:
                             f"({_window_s * 0.50:.0f}s)"
                         )
                         # fall through — don't exit yet
+                # ── Update high-water mark ────────────────────────────────────
+                if current_price > pos.high_water_mark:
+                    pos.high_water_mark = current_price
+
+                # ── Trailing stop: lock in 50% of peak gains ──────────────────
+                # Only activates once we've gained at least 10 cents from entry.
+                # Trigger: price retreats >50% of the peak gain from entry.
+                _peak_gain = pos.high_water_mark - pos.entry_price
+                if _peak_gain >= 0.10:
+                    _trail_floor = pos.entry_price + _peak_gain * 0.50
+                    if current_price < _trail_floor:
+                        to_close.append((token_id, current_price))
+                        logger.info(
+                            f"[TRAIL-STOP] {pos.side} retreated from peak {pos.high_water_mark:.3f} "
+                            f"to {current_price:.3f} — trail floor={_trail_floor:.3f} "
+                            f"({pnl_pct:+.1%}) — {pos.question[:40]}"
+                        )
+                        continue
+
                 if current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
                     to_close.append((token_id, current_price))
                     logger.info(

@@ -155,7 +155,9 @@ class OpenPosition:
     confidence: str = "LOW"
     order_id: Optional[str] = None
     is_external: bool = False
-    entry_time: float = 0.0  # unix timestamp for time-based exits
+    entry_time: float = 0.0   # unix timestamp for time-based exits
+    high_water_mark: float = 0.0  # highest price seen since entry (trailing stop)
+    strategy: str = "momentum"    # "momentum" | "chainlink" | "arb" | "mm"
 
 
 class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):

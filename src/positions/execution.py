@@ -397,6 +397,12 @@ class ExecutionMixin:
             self._dash_state.orders_placed += 1
 
             from src.bot import OpenPosition
+            # Tag strategy bucket for portfolio tracking
+            _strategy = "momentum"
+            if getattr(sig, "confidence", "") == "AI":
+                _strategy = "momentum"   # AI signals are the momentum/AI bucket
+            elif getattr(sig, "confidence", "") == "CHAINLINK":
+                _strategy = "chainlink"
             self._positions[sig.token_id] = OpenPosition(
                 market_id=sig.market_id,
                 question=sig.question,
@@ -411,6 +417,7 @@ class ExecutionMixin:
                 confidence=sig.confidence,
                 order_id=resp.get("id") if isinstance(resp, dict) else None,
                 entry_time=time.time(),
+                strategy=_strategy,
             )
             self._save_positions()
 
@@ -428,6 +435,7 @@ class ExecutionMixin:
                 confidence=sig.confidence,
                 dry_run=config.DRY_RUN,
                 rel_strength=getattr(sig, "rel_strength", 0.0),
+                strategy=_strategy,
             )
 
             if sig.side == "YES":

@@ -125,6 +125,7 @@ class TradeRecord:
     closed: bool = False
     dry_run: bool = False     # True when recorded under DRY_RUN simulation
     rel_strength: float = 0.0 # |window_return| / asset_threshold — signal quality ratio
+    strategy: str = "momentum" # "momentum" | "chainlink" | "arb" | "mm"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -215,6 +216,7 @@ class AdaptiveLearner:
         confidence: str,
         dry_run: bool = False,
         rel_strength: float = 0.0,
+        strategy: str = "momentum",
     ) -> None:
         rec = TradeRecord(
             market_id=market_id,
@@ -236,6 +238,7 @@ class AdaptiveLearner:
             closed=False,
             dry_run=dry_run,
             rel_strength=rel_strength,
+            strategy=strategy,
         )
         self._journal.append(rec)
         # Prune in-memory journal to last 500 entries to prevent unbounded growth

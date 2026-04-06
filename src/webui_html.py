@@ -915,6 +915,16 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'Courie
 
   </div><!-- /tab-dash -->
 
+  <!-- ── TAB: PORTFOLIO ── -->
+  <div id="tab-port" class="tab-panel">
+    <div style="font-size:10px;color:var(--dim);margin-bottom:10px;text-transform:uppercase;letter-spacing:1px">
+      Aggressive Portfolio — Win/Loss by Strategy
+    </div>
+    <div id="port-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"></div>
+    <div style="margin-top:14px;font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:1px">Allocation Targets</div>
+    <div id="port-alloc" style="margin-top:6px"></div>
+  </div>
+
   <!-- ── TAB: LOG ── -->
   <div id="tab-log" class="tab-panel">
     <div class="log-hdr">
@@ -934,6 +944,9 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'Courie
   <button class="nav-btn active" id="nav-dash" onclick="switchTab('dash')">
     <span class="nav-icon">📊</span>DASHBOARD
   </button>
+  <button class="nav-btn" id="nav-port" onclick="switchTab('port')">
+    <span class="nav-icon">⚡</span>PORTFOLIO
+  </button>
   <button class="nav-btn" id="nav-log" onclick="switchTab('log')">
     <span class="nav-icon">📜</span>LOG
   </button>
@@ -946,9 +959,92 @@ const $ = id => document.getElementById(id);
 
 // ── Tab switching ──────────────────────────────────────────────────────────
 function switchTab(name) {
-  ['dash','log'].forEach(t => {
-    $(t === name ? 'tab-'+t : 'tab-'+t).classList.toggle('active', t === name);
+  ['dash','port','log'].forEach(t => {
+    $('tab-'+t).classList.toggle('active', t === name);
     $('nav-'+t).classList.toggle('active', t === name);
+  });
+  if (name === 'port') loadPortfolio();
+}
+
+// ── Portfolio stats ────────────────────────────────────────────────────────
+const STRATEGY_COLORS = {
+  chainlink: '#3b9eff',
+  arb:       '#4caf50',
+  momentum:  '#ff9800',
+  mm:        '#9c27b0',
+  portfolio: '#ffffff',
+};
+const STRATEGY_ICONS = {
+  chainlink: '⛓',
+  arb:       '⚖',
+  momentum:  '🚀',
+  mm:        '🏦',
+  portfolio: '📊',
+};
+
+function loadPortfolio() {
+  fetch('/api/strategy_stats').then(r => r.json()).then(data => {
+    const grid = $('port-grid');
+    const order = ['momentum','chainlink','arb','mm','portfolio'];
+    grid.innerHTML = order.map(key => {
+      const s = data[key];
+      if (!s) return '';
+      const col = STRATEGY_COLORS[key] || '#888';
+      const icon = STRATEGY_ICONS[key] || '·';
+      const wr = s.trades > 0 ? (s.win_rate * 100).toFixed(1) : '--';
+      const wrColor = s.trades > 3 ? (s.win_rate >= 0.55 ? '#4caf50' : s.win_rate >= 0.45 ? '#ff9800' : '#f44336') : '#888';
+      const pnlColor = (s.total_pnl || 0) >= 0 ? '#4caf50' : '#f44336';
+      const isPortfolio = key === 'portfolio';
+      return `
+        <div style="background:var(--bg2);border:1px solid ${isPortfolio ? col+'44' : 'var(--border)'};
+             border-radius:6px;padding:10px;${isPortfolio ? 'grid-column:1/-1' : ''}">
+          <div style="color:${col};font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">
+            ${icon} ${s.label || key} &nbsp;<span style="color:var(--dim)">${s.target_pct}%</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+            <div>
+              <div style="font-size:18px;font-weight:bold;color:${wrColor}">${wr}%</div>
+              <div style="color:var(--dim);font-size:9px">WIN RATE</div>
+            </div>
+            <div>
+              <div style="font-size:18px;font-weight:bold">${s.wins || 0}W/${s.losses || 0}L</div>
+              <div style="color:var(--dim);font-size:9px">TRADES</div>
+            </div>
+            <div>
+              <div style="font-size:18px;font-weight:bold;color:${pnlColor}">$${(s.total_pnl||0).toFixed(2)}</div>
+              <div style="color:var(--dim);font-size:9px">TOTAL PNL</div>
+            </div>
+            <div>
+              <div style="font-size:18px;font-weight:bold">$${(s.avg_pnl||0).toFixed(2)}</div>
+              <div style="color:var(--dim);font-size:9px">AVG/TRADE</div>
+            </div>
+          </div>
+          ${s.trades > 0 ? `
+          <div style="margin-top:6px;background:var(--bg3);border-radius:3px;height:4px;overflow:hidden">
+            <div style="height:4px;background:${wrColor};width:${Math.min(100,s.win_rate*100).toFixed(0)}%"></div>
+          </div>` : ''}
+        </div>`;
+    }).join('');
+
+    // Allocation bar
+    const alloc = $('port-alloc');
+    const keys = ['momentum','chainlink','arb','mm'];
+    alloc.innerHTML = keys.map(key => {
+      const s = data[key];
+      if (!s) return '';
+      const col = STRATEGY_COLORS[key] || '#888';
+      const pct = s.target_pct || 0;
+      return `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <div style="width:80px;color:var(--dim);font-size:10px">${STRATEGY_ICONS[key]} ${key}</div>
+          <div style="flex:1;background:var(--bg3);border-radius:3px;height:8px">
+            <div style="height:8px;background:${col};border-radius:3px;width:${pct}%"></div>
+          </div>
+          <div style="width:30px;text-align:right;font-size:10px">${pct}%</div>
+        </div>`;
+    }).join('');
+  }).catch(() => {
+    $('port-grid').innerHTML = '<div style="color:var(--dim);padding:20px">No strategy data yet — trades will appear here as they close.</div>';
   });
 }
 

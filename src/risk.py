@@ -74,6 +74,17 @@ class RiskManager:
                     f"${config.DAILY_LOSS_FLOOR_USDC:.0f} floor — no new trades until balance recovers."
                 )
                 return 0.0
+
+            # Circuit breaker: pause all new entries if daily PnL falls below
+            # CIRCUIT_BREAKER_PCT (default -5%) of current wallet balance.
+            _cb_pct = float(getattr(config, "CIRCUIT_BREAKER_PCT", -0.05))
+            _daily_pnl_pct = self._daily_pnl / self._wallet_balance if self._wallet_balance else 0
+            if _daily_pnl_pct <= _cb_pct:
+                logger.warning(
+                    f"[CIRCUIT-BREAKER] Daily PnL {_daily_pnl_pct:.1%} ≤ {_cb_pct:.0%} — "
+                    f"all new entries paused until daily reset."
+                )
+                return 0.0
         else:
             # Wallet not yet synced — fall back to percentage cap on daily P&L
             ref = config.MAX_TOTAL_EXPOSURE_USDC

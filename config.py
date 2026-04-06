@@ -112,6 +112,21 @@ OB_MIN_SPREAD:      float = float(_env("OB_MIN_SPREAD", "0.005"))
 # the latency-arbitrage strategy at window close.
 CHAINLINK_ONLY:     bool  = _env("CHAINLINK_ONLY", "false").lower() == "true"
 
+# ── Multi-strategy portfolio allocation (Aggressive Profile) ───────────────
+# Fraction of wallet budget each strategy can deploy simultaneously.
+# Chainlink 15% | Arb (dual-side) 30% | Momentum/AI 35% | MM 20%
+CHAINLINK_BUDGET_PCT:   float = float(_env("CHAINLINK_BUDGET_PCT",  "0.15"))
+ARB_BUDGET_PCT:         float = float(_env("ARB_BUDGET_PCT",        "0.30"))
+MOMENTUM_BUDGET_PCT:    float = float(_env("MOMENTUM_BUDGET_PCT",   "0.35"))
+MM_BUDGET_PCT:          float = float(_env("MM_BUDGET_PCT",         "0.20"))
+
+# Dual-side arb: maximum combined YES+NO ask to enter (profit = 1.0 - this)
+ARB_MAX_COST:           float = float(_env("ARB_MAX_COST",          "0.97"))
+
+# Circuit breaker: pause ALL new entries if daily PnL drops below this threshold.
+# -5% is more aggressive than the default -3% live limit.
+CIRCUIT_BREAKER_PCT:    float = float(_env("CIRCUIT_BREAKER_PCT",   "-0.05"))
+
 # Wallet replenishment alert threshold (USDC)
 WALLET_REPLENISH_ALERT: float = float(_env("WALLET_REPLENISH_ALERT", "25.0"))
 

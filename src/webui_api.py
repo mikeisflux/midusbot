@@ -116,6 +116,70 @@ def register(app, get_state, get_learner, get_close_fn):
             state.reset_training_stats()
         return jsonify({"ok": True, "message": "Training data cleared. Learner reset to factory defaults."})
 
+    @app.route("/api/strategy_stats")
+    def api_strategy_stats():
+        """
+        Per-strategy win/loss breakdown for the portfolio dashboard.
+        Groups journal records by their 'strategy' field (momentum, chainlink, arb, mm).
+        Returns stats for each strategy plus the combined portfolio.
+        """
+        from pathlib import Path
+        journal_path = Path("data/journal_main.json")
+        records = []
+        if journal_path.exists():
+            try:
+                with open(journal_path) as f:
+                    records = json.load(f)
+            except Exception:
+                pass
+
+        closed = [r for r in records if r.get("closed") and "pnl_usdc" in r]
+
+        strategies = {
+            "momentum":  {"label": "Momentum / Oracle-lag", "target_pct": 35},
+            "chainlink": {"label": "Chainlink Oracle Arb",  "target_pct": 15},
+            "arb":       {"label": "Dual-side Arbitrage",   "target_pct": 30},
+            "mm":        {"label": "Market Making",         "target_pct": 20},
+        }
+
+        def _stats(trades):
+            if not trades:
+                return {"trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
+                        "total_pnl": 0, "avg_pnl": 0, "best": 0, "worst": 0}
+            wins   = [t for t in trades if t.get("pnl_usdc", 0) > 0]
+            losses = [t for t in trades if t.get("pnl_usdc", 0) <= 0]
+            pnls   = [t.get("pnl_usdc", 0) for t in trades]
+            return {
+                "trades":    len(trades),
+                "wins":      len(wins),
+                "losses":    len(losses),
+                "win_rate":  round(len(wins) / len(trades), 4),
+                "total_pnl": round(sum(pnls), 4),
+                "avg_pnl":   round(sum(pnls) / len(trades), 4),
+                "best":      round(max(pnls), 4),
+                "worst":     round(min(pnls), 4),
+            }
+
+        result = {}
+        for key, meta in strategies.items():
+            bucket = [r for r in closed if r.get("strategy", "momentum") == key]
+            result[key] = {**meta, **_stats(bucket)}
+
+        # Catch records without a strategy field → default to momentum
+        untagged = [r for r in closed if "strategy" not in r]
+        if untagged:
+            # Merge untagged into momentum stats
+            combined = [r for r in closed if r.get("strategy", "momentum") == "momentum"]
+            result["momentum"] = {**strategies["momentum"], **_stats(combined)}
+
+        result["portfolio"] = {
+            "label": "Combined Portfolio",
+            "target_pct": 100,
+            **_stats(closed),
+        }
+
+        return json.dumps(result), 200, {"Content-Type": "application/json"}
+
     @app.route("/api/export")
     def api_export():
         """Download full training data as a JSON file for analysis."""
