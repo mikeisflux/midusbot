@@ -18,6 +18,7 @@ import re
 import time
 import threading
 import xml.etree.ElementTree as ET
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -29,11 +30,19 @@ HAIKU_MODEL           = "claude-haiku-4-5-20251001"  # Stage 1: cheap semantic s
 OPUS_MODEL            = "claude-opus-4-6"            # Stage 2: probability assessment
 NEWS_ARB_EDGE         = 0.12   # minimum probability divergence to fire signal
 MIN_LIQUIDITY         = 300    # minimum market liquidity USDC
-POLL_INTERVAL         = 60     # poll RSS every 60 seconds
+POLL_INTERVAL         = 15     # poll RSS every 15 seconds (was 60 — faster catch)
 MARKET_CACHE_TTL      = 300    # refresh market list every 5 min
 MAX_ARTICLE_AGE_SECS  = 3600   # ignore articles older than 1 hour
 HAIKU_BATCH_SIZE      = 25     # markets per Haiku screening call
 MAX_ARTICLES_PER_POLL = 5      # max new articles processed per poll cycle
+
+# ── Price velocity (smart money) parameters ───────────────────────────────────
+VELOCITY_POLL_SECS     = 15    # check order book prices every 15 seconds
+VELOCITY_WINDOW_SECS   = 600   # detect moves within this rolling window (10 min)
+VELOCITY_MIN_MOVE      = 0.08  # minimum absolute price shift to investigate (8pp)
+VELOCITY_STABLE_SECS   = 1800  # market must have been flat this long before signal (30 min)
+VELOCITY_STABLE_MAX    = 0.025 # max allowed drift during the stable window (2.5pp)
+VELOCITY_COOLDOWN_SECS = 900   # suppress repeated signals on same market (15 min)
 
 # ── RSS Feed Sources ─────────────────────────────────────────────────────────
 # Google News trick: any Google News search URL becomes an RSS feed by inserting /rss/
@@ -42,12 +51,11 @@ MAX_ARTICLES_PER_POLL = 5      # max new articles processed per poll cycle
 _GN = "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US%3Aen&q="
 
 RSS_SOURCES = [
-    # AP News — direct feeds (still active, real-time wire)
-    ("AP Top News",       "https://feeds.apnews.com/rss/topnews"),
-    ("AP Politics",       "https://feeds.apnews.com/rss/politics"),
-    ("AP Business",       "https://feeds.apnews.com/rss/business"),
-    ("AP Science",        "https://feeds.apnews.com/rss/science"),
-    ("AP Sports",         "https://feeds.apnews.com/rss/sports"),
+    # AP News — via Google News (direct feeds.apnews.com may fail DNS on some servers)
+    ("AP Top News",       _GN + "site%3Aapnews.com"),
+    ("AP Politics",       _GN + "site%3Aapnews.com+politics"),
+    ("AP Business",       _GN + "site%3Aapnews.com+business"),
+    ("AP World",          _GN + "site%3Aapnews.com+world"),
     # Reuters — via Google News site: operator (Reuters dropped direct RSS)
     ("Reuters Top",       _GN + "site%3Areuters.com"),
     ("Reuters Politics",  _GN + "site%3Areuters.com+politics"),
@@ -56,9 +64,8 @@ RSS_SOURCES = [
     # BBC — direct feed still active
     ("BBC World",         "http://feeds.bbci.co.uk/news/world/rss.xml"),
     ("BBC Business",      "http://feeds.bbci.co.uk/news/business/rss.xml"),
-    # Politico, The Hill — politics/policy
+    # Politico — politics/policy
     ("Politico",          "https://rss.politico.com/politics-news.xml"),
-    ("The Hill",          "https://thehill.com/rss/syndication/all-news"),
     # Bloomberg via Google News (Bloomberg dropped direct RSS)
     ("Bloomberg",         _GN + "site%3Abloomberg.com"),
     # WSJ via Google News
@@ -108,6 +115,13 @@ class NewsArbStrategy:
         self._last_poll     = 0.0
         self._thread:       Optional[threading.Thread] = None
         self.last_headline: str = ""                # shown in dashboard
+        # Price velocity state — tracks YES prices per market for smart-money detection
+        # market_id → deque of (timestamp, yes_price)
+        self._price_history: dict[str, deque] = {}
+        self._velocity_last_check = 0.0
+        # market_id → last time we fired a velocity signal (cooldown)
+        self._velocity_fired: dict[str, float] = {}
+        self._vel_thread: Optional[threading.Thread] = None
 
     @property
     def available(self) -> bool:
@@ -126,6 +140,26 @@ class NewsArbStrategy:
             target=self._poll, daemon=True, name="news-arb"
         )
         self._thread.start()
+
+    def maybe_check_velocity(self) -> None:
+        """
+        Detect Polymarket smart-money moves BEFORE news hits RSS.
+        Informed traders (Bloomberg Terminal, etc.) buy 15-30 min before articles
+        reach RSS feeds. A market that has been flat for 30 min then suddenly moves
+        8+ percentage points is almost certainly being front-run.
+        Runs every VELOCITY_POLL_SECS seconds in a separate background thread.
+        """
+        if not self.available:
+            return
+        if time.time() - self._velocity_last_check < VELOCITY_POLL_SECS:
+            return
+        if self._vel_thread and self._vel_thread.is_alive():
+            return
+        self._velocity_last_check = time.time()
+        self._vel_thread = threading.Thread(
+            target=self._velocity_scan, daemon=True, name="news-velocity"
+        )
+        self._vel_thread.start()
 
     def pop_signals(self) -> list[NewsArbSignal]:
         with self._lock:
@@ -427,6 +461,189 @@ class NewsArbStrategy:
             signals.extend(art_signals)
 
         return signals
+
+
+# ── Price velocity scanner ─────────────────────────────────────────────────────
+
+    def _velocity_scan(self) -> None:
+        """
+        Background worker: snapshot YES prices for all current-events markets,
+        then look for 'stable → sudden move' patterns that signal informed buying.
+        """
+        try:
+            now     = time.time()
+            markets = self._get_markets()
+            if not markets:
+                return
+
+            movers: list[tuple] = []  # (market, old_price, new_price, direction)
+
+            for mkt in markets:
+                mid = getattr(mkt, "yes_price", None)
+                if mid is None or not (0.03 <= mid <= 0.97):
+                    continue
+
+                hist = self._price_history.setdefault(
+                    mkt.id, deque(maxlen=int(VELOCITY_STABLE_SECS / VELOCITY_POLL_SECS) + 10)
+                )
+                hist.append((now, mid))
+
+                # Need enough history to assess stability (≥ VELOCITY_STABLE_SECS of data)
+                if not hist or (now - hist[0][0]) < VELOCITY_STABLE_SECS * 0.8:
+                    continue
+
+                # Split history into: stable window (older) + move window (recent)
+                move_cutoff   = now - VELOCITY_WINDOW_SECS
+                stable_cutoff = now - VELOCITY_STABLE_SECS
+
+                stable_prices = [p for t, p in hist if stable_cutoff <= t < move_cutoff]
+                recent_prices = [p for t, p in hist if t >= move_cutoff]
+
+                if len(stable_prices) < 5 or len(recent_prices) < 3:
+                    continue
+
+                stable_range = max(stable_prices) - min(stable_prices)
+                if stable_range > VELOCITY_STABLE_MAX:
+                    # Market was already volatile — not a clean setup
+                    continue
+
+                stable_mid = sum(stable_prices) / len(stable_prices)
+                current    = recent_prices[-1]
+                move       = current - stable_mid  # positive = moving YES-ward
+
+                if abs(move) < VELOCITY_MIN_MOVE:
+                    continue
+
+                # Cooldown: suppress re-firing on same market within 15 min
+                last_fired = self._velocity_fired.get(mkt.id, 0.0)
+                if now - last_fired < VELOCITY_COOLDOWN_SECS:
+                    continue
+
+                direction = "YES" if move > 0 else "NO"
+                movers.append((mkt, stable_mid, current, move, direction))
+                logger.info(
+                    f"[VELOCITY] {mkt.question[:60]} | "
+                    f"stable={stable_mid:.3f} → now={current:.3f} ({move:+.3f}) "
+                    f"over last {VELOCITY_WINDOW_SECS//60}min"
+                )
+
+            if not movers:
+                return
+
+            # Ask Haiku whether each move looks like informed trading
+            import anthropic
+            api_client = anthropic.Anthropic(api_key=self._api_key)
+
+            for mkt, stable_mid, current, move, direction in movers:
+                sigs = self._haiku_velocity_check(mkt, stable_mid, current, move, direction, api_client)
+                if sigs:
+                    self._velocity_fired[mkt.id] = now
+                    with self._lock:
+                        self._pending.extend(sigs)
+
+        except Exception as exc:
+            logger.debug(f"[VELOCITY] Scan error: {exc}")
+
+    def _haiku_velocity_check(
+        self,
+        market,
+        stable_price: float,
+        current_price: float,
+        move: float,
+        direction: str,
+        api_client,
+    ) -> list[NewsArbSignal]:
+        """
+        Ask Haiku: does this price velocity pattern look like informed trading,
+        or random noise? If informed, estimate a new probability.
+        """
+        pct_move = abs(move) / stable_price * 100 if stable_price > 0 else 0
+        prompt = (
+            f"A Polymarket prediction market has been trading flat at {stable_price:.3f} YES "
+            f"for 30+ minutes, then suddenly moved to {current_price:.3f} "
+            f"({'up' if move > 0 else 'down'} {pct_move:.1f}%) in the last "
+            f"{VELOCITY_WINDOW_SECS // 60} minutes — before any news article has appeared.\n\n"
+            f"MARKET: {market.question}\n"
+            f"Current YES price: {current_price:.3f}  |  Move: {move:+.3f}\n\n"
+            "Your task: decide if this looks like informed trading (smart money acting on "
+            "news not yet published) or random noise/thin-book artifact.\n\n"
+            "Informed trading signals:\n"
+            "  - The market subject is in the news cycle (geopolitics, policy, elections)\n"
+            "  - The direction of the move matches a plausible breaking-news scenario\n"
+            "  - The move is sustained (not immediately reversed in the same window)\n\n"
+            "Noise signals:\n"
+            "  - Very illiquid market (thin book can move on 1 trade)\n"
+            "  - Question is obscure / unlikely to have breaking news\n"
+            "  - Move is implausibly large (>30pp) with no context\n\n"
+            "If this looks like INFORMED TRADING, reply exactly:\n"
+            f"INFORMED | NEW_YES_PROB | one-sentence reasoning\n"
+            "where NEW_YES_PROB is your estimate of the true current probability (0.00–1.00).\n\n"
+            "If this looks like NOISE or a thin-book artifact, reply: NOISE"
+        )
+
+        try:
+            msg = api_client.messages.create(
+                model=HAIKU_MODEL, max_tokens=150,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            response = msg.content[0].text.strip()
+        except Exception as exc:
+            logger.debug(f"[VELOCITY] Haiku error: {exc}")
+            return []
+
+        if not response.upper().startswith("INFORMED"):
+            logger.debug(f"[VELOCITY] Haiku: NOISE on '{market.question[:50]}'")
+            return []
+
+        parts = [p.strip() for p in response.split("|")]
+        if len(parts) < 3:
+            return []
+        try:
+            ai_prob   = float(parts[1])
+            reasoning = parts[2]
+        except (ValueError, IndexError):
+            return []
+
+        if not (0.0 < ai_prob < 1.0):
+            return []
+
+        edge = abs(ai_prob - current_price)
+        if edge < NEWS_ARB_EDGE:
+            logger.debug(
+                f"[VELOCITY] edge {edge:.1%} < {NEWS_ARB_EDGE:.0%} threshold — skip"
+            )
+            return []
+
+        token_id = (
+            market.yes_token.token_id if direction == "YES"
+            else market.no_token.token_id
+        )
+        hrs = _hours_to_close(market)
+        if hrs <= 0:
+            return []
+
+        headline = (
+            f"Smart money: YES {stable_price:.3f}→{current_price:.3f} "
+            f"({move:+.3f}) in {VELOCITY_WINDOW_SECS//60}min — no article yet"
+        )
+        self.last_headline = headline
+        logger.info(
+            f"[VELOCITY] SIGNAL {direction} haiku_prob={ai_prob:.2f} mkt={current_price:.3f} "
+            f"edge={edge:.1%} '{market.question[:55]}' | {reasoning[:70]}"
+        )
+        return [NewsArbSignal(
+            market_id=market.id,
+            question=market.question,
+            token_id=token_id,
+            side=direction,
+            ai_probability=ai_prob,
+            market_price=current_price,
+            edge=edge,
+            headline=headline,
+            reasoning=f"[SMART-MONEY] {reasoning}",
+            source="PRICE_VELOCITY",
+            hours_to_close=hrs,
+        )]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

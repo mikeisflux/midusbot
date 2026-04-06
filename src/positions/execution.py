@@ -529,7 +529,10 @@ class ExecutionMixin:
 
         # Size: standard Kelly position (same as normal entries)
         usdc   = min(config.MAX_POSITION_USDC, max(3.0, (_wallet or 50.0) * 0.12))
-        shares = float(_math.floor(usdc / entry_price))
+        # Chainlink must clear Polymarket's 5-share minimum — bump usdc if needed
+        min_usdc = _math.ceil(config.MIN_ORDER_SHARES * entry_price * 1.05 * 100) / 100
+        usdc     = max(usdc, min_usdc)
+        shares   = float(_math.floor(usdc / entry_price))
         if shares < config.MIN_ORDER_SHARES:
             logger.info(f"[CHAINLINK-ENTRY] size too small ({shares:.0f} shares) — skip")
             return False

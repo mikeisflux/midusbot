@@ -199,7 +199,7 @@ class ScannerMixin:
         # Async parallel price fetching — scan all assets concurrently instead of
         # sequentially (was: asset 7 signal was 3-5s stale by the time we got to it)
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-        _ASSETS_TO_FETCH = ("BTC", "XRP", "ETH", "SOL", "DOGE", "BNB", "HYPE")
+        _ASSETS_TO_FETCH = ("BTC", "XRP", "ETH", "SOL", "DOGE", "BNB")  # HYPE removed: coin-flip win rate (188W/190L)
         with ThreadPoolExecutor(max_workers=len(_ASSETS_TO_FETCH), thread_name_prefix="pricefetch") as _pool:
             _futures = {_pool.submit(_fetch_price, sym): sym for sym in _ASSETS_TO_FETCH}
             for _fut in _as_completed(_futures):
@@ -211,7 +211,7 @@ class ScannerMixin:
             _now = _time.time()
             parts = []
             silent_assets = []
-            for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"):
+            for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"):
                 cached    = _PRICE_CACHE.get(sym)
                 hist      = _PRICE_HISTORY.get(sym, [])
                 ticks     = len(hist)
@@ -662,8 +662,9 @@ class ScannerMixin:
 
     def _run_news_arb(self) -> None:
         """
-        AP/Reuters/BBC News Arbitrage — poll RSS every 60s, match breaking headlines
+        AP/Reuters/BBC News Arbitrage — poll RSS every 15s, match breaking headlines
         to open Polymarket markets, ask Claude to reprice, enter before MMs catch up.
+        Also runs price-velocity scanner to detect smart-money moves pre-publication.
         Strategy tag: "news_arb". Requires ANTHROPIC_API_KEY.
         """
         import os as _os
@@ -677,6 +678,7 @@ class ScannerMixin:
             self._news_arb = NewsArbStrategy(api_key=_api_key, client=self._client)
 
         self._news_arb.maybe_poll()
+        self._news_arb.maybe_check_velocity()  # pre-publication: detect smart-money moves
 
         for sig in self._news_arb.pop_signals():
             # Budget gate: news_arb gets NEWS_ARB_BUDGET_PCT of wallet
