@@ -441,10 +441,23 @@ class ScannerMixin:
 
         # No window-level cooldown — per-asset 300s cooldown (COOLDOWN_SECS) and
         # signal quality gates (ENTRY_PRICE_GUARD, thresholds) are sufficient filters.
-        for sig, _asset in pending_signals:
-            if self._execute_signal(sig):
-                trades_placed += 1
-                self._asset_last_bet[_asset] = time.time()
+        if not getattr(config, "CHAINLINK_ONLY", False):
+            for sig, _asset in pending_signals:
+                if self._execute_signal(sig):
+                    trades_placed += 1
+                    self._asset_last_bet[_asset] = time.time()
+        else:
+            if pending_signals:
+                logger.debug(
+                    f"[CHAINLINK-ONLY] Skipping {len(pending_signals)} oracle-lag signals "
+                    f"— CHAINLINK_ONLY mode active"
+                )
+
+        # ── Chainlink close-watch launcher ────────────────────────────────────
+        # For BTC UPDOWN markets within 5-40s of close, launch an oracle watch.
+        # When the Chainlink feed fires a new round we know the resolution with
+        # certainty — enter the winning side at any price up to CHAINLINK_MAX_ENTRY.
+        self._launch_chainlink_watches(updown)
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure        = self._risk.total_exposure()
@@ -458,6 +471,86 @@ class ScannerMixin:
             f"-- Loop done — signals={signals_found}  trades={trades_placed}  "
             f"exposure=${self._risk.total_exposure():.2f} --"
         )
+
+
+    def _launch_chainlink_watches(self, updown_markets: list) -> None:
+        """
+        For each BTC 5-min UPDOWN market within 5-40s of close, launch a
+        Chainlink oracle watch thread. Called every loop — idempotent (ChainlinkMonitor
+        prevents double-launching for the same market_id).
+        """
+        try:
+            from src.chainlink import monitor as _cl
+        except Exception:
+            return
+        if not _cl.available:
+            return
+
+        from datetime import datetime, timezone as _tz
+        from src.strategy import _detect_updown_market, _updown_window_mins
+        from src.signals import _price_at_timestamp
+
+        _now = time.time()
+
+        for _m in updown_markets:
+            if _detect_updown_market(_m.question) != "BTC":
+                continue
+            if _updown_window_mins(_m.question) != 5:
+                continue
+            if not getattr(_m, "end_date", None):
+                continue
+
+            try:
+                _end_ts = datetime.fromisoformat(
+                    _m.end_date.replace("Z", "+00:00")
+                ).timestamp()
+            except Exception:
+                continue
+
+            _secs_left = _end_ts - _now
+            if not (5 < _secs_left <= 40):
+                continue
+
+            # Look up BTC price at window open (300s before close)
+            _win_start_ts = _end_ts - 300
+            _start_btc = _price_at_timestamp("BTC", _win_start_ts, tolerance_secs=45)
+            if _start_btc is None:
+                logger.debug(
+                    f"[CHAINLINK] No BTC start price for {_m.question[:40]} — "
+                    f"need price from {_win_start_ts:.0f} (window opened {_now - _win_start_ts:.0f}s ago)"
+                )
+                continue
+
+            _tok_yes  = _m.yes_token.token_id
+            _tok_no   = _m.no_token.token_id
+            _mkt_id   = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
+            _question = _m.question
+
+            # Capture loop vars for the callback closure
+            def _make_callback(tok_yes, tok_no, mkt_id, question, start_btc):
+                def _on_resolution(direction: str, oracle_price: float) -> None:
+                    token_id = tok_yes if direction == "YES" else tok_no
+                    self._enter_chainlink_confirmed(
+                        token_id=token_id,
+                        side=direction,
+                        market_id=mkt_id,
+                        question=question,
+                        oracle_price=oracle_price,
+                        start_price=start_btc,
+                    )
+                return _on_resolution
+
+            _cb = _make_callback(_tok_yes, _tok_no, _mkt_id, _question, _start_btc)
+            _cl.watch_async(
+                start_price=_start_btc,
+                window_close_ts=_end_ts,
+                on_resolution=_cb,
+                market_id=_mkt_id or _question[:20],
+            )
+            logger.info(
+                f"[CHAINLINK] Watch launched — {_m.question[:45]} | "
+                f"{_secs_left:.0f}s to close | start_btc=${_start_btc:,.2f}"
+            )
 
 
 def _record_error(msg: str) -> None:

@@ -2,26 +2,29 @@
   "signal_threshold": 0.0008,
   "min_trend_score": 0.5,
   "skip_assets": [],
-  "prefer_assets": ["BTC", "ETH"],
+  "prefer_assets": [
+    "BTC",
+    "ETH"
+  ],
   "max_secs_in": 90,
   "kelly_override": null,
   "time_of_day_skip": [],
   "asset_thresholds": {
-    "BTC":  0.00035,
-    "ETH":  0.00040,
-    "BNB":  0.00040,
-    "XRP":  0.00080,
-    "SOL":  0.00035,
-    "DOGE": 0.00100,
-    "HYPE": 0.00080,
-    "WIF":  0.00120,
-    "TRUMP":0.00150
+    "BTC": 0.0004,
+    "ETH": 0.0003,
+    "BNB": 0.0004,
+    "XRP": 0.0008,
+    "SOL": 0.00025,
+    "DOGE": 0.001,
+    "HYPE": 0.0008,
+    "WIF": 0.0012,
+    "TRUMP": 0.0015
   },
   "min_price_history_s": 90,
-  "analysis_strategy": "Reset to calibrated per-asset minimums. DO NOT lower DOGE below 0.10%, XRP below 0.08%, BNB below 0.04%. Only BTC/ETH/SOL can go below 0.04%. max_secs_in capped at 90s — oracle lag edge is gone after 90s.",
+  "analysis_strategy": "Reset to calibrated per-asset minimums. DO NOT lower DOGE below 0.10%, XRP below 0.08%, BNB below 0.04%. Only BTC/ETH/SOL can go below 0.04%. max_secs_in capped at 90s \u2014 oracle lag edge is gone after 90s.",
   "_runs": 0,
   "_last_run_at": 0,
-  "_last_reasoning": "Manual reset — analyst set kelly_override=0.05 based on wrong NO-side inversion diagnosis. That made all position sizes ~$0.35 (0.7 shares), below Polymarket 5-share minimum, silently blocking every trade.",
+  "_last_reasoning": "Lowered BTC/ETH/SOL thresholds to catch strong directional moves (BTC 0.040%, ETH 0.030%, SOL 0.025%)",
   "trades_at_last_run": 0,
   "wins_at_last_run": 0
 }

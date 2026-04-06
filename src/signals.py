@@ -219,6 +219,22 @@ def _window_return(symbol: str, secs_in: int) -> float | None:
     return (cur_price - ref_price) / ref_price
 
 
+def _price_at_timestamp(symbol: str, target_ts: float, tolerance_secs: float = 30) -> float | None:
+    """
+    Return the nearest recorded price to target_ts (within tolerance_secs), or None.
+    Used by the Chainlink monitor to look up the BTC price at window open (T=0).
+    """
+    sym = symbol.upper()
+    with _PRICE_LOCK:
+        hist = list(_PRICE_HISTORY.get(sym, []))
+    if not hist:
+        return None
+    best = min(hist, key=lambda x: abs(x[1] - target_ts))
+    if abs(best[1] - target_ts) > tolerance_secs:
+        return None
+    return best[0]
+
+
 def _consecutive_window_trend(symbol: str, n_windows: int = 12) -> float | None:
     """
     Looks at the last n_windows completed 5-minute windows and returns

@@ -107,6 +107,11 @@ EARLY_EXIT_GAIN_THRESHOLD:   float = float(_env("EARLY_EXIT_GAIN_THRESHOLD",   "
 # Order book thinness: skip if YES spread < this (MMs repricing aggressively)
 OB_MIN_SPREAD:      float = float(_env("OB_MIN_SPREAD", "0.005"))
 
+# Chainlink-only mode: skip all oracle-lag (T=0) entries; enter only via Chainlink
+# oracle confirmation at T≈270s. Set CHAINLINK_ONLY=true to focus exclusively on
+# the latency-arbitrage strategy at window close.
+CHAINLINK_ONLY:     bool  = _env("CHAINLINK_ONLY", "false").lower() == "true"
+
 # Wallet replenishment alert threshold (USDC)
 WALLET_REPLENISH_ALERT: float = float(_env("WALLET_REPLENISH_ALERT", "25.0"))
 

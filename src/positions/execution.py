@@ -468,3 +468,98 @@ class ExecutionMixin:
             return True
 
         return False
+
+    def _enter_chainlink_confirmed(
+        self,
+        token_id: str,
+        side: str,           # "YES" or "NO"
+        market_id: str,
+        question: str,
+        oracle_price: float,
+        start_price: float,
+    ) -> bool:
+        """
+        Place a BUY order when Chainlink has confirmed the resolution direction.
+        Bypasses ENTRY_PRICE_GUARD (0.54) — this is guaranteed-edge, not probabilistic.
+        Skips if already holding a position in this market.
+        """
+        from src.chainlink import CHAINLINK_MAX_ENTRY
+
+        # Don't double-enter
+        if token_id in self._positions:
+            logger.debug(f"[CHAINLINK-ENTRY] Already holding {token_id[:12]} — skip")
+            return False
+
+        # Capital / pause checks still apply
+        if config.TRADING_PAUSED:
+            return False
+        _wallet = self._dash_state.wallet_balance or 0.0
+        _floor  = float(getattr(config, "CAPITAL_FLOOR_USDC", 15.0))
+        if 0 < _wallet < _floor:
+            logger.warning(f"[CHAINLINK-ENTRY] Capital floor — wallet ${_wallet:.2f} < ${_floor:.2f}")
+            return False
+
+        # Get live orderbook to determine the best ask for entry
+        ob = self._client.get_order_book(token_id)
+        if ob is None or ob.best_ask <= 0:
+            logger.info(f"[CHAINLINK-ENTRY] No orderbook for {token_id[:12]} — skip")
+            return False
+
+        entry_price = round(min(ob.best_ask + 0.01, CHAINLINK_MAX_ENTRY), 2)
+        if entry_price > CHAINLINK_MAX_ENTRY:
+            logger.info(
+                f"[CHAINLINK-ENTRY] best_ask={ob.best_ask:.3f} > max={CHAINLINK_MAX_ENTRY} "
+                f"— margin too thin, skip {question[:40]}"
+            )
+            return False
+
+        # Size: standard Kelly position (same as normal entries)
+        usdc   = min(config.MAX_POSITION_USDC, max(3.0, (_wallet or 50.0) * 0.12))
+        shares = float(_math.floor(usdc / entry_price))
+        if shares < config.MIN_ORDER_SHARES:
+            logger.info(f"[CHAINLINK-ENTRY] size too small ({shares:.0f} shares) — skip")
+            return False
+
+        delta_pct = (oracle_price - start_price) / start_price * 100
+        logger.info(
+            f"[CHAINLINK-ENTRY] {'[DRY-RUN] ' if config.DRY_RUN else ''}CONFIRMED {side} "
+            f"oracle=${oracle_price:,.2f} vs start=${start_price:,.2f} ({delta_pct:+.4f}%) "
+            f"→ buying {shares:.0f}@{entry_price:.3f}  {question[:45]}"
+        )
+
+        resp = self._client.place_limit_order(
+            token_id=token_id,
+            side="BUY",
+            price=entry_price,
+            size=shares,
+            fok=True,   # FOK: fill at confirmed price or skip — no partial fills
+        )
+        if not resp:
+            logger.info(f"[CHAINLINK-ENTRY] Order rejected or timed out ({question[:40]})")
+            return False
+
+        actual_cost = usdc
+        from src.bot import OpenPosition
+        self._positions[token_id] = OpenPosition(
+            market_id=market_id,
+            question=question,
+            token_id=token_id,
+            side=side,
+            shares=shares,
+            entry_price=entry_price,
+            cost_usdc=actual_cost,
+            momentum_signal=0.0,
+            imbalance_signal=0.0,
+            composite_signal=1.0,   # maximum confidence — oracle confirmed
+            confidence="CHAINLINK",
+            order_id=resp.get("id") if isinstance(resp, dict) else None,
+            entry_time=time.time(),
+        )
+        self._save_positions()
+        self._risk.record_open(cost_usdc=actual_cost)
+        self._dash_state.orders_placed += 1
+        logger.info(
+            f"[CHAINLINK-ENTRY] Position opened: {side} {shares:.0f}@{entry_price:.3f} "
+            f"cost=${actual_cost:.2f}  {question[:55]}"
+        )
+        return True
