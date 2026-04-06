@@ -169,12 +169,12 @@ class MonitoringMixin:
                     )
                     continue
 
-            # ── Hard stop-loss: cut any position that lost ≥40% ──────────────
-            if pos.entry_price > 0 and pnl_pct <= -0.40:
+            # ── Hard stop-loss: cut any position that lost ≥35% ──────────────
+            if pos.entry_price > 0 and pnl_pct <= -0.35:
                 logger.warning(
                     f"[STOP-40%] {pos.side} {pos.question[:45]}  "
                     f"entry={pos.entry_price:.3f} → now={current_price:.3f}  "
-                    f"loss={pnl_pct:.1%} — selling to recover remaining capital"
+                    f"loss={pnl_pct:.1%} — cutting loss to protect capital"
                 )
                 _stop_symbol = _detect_updown_market(pos.question)
                 if _stop_symbol:
@@ -220,12 +220,12 @@ class MonitoringMixin:
                 if current_price > pos.high_water_mark:
                     pos.high_water_mark = current_price
 
-                # ── Trailing stop: lock in 50% of peak gains ──────────────────
-                # Only activates once we've gained at least 10 cents from entry.
-                # Trigger: price retreats >50% of the peak gain from entry.
+                # ── Trailing stop: lock in 65% of peak gains ──────────────────
+                # Activates once we've gained at least 8 cents from entry.
+                # Trigger: price retreats below 65% of the peak gain from entry.
                 _peak_gain = pos.high_water_mark - pos.entry_price
-                if _peak_gain >= 0.10:
-                    _trail_floor = pos.entry_price + _peak_gain * 0.50
+                if _peak_gain >= 0.08:
+                    _trail_floor = pos.entry_price + _peak_gain * 0.65
                     if current_price < _trail_floor:
                         to_close.append((token_id, current_price))
                         logger.info(
@@ -235,7 +235,7 @@ class MonitoringMixin:
                         )
                         continue
 
-                if pnl_pct >= 0.20 or current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
+                if pnl_pct >= 0.25 or current_price > config.EARLY_EXIT_GAIN_THRESHOLD:
                     to_close.append((token_id, current_price))
                     logger.info(
                         f"[EARLY-EXIT] Locking in {pos.side} gain at {current_price:.3f} "
