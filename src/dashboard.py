@@ -96,7 +96,10 @@ class DashboardState:
         self.btc_price: float = 0.0
         self.daily_pnl: float = 0.0
         self.entry_latencies: list[float] = []  # secs-into-window for recent entries
-        self._seed: float = config.MAX_TOTAL_EXPOSURE_USDC  # starting portfolio value
+        # Seed = your original deposit. Used as the baseline for real P&L.
+        # Set STARTING_WALLET_USDC in .env (or config.py) to your deposit amount.
+        _cfg_start = getattr(config, "STARTING_WALLET_USDC", 0.0)
+        self._seed: float = _cfg_start if _cfg_start > 0 else config.MAX_TOTAL_EXPOSURE_USDC
         self.wallet_balance: float = 0.0      # live wallet USDC (updated each loop in live mode)
 
         self._load_equity_curve()
@@ -153,24 +156,30 @@ class DashboardState:
     def restore_from_journal(self, journal) -> None:
         """
         Reconstruct performance stats from the persisted trade journal on startup.
-        Called once after the AdaptiveLearner has loaded its journal.
+        Only counts LIVE (non-dry-run) trades in the main stats so the P&L
+        reflects real wallet movements, not paper-trading simulations.
         """
         closed = [r for r in journal if r.closed]
         if not closed:
             return
 
-        self.total_trades = len(closed)
-        self.wins         = sum(1 for r in closed if r.pnl_usdc > 0)
-        self.total_pnl    = sum(r.pnl_usdc for r in closed)
-        self.best_trade   = max((r.pnl_usdc for r in closed), default=0.0)
-        self.worst_trade  = min((r.pnl_usdc for r in closed), default=0.0)
-        self.pnl_history  = [r.pnl_usdc for r in closed]
-        # total_fees can't be recovered from journal; leave at 0 (minor)
+        # Stats: live trades only — paper/dry-run trades are not real P&L
+        live   = [r for r in closed if not getattr(r, "dry_run", False)]
+        paper  = [r for r in closed if     getattr(r, "dry_run", False)]
 
-        # Rebuild equity curve from journal if no saved curve exists
-        if not self.equity_curve and closed:
+        stats_src = live if live else closed  # fall back to all if no live trades yet
+
+        self.total_trades = len(stats_src)
+        self.wins         = sum(1 for r in stats_src if r.pnl_usdc > 0)
+        self.total_pnl    = sum(r.pnl_usdc for r in stats_src)
+        self.best_trade   = max((r.pnl_usdc for r in stats_src), default=0.0)
+        self.worst_trade  = min((r.pnl_usdc for r in stats_src), default=0.0)
+        self.pnl_history  = [r.pnl_usdc for r in stats_src]
+
+        # Rebuild equity curve from live trades only (anchored to real deposit)
+        if not self.equity_curve and stats_src:
             cumulative = 0.0
-            for r in sorted(closed, key=lambda x: x.closed_at):
+            for r in sorted(stats_src, key=lambda x: x.closed_at):
                 cumulative += r.pnl_usdc
                 self.equity_curve.append({
                     "t": int(r.closed_at * 1000),
@@ -178,7 +187,8 @@ class DashboardState:
                 })
 
         logger.info(
-            f"[Dashboard] Restored from journal: {self.total_trades} trades, "
+            f"[Dashboard] Restored from journal: {self.total_trades} live trades "
+            f"({len(paper)} paper trades excluded), "
             f"P&L=${self.total_pnl:+.2f}, {self.wins}W/{self.total_trades}T"
         )
 

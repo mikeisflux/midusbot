@@ -146,6 +146,10 @@ CIRCUIT_BREAKER_PCT:    float = float(_env("CIRCUIT_BREAKER_PCT",   "-0.05"))
 # Wallet replenishment alert threshold (USDC)
 WALLET_REPLENISH_ALERT: float = float(_env("WALLET_REPLENISH_ALERT", "25.0"))
 
+# Your original deposit amount — used as the P&L baseline so Total P&L =
+# current wallet - this value. Set to your actual starting balance.
+STARTING_WALLET_USDC: float = float(_env("STARTING_WALLET_USDC", "150.0"))
+
 # Correlation cooldown between bets on correlated assets (seconds)
 COOLDOWN_SECS:      int = int(_env("COOLDOWN_SECS", "300"))
 

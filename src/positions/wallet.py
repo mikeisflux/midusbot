@@ -21,8 +21,11 @@ class WalletMixin:
         balance = self._client.get_usdc_balance()
         if balance is not None and balance > 0:
             self._dash_state.wallet_balance = balance
-            if self._dash_state._seed == config.MAX_TOTAL_EXPOSURE_USDC:
-                self._dash_state._seed = balance
+            # Seed is set once from STARTING_WALLET_USDC config (your deposit).
+            # Only fall back to current wallet if config is not set.
+            if self._dash_state._seed <= config.MAX_TOTAL_EXPOSURE_USDC:
+                _cfg_start = getattr(config, "STARTING_WALLET_USDC", 0.0)
+                self._dash_state._seed = _cfg_start if _cfg_start > 0 else balance
             logger.info(f"Wallet balance: ${balance:.2f} USDC")
             self._dash_state.add_exec_log("info", f"Wallet: ${balance:.2f} USDC")
 
