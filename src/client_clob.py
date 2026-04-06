@@ -311,13 +311,28 @@ class ClobMixin:
 
     def cancel_order(self, order_id: str) -> bool:
         if config.DRY_RUN:
-            logger.info(f"[DRY-RUN] Would cancel order {order_id}")
+            logger.debug(f"[DRY-RUN] Would cancel order {order_id[:20]}…")
             return True
         if not self._clob_client:
             return False
         try:
-            self._clob_client.cancel_order(order_id)
+            # py_clob_client uses .cancel(CancelOrderParams) not .cancel_order()
+            from py_clob_client.clob_types import CancelOrderParams
+            self._clob_client.cancel(CancelOrderParams(orderID=order_id))
             return True
+        except ImportError:
+            pass
         except Exception as exc:
-            logger.error(f"cancel_order {order_id} failed: {exc}")
+            logger.debug(f"cancel_order {order_id[:20]} failed: {exc}")
+            return False
+        # Fallback: cancel via REST DELETE /order
+        try:
+            resp = self._session.delete(
+                f"{config.CLOB_HOST}/order",
+                json={"orderID": order_id},
+                timeout=5,
+            )
+            return resp.status_code in (200, 201, 204)
+        except Exception as exc:
+            logger.debug(f"cancel_order REST fallback failed: {exc}")
             return False

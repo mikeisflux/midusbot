@@ -48,8 +48,8 @@ TRADING_PAUSED: bool = os.getenv("TRADING_PAUSED", "false").lower() == "true"
 CAPITAL_FLOOR_USDC: float = float(_env("CAPITAL_FLOOR_USDC", "100.0"))
 # Daily trading floor: halt new trades if live wallet balance drops below
 # this value. Resets automatically if wins push balance back above it.
-# Override via env: DAILY_LOSS_FLOOR_USDC=140
-DAILY_LOSS_FLOOR_USDC: float = float(_env("DAILY_LOSS_FLOOR_USDC", "135.0"))
+# Override via env: DAILY_LOSS_FLOOR_USDC=110
+DAILY_LOSS_FLOOR_USDC: float = float(_env("DAILY_LOSS_FLOOR_USDC", "110.0"))
 
 # ── Position sizing ──────────────────────────────────────────────────────────
 # Conservative starter sizing — raise MAX_POSITION_USDC as the bot proves itself.
