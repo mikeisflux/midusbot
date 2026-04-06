@@ -21,8 +21,8 @@ from typing import Callable, Optional
 
 from loguru import logger
 
-# Chainlink BTC/USD AggregatorV3Interface on Polygon Mainnet
-_CHAINLINK_BTC_USD = "0xc907E116054Ad103354f2D350FD2514433D57F6"
+# Chainlink BTC/USD AggregatorV3Interface on Polygon Mainnet (lowercase — checksum applied at runtime)
+_CHAINLINK_BTC_USD = "0xc907e116054ad103354f2d350fd2514433d57f6"
 
 # Minimal ABI — only latestRoundData + decimals needed
 _AGGREGATOR_ABI = [
@@ -127,7 +127,7 @@ class ChainlinkMonitor:
                         pass
 
                 contract = w3.eth.contract(
-                    address=Web3.to_checksum_address(_CHAINLINK_BTC_USD),
+                    address=w3.to_checksum_address(_CHAINLINK_BTC_USD),
                     abi=_AGGREGATOR_ABI,
                 )
                 dec = contract.functions.decimals().call()
