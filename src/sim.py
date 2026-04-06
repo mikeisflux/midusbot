@@ -18,7 +18,7 @@ from src.utils import atomic_json_write
 
 DATA_DIR = Path("data")
 SIM_FILE  = DATA_DIR / "journal_sim.json"
-STARTING_BALANCE = 146.00   # starting wallet — synced to actual deposit
+STARTING_BALANCE = 134.00   # starting wallet — synced to actual deposit
 
 
 @dataclass
