@@ -81,6 +81,7 @@ class ExecutionMixin:
                     import re as _re
                     _last_err = getattr(self._client, "_last_order_error", "") or ""
                     _m = _re.search(r"balance:\s*(\d+)", str(_last_err))
+                    _fok_killed = "fully filled" in str(_last_err).lower() or "fok" in str(_last_err).lower()
                     if _m:
                         _real_shares = int(_m.group(1)) / 1_000_000
                         if 0 < _real_shares < sell_shares:
@@ -95,6 +96,21 @@ class ExecutionMixin:
                                 size=_real_shares,
                                 fok=_is_updown,
                             )
+                            # FOK killed on balance-corrected order — retry without FOK
+                            if resp is None and _is_updown:
+                                _err2 = getattr(self._client, "_last_order_error", "") or ""
+                                if "fully filled" in str(_err2).lower() or "fok" in str(_err2).lower():
+                                    logger.info(
+                                        f"[FOK-RETRY] FOK killed on balance-corrected order "
+                                        f"— retrying without FOK ({_real_shares:.4f} @ {sell_price:.3f})"
+                                    )
+                                    resp = self._client.place_limit_order(
+                                        token_id=token_id,
+                                        side="SELL",
+                                        price=sell_price,
+                                        size=_real_shares,
+                                        fok=False,
+                                    )
                         elif _real_shares == 0:
                             # Token already redeemed/transferred on-chain — nothing to sell.
                             # Force-close to prevent this position spamming every loop.
@@ -103,6 +119,20 @@ class ExecutionMixin:
                                 f"— already redeemed externally, force-removing."
                             )
                             resp = {"force_closed": True}
+                    elif _is_updown and _fok_killed:
+                        # Initial FOK order killed due to insufficient liquidity (not a balance
+                        # issue) — retry without FOK to allow the sell to go through at market.
+                        logger.info(
+                            f"[FOK-RETRY] Initial FOK killed — retrying without FOK "
+                            f"({sell_shares:.4f} shares @ {sell_price:.3f})"
+                        )
+                        resp = self._client.place_limit_order(
+                            token_id=token_id,
+                            side="SELL",
+                            price=sell_price,
+                            size=sell_shares,
+                            fok=False,
+                        )
 
         # Redeem fallback: if sell failed/skipped and orderbook is gone, always try redeem.
         # Win positions get paid out; loss positions get $0 but the stuck position is cleared.
