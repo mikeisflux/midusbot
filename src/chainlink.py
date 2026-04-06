@@ -21,8 +21,8 @@ from typing import Callable, Optional
 
 from loguru import logger
 
-# Chainlink BTC/USD AggregatorV3Interface on Polygon Mainnet (lowercase — checksum applied at runtime)
-_CHAINLINK_BTC_USD = "0xc907e116054ad103354f2d350fd2514433d57f6"
+# Chainlink BTC/USD AggregatorV3Interface on Polygon Mainnet
+_CHAINLINK_BTC_USD = "0xc907e116054ad103354f2d350fd2514433d57f6f"
 
 # Minimal ABI — only latestRoundData + decimals needed
 _AGGREGATOR_ABI = [
