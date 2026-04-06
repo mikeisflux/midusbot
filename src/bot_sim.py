@@ -85,13 +85,16 @@ class SimMixin:
                 if exit_price is None:
                     try:
                         ob = self._client.get_order_book(sim["token_id"])
-                        if ob:
-                            exit_price = ob.best_bid if ob.best_bid > 0.01 else ob.best_ask
+                        if ob and ob.mid > 0:
+                            # Use the live mid price — accurate regardless of resolution state
+                            exit_price = ob.mid
                     except Exception:
                         pass
                 if exit_price is None:
-                    noise      = random.gauss(0, 0.018)
-                    exit_price = max(0.01, min(0.99, sim["fair_value"] + noise))
+                    # True last resort: no orderbook data available. Use entry price
+                    # (breakeven) rather than fair_value which is always > entry and
+                    # would produce a synthetic win every time.
+                    exit_price = sim["entry"]
 
                 self._sim.close_position(sim["token_id"], exit_price)
 
