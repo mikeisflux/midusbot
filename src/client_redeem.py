@@ -20,7 +20,7 @@ _CTF_ADDRESS    = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 _USDC_ADDRESS   = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _ZERO_BYTES32   = b"\x00" * 32
 
-# Minimal ABI for redeemPositions(collateralToken, parentCollectionId, conditionId, indexSets)
+# Minimal ABI for redeemPositions + ERC1155 balanceOf
 _CTF_ABI = [
     {
         "inputs": [
@@ -33,12 +33,138 @@ _CTF_ABI = [
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function",
-    }
+    },
+    {
+        "inputs": [
+            {"name": "account", "type": "address"},
+            {"name": "id",      "type": "uint256"},
+        ],
+        "name": "balanceOf",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+# Free public Polygon RPC endpoints (tried in order, no auth required)
+_POLYGON_RPC_URLS = [
+    "https://polygon-rpc.com",
+    "https://rpc.ankr.com/polygon",
+    "https://polygon.llamarpc.com",
 ]
 
 
 class RedeemMixin:
     """Mixin providing position redemption and swap-based selling."""
+
+    def _normalize_condition_id(self, condition_id: str) -> str:
+        """
+        Ensure condition_id is a valid 32-byte hex string for on-chain calls.
+
+        Gamma API often returns numeric IDs like '1869924'; the CLOB and CTF
+        contract require a 64-char hex bytes32. If the supplied ID doesn't look
+        like bytes32 we try to resolve the real conditionId via the CLOB market
+        endpoint before falling back to the original value.
+        """
+        if not condition_id:
+            return condition_id
+        _stripped = condition_id.lstrip("0x")
+        _is_bytes32 = (
+            len(_stripped) == 64
+            and all(c in "0123456789abcdefABCDEF" for c in _stripped)
+        )
+        if _is_bytes32:
+            return condition_id  # already valid
+
+        logger.debug(
+            f"[REDEEM] condition_id '{condition_id}' is not bytes32 — "
+            "looking up real conditionId from CLOB"
+        )
+        try:
+            mkt = self.get_clob_market(condition_id)
+            if mkt:
+                for key in ("condition_id", "conditionId"):
+                    real_cid = mkt.get(key, "")
+                    if real_cid and len(real_cid.lstrip("0x")) == 64:
+                        logger.info(
+                            f"[REDEEM] Resolved '{condition_id}' → "
+                            f"{real_cid[:16]}… (real conditionId)"
+                        )
+                        return real_cid
+        except Exception as exc:
+            logger.debug(f"[REDEEM] CLOB lookup for condition_id failed: {exc}")
+
+        logger.warning(
+            f"[REDEEM] Could not resolve '{condition_id}' to bytes32 — "
+            "redeem may fail"
+        )
+        return condition_id
+
+    def get_ctf_token_balance(self, token_id: str) -> float:
+        """
+        Query the actual on-chain ERC1155 balance for a Polymarket position token.
+
+        Returns balance in shares (raw uint256 ÷ 1e6).
+        Returns -1.0 when the query fails (callers must handle gracefully).
+        """
+        account = getattr(config, "FUNDER_ADDRESS", "") or ""
+        if not account:
+            return -1.0
+
+        rpc_urls = []
+        _cfg_rpc = getattr(config, "POLYGON_RPC_URL", "") or ""
+        if _cfg_rpc:
+            rpc_urls.append(_cfg_rpc)
+        rpc_urls.extend(_POLYGON_RPC_URLS)
+
+        try:
+            from web3 import Web3
+            _tok_int: int
+            _stripped = token_id.lstrip("0x")
+            if all(c in "0123456789abcdefABCDEF" for c in _stripped):
+                _tok_int = int(_stripped, 16)
+            else:
+                _tok_int = int(token_id)
+        except (ValueError, ImportError) as exc:
+            logger.debug(f"get_ctf_token_balance: cannot parse token_id '{token_id}': {exc}")
+            return -1.0
+
+        for rpc_url in rpc_urls:
+            try:
+                from web3 import Web3
+                w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 8}))
+                try:
+                    from web3.middleware import geth_poa_middleware
+                    w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+                except ImportError:
+                    try:
+                        from web3.middleware import ExtraDataToPOAMiddleware
+                        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                    except ImportError:
+                        pass
+                ctf = w3.eth.contract(
+                    address=Web3.to_checksum_address(_CTF_ADDRESS),
+                    abi=_CTF_ABI,
+                )
+                raw_balance = ctf.functions.balanceOf(
+                    Web3.to_checksum_address(account),
+                    _tok_int,
+                ).call()
+                balance_shares = raw_balance / 1_000_000  # 6 decimals
+                logger.debug(
+                    f"[CTF-BAL] {token_id[:12]}… = {balance_shares:.6f} shares "
+                    f"(raw={raw_balance}) via {rpc_url}"
+                )
+                return balance_shares
+            except ImportError:
+                logger.debug("web3 not installed — cannot check CTF balance")
+                return -1.0
+            except Exception as exc:
+                logger.debug(f"get_ctf_token_balance via {rpc_url}: {exc}")
+                continue  # try next RPC
+
+        logger.debug(f"get_ctf_token_balance: all RPCs failed for {token_id[:12]}…")
+        return -1.0
 
     def redeem_position(
         self,
@@ -61,6 +187,9 @@ class RedeemMixin:
         if config.DRY_RUN:
             logger.info(f"[DRY-RUN] Would redeem condition {condition_id[:16]}…")
             return True
+
+        # Resolve condition_id to proper bytes32 before any on-chain call
+        condition_id = self._normalize_condition_id(condition_id)
 
         # Build amounts array
         if amounts is None:

@@ -60,12 +60,28 @@ class ExecutionMixin:
             else:
                 sell_price = pos.entry_price
             _is_updown = _detect_updown_market(pos.question) is not None
-            if not _ob_dead:
+
+            # ── Use actual on-chain balance to avoid "not enough balance" errors ──
+            # The bot tracks pos.shares from the order size, but the actual token
+            # balance may differ due to partial fills, fees, or precision.
+            sell_shares = pos.shares
+            if not config.DRY_RUN:
+                _actual = self._client.get_ctf_token_balance(token_id)
+                if _actual >= 0 and _actual < sell_shares:
+                    logger.info(
+                        f"[BALANCE-CHECK] tracked={sell_shares:.4f} "
+                        f"on-chain={_actual:.4f} — using actual balance"
+                    )
+                    sell_shares = _actual
+            # Floor to 6 decimal places to avoid sub-cent USDC precision errors
+            sell_shares = _math.floor(sell_shares * 1_000_000) / 1_000_000
+
+            if not _ob_dead and sell_shares > 0:
                 resp = self._client.place_limit_order(
                     token_id=token_id,
                     side="SELL",
                     price=sell_price,
-                    size=pos.shares,
+                    size=sell_shares,
                     fok=_is_updown,
                 )
 
@@ -73,17 +89,27 @@ class ExecutionMixin:
         # Win positions get paid out; loss positions get $0 but the stuck position is cleared.
         if resp is None and pos.market_id and _ob_dead:
             neg_risk = False
+            outcome_idx = 0 if pos.side == "YES" else 1
             try:
                 mkt = self._client.get_clob_market(pos.market_id)
                 if mkt:
                     neg_risk = bool(mkt.get("neg_risk", False))
             except Exception:
                 pass
+            # Fetch actual balance so redeem amounts array is accurate
+            _actual_bal = self._client.get_ctf_token_balance(token_id)
+            _redeem_size = _actual_bal if _actual_bal > 0 else sell_shares
             logger.info(
                 f"No orderbook for {pos.question[:40]} — attempting redeem "
-                f"(price={current_price:.3f if current_price else 'n/a'})"
+                f"(price={current_price:.3f if current_price else 'n/a'}, "
+                f"shares={_redeem_size:.4f})"
             )
-            redeemed = self._client.redeem_position(pos.market_id, neg_risk=neg_risk)
+            redeemed = self._client.redeem_position(
+                pos.market_id,
+                neg_risk=neg_risk,
+                size=_redeem_size,
+                outcome_index=outcome_idx,
+            )
             if redeemed:
                 resp = {"redeemed": True}
             else:
