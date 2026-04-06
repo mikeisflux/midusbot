@@ -124,7 +124,6 @@ class ClaudeNewsAnalyst:
                 logger.debug(f"[CLAUDE-NEWS] CryptoPanic failed: {exc}")
                 r = None
         else:
-            logger.debug("[CLAUDE-NEWS] CryptoPanic skipped — set CRYPTOPANIC_TOKEN in .env for this source")
             r = None
         if r is not None:
             try:
