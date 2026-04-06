@@ -1,14 +1,14 @@
 """
 Claude Opus AI/Momentum News Analyst — 35% portfolio bucket.
 
-Every 5 minutes (aligned to window boundaries) this module:
-  1. Fetches crypto news headlines from CryptoPanic (free public API, no auth)
-  2. Fetches current Polymarket UpDown market prices from the bot's market cache
-  3. Asks Claude to assign a probability for each market given the news context
-  4. When Claude's estimate diverges >AI_EDGE_THRESHOLD from market price, emits
-     a TradingSignal for the scanner to execute
+Every 5 minutes this module:
+  1. Fetches crypto news from 3 free sources (CryptoPanic, CoinDesk RSS, Decrypt RSS)
+  2. Pulls Binance funding rates (sentiment signal — negative = bearish pressure)
+  3. Pulls Binance Fear & Greed proxy (BTC 1h momentum direction)
+  4. Asks Claude Opus to assess 5-min UP/DOWN probability per asset
+  5. Signals when Claude's estimate diverges >AI_EDGE_THRESHOLD (12%) from market
+  6. Requires 2+ confirming signals (news + funding OR news + momentum) before trading
 
-This is the "AI-Powered Probability Arbitrage" leg of the aggressive portfolio.
 Win rate target: 65-75%. Allocation: MOMENTUM_BUDGET_PCT (35%) of wallet.
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import time
 import threading
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -24,38 +25,49 @@ from loguru import logger
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CLAUDE_MODEL        = "claude-sonnet-4-6"   # sonnet for speed; opus for depth
-AI_EDGE_THRESHOLD   = 0.12   # only signal when AI estimate > 12% from market
-NEWS_POLL_INTERVAL  = 300    # seconds — realign with 5-min window boundary
-MAX_NEWS_AGE_SECS   = 600    # ignore headlines older than 10 minutes
-CRYPTOPANIC_URL     = "https://cryptopanic.com/api/v1/posts/?public=true&currencies=BTC,ETH,SOL,XRP,BNB&filter=important&kind=news"
+CLAUDE_MODEL        = "claude-opus-4-6"    # Opus for depth; set to claude-sonnet-4-6 for speed
+AI_EDGE_THRESHOLD   = 0.12                 # minimum divergence from market to signal
+MIN_SIGNALS         = 2                    # require 2+ confirming sub-signals before trading
+NEWS_POLL_INTERVAL  = 300                  # align with 5-min window boundary
+MAX_NEWS_AGE_SECS   = 600                  # ignore headlines older than 10 minutes
+
+# Free public news sources — no API keys required
+_SOURCES = {
+    "cryptopanic": "https://cryptopanic.com/api/v1/posts/?public=true&currencies=BTC,ETH,SOL,XRP,BNB&filter=important&kind=news",
+    "coindesk_rss": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "decrypt_rss":  "https://decrypt.co/feed",
+}
+
+# Binance public endpoints for auxiliary signals
+_BINANCE_FUNDING   = "https://fapi.binance.com/fapi/v1/premiumIndex"
+_BINANCE_KLINE_1H  = "https://api.binance.com/api/v3/klines?symbol={sym}USDT&interval=1h&limit=2"
 
 
 @dataclass
 class AISignal:
-    """A trade signal emitted by the Claude news analyst."""
-    asset:          str          # BTC, ETH, SOL etc.
+    asset:          str
     direction:      str          # "YES" (up) | "NO" (down)
-    ai_probability: float        # Claude's estimate (0-1)
-    market_price:   float        # current YES mid
-    edge:           float        # abs(ai_prob - market_price)
-    headline:       str          # triggering headline
-    reasoning:      str          # Claude's explanation
+    ai_probability: float
+    market_price:   float
+    edge:           float
+    headline:       str
+    reasoning:      str
+    confirming:     int = 0      # number of confirming sub-signals (news, funding, momentum)
     ts:             float = field(default_factory=time.time)
 
 
 class ClaudeNewsAnalyst:
     """
-    Singleton that polls news and emits AI-driven trade signals.
-    Signals are queued in self.pending and consumed by the scanner.
+    Singleton that polls multi-source news + market signals every 5 minutes,
+    uses Claude Opus to assess probabilities, and emits trade signals.
     """
 
     def __init__(self):
-        self._api_key   = os.getenv("ANTHROPIC_API_KEY", "")
-        self._lock      = threading.Lock()
-        self.pending:   list[AISignal] = []   # consumed by scanner each loop
-        self._last_run  = 0.0
-        self._thread: Optional[threading.Thread] = None
+        self._api_key  = os.getenv("ANTHROPIC_API_KEY", "")
+        self._lock     = threading.Lock()
+        self.pending:  list[AISignal] = []
+        self._last_run = 0.0
+        self._thread:  Optional[threading.Thread] = None
 
     @property
     def available(self) -> bool:
@@ -64,167 +76,242 @@ class ClaudeNewsAnalyst:
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def maybe_run(self, market_prices: dict[str, float]) -> None:
-        """
-        Call from the main loop. Launches analysis in a background thread
-        if NEWS_POLL_INTERVAL has elapsed and Claude is available.
-        `market_prices`: dict of asset→YES_mid_price from current CLOB data.
-        """
         if not self.available:
             return
         now = time.time()
         if now - self._last_run < NEWS_POLL_INTERVAL:
             return
         if self._thread and self._thread.is_alive():
-            return  # previous run still going
-
+            return
         self._last_run = now
         self._thread = threading.Thread(
-            target=self._run,
-            args=(dict(market_prices),),
-            daemon=True,
-            name="claude-news",
+            target=self._run, args=(dict(market_prices),),
+            daemon=True, name="claude-news",
         )
         self._thread.start()
 
     def pop_signals(self) -> list[AISignal]:
-        """Return and clear all pending signals."""
         with self._lock:
             sigs = list(self.pending)
             self.pending.clear()
         return sigs
 
-    # ── Internal ──────────────────────────────────────────────────────────────
-
-    def _run(self, market_prices: dict[str, float]) -> None:
-        try:
-            headlines = self._fetch_news()
-            if not headlines:
-                logger.debug("[CLAUDE-NEWS] No fresh headlines — skipping analysis")
-                return
-            signals = self._analyze(headlines, market_prices)
-            with self._lock:
-                self.pending.extend(signals)
-            if signals:
-                logger.info(
-                    f"[CLAUDE-NEWS] {len(signals)} AI signal(s): "
-                    + ", ".join(f"{s.asset} {s.direction} edge={s.edge:.1%}" for s in signals)
-                )
-        except Exception as exc:
-            logger.debug(f"[CLAUDE-NEWS] Run failed: {exc}")
+    # ── Data fetching ──────────────────────────────────────────────────────────
 
     def _fetch_news(self) -> list[str]:
-        """Fetch important crypto headlines from CryptoPanic (no auth required)."""
+        """Fetch headlines from all configured sources, return deduplicated list."""
+        headlines: list[str] = []
+        cutoff = time.time() - MAX_NEWS_AGE_SECS
+
+        # Source 1: CryptoPanic JSON API
         try:
-            resp = requests.get(CRYPTOPANIC_URL, timeout=8)
-            resp.raise_for_status()
-            data = resp.json()
-            cutoff = time.time() - MAX_NEWS_AGE_SECS
-            headlines = []
-            for post in (data.get("results") or [])[:15]:
-                created = post.get("created_at", "")
-                # Quick ISO parse — CryptoPanic returns "2026-04-06T01:30:00Z"
+            r = requests.get(_SOURCES["cryptopanic"], timeout=8)
+            r.raise_for_status()
+            for post in (r.json().get("results") or [])[:15]:
                 try:
                     import datetime
                     ts = datetime.datetime.fromisoformat(
-                        created.replace("Z", "+00:00")
+                        post.get("created_at", "").replace("Z", "+00:00")
                     ).timestamp()
                     if ts < cutoff:
                         continue
                 except Exception:
                     pass
-                title = post.get("title", "").strip()
+                title = (post.get("title") or "").strip()
                 if title:
                     headlines.append(title)
-            return headlines
         except Exception as exc:
-            logger.debug(f"[CLAUDE-NEWS] News fetch failed: {exc}")
-            return []
+            logger.debug(f"[CLAUDE-NEWS] CryptoPanic failed: {exc}")
+
+        # Sources 2 & 3: RSS feeds (CoinDesk, Decrypt)
+        for src_name, url in [("coindesk_rss", _SOURCES["coindesk_rss"]),
+                               ("decrypt_rss",  _SOURCES["decrypt_rss"])]:
+            try:
+                r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+                r.raise_for_status()
+                root = ET.fromstring(r.text)
+                for item in root.iter("item"):
+                    title = (item.findtext("title") or "").strip()
+                    if title and title not in headlines:
+                        headlines.append(title)
+                    if len(headlines) >= 20:
+                        break
+            except Exception as exc:
+                logger.debug(f"[CLAUDE-NEWS] {src_name} RSS failed: {exc}")
+
+        return headlines[:20]
+
+    def _fetch_funding_rates(self) -> dict[str, float]:
+        """
+        Binance perpetual funding rates. Negative = market is net short (bearish).
+        Returns dict of symbol → rate, e.g. {"BTC": -0.0001, "ETH": 0.0002}.
+        """
+        rates: dict[str, float] = {}
+        _SYMBOLS = {"BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL",
+                    "XRPUSDT": "XRP", "BNBUSDT": "BNB"}
+        try:
+            r = requests.get(_BINANCE_FUNDING, timeout=6)
+            r.raise_for_status()
+            for item in r.json():
+                sym = item.get("symbol", "")
+                asset = _SYMBOLS.get(sym)
+                if asset:
+                    rates[asset] = float(item.get("lastFundingRate", 0))
+        except Exception as exc:
+            logger.debug(f"[CLAUDE-NEWS] Funding rates failed: {exc}")
+        return rates
+
+    def _fetch_1h_momentum(self, asset: str) -> Optional[float]:
+        """1-hour return for an asset from Binance. Positive = bullish."""
+        sym = asset if asset != "BNB" else "BNB"
+        try:
+            r = requests.get(
+                _BINANCE_KLINE_1H.format(sym=sym), timeout=5
+            )
+            r.raise_for_status()
+            candles = r.json()
+            if len(candles) >= 2:
+                prev_close = float(candles[0][4])
+                curr_close = float(candles[1][4])
+                return (curr_close - prev_close) / prev_close
+        except Exception:
+            pass
+        return None
+
+    # ── Analysis ───────────────────────────────────────────────────────────────
+
+    def _run(self, market_prices: dict[str, float]) -> None:
+        try:
+            headlines    = self._fetch_news()
+            funding      = self._fetch_funding_rates()
+
+            assets = list(market_prices.keys())
+            momentum_1h  = {a: self._fetch_1h_momentum(a) for a in assets}
+
+            if not headlines:
+                logger.debug("[CLAUDE-NEWS] No fresh headlines — skipping")
+                return
+
+            signals = self._analyze(headlines, market_prices, funding, momentum_1h)
+            with self._lock:
+                self.pending.extend(signals)
+            if signals:
+                logger.info(
+                    f"[CLAUDE-NEWS] {len(signals)} AI signal(s): "
+                    + ", ".join(
+                        f"{s.asset} {s.direction} edge={s.edge:.1%} ({s.confirming} confirmations)"
+                        for s in signals
+                    )
+                )
+        except Exception as exc:
+            logger.debug(f"[CLAUDE-NEWS] Run error: {exc}")
 
     def _analyze(
         self,
-        headlines: list[str],
+        headlines:   list[str],
         market_prices: dict[str, float],
+        funding:     dict[str, float],
+        momentum_1h: dict[str, Optional[float]],
     ) -> list[AISignal]:
-        """Send headlines + prices to Claude, parse probability estimates."""
         import anthropic
 
-        assets_info = "\n".join(
-            f"  {asset}: YES currently trading at {price:.3f} (market implies {price:.1%} prob UP)"
-            for asset, price in sorted(market_prices.items())
-            if price > 0
-        )
-        news_text = "\n".join(f"  - {h}" for h in headlines)
+        assets_block = []
+        for asset, mid in sorted(market_prices.items()):
+            if mid <= 0:
+                continue
+            fr   = funding.get(asset)
+            mom  = momentum_1h.get(asset)
+            fr_str  = f"funding={fr:+.4%}" if fr is not None else "funding=n/a"
+            mom_str = f"1h_return={mom:+.3%}" if mom is not None else "1h=n/a"
+            assets_block.append(f"  {asset}: YES@{mid:.3f} ({fr_str}, {mom_str})")
 
-        prompt = f"""You are a crypto prediction market analyst. Evaluate the following breaking news headlines and assess the probability that each cryptocurrency will be HIGHER in price in the next 5 minutes.
+        news_block = "\n".join(f"  - {h}" for h in headlines[:15])
 
-CURRENT POLYMARKET PRICES (YES = will be higher in 5 min):
-{assets_info}
+        prompt = f"""You are a crypto momentum analyst. Given the news and market data below, assess the probability each crypto will be HIGHER in price in the next 5 minutes on Polymarket.
 
-RECENT HEADLINES (last 10 minutes):
-{news_text}
+MARKET DATA (YES = higher in 5 min):
+{chr(10).join(assets_block)}
 
-For each asset (BTC, ETH, SOL, XRP, BNB), provide:
-1. Your probability estimate (0.00-1.00) that price will be UP in 5 minutes
-2. One-sentence reasoning
+RECENT HEADLINES (<10 min old):
+{news_block}
 
-Respond in this EXACT format (one line per asset):
-BTC: 0.XX | reason
-ETH: 0.XX | reason
-SOL: 0.XX | reason
-XRP: 0.XX | reason
-BNB: 0.XX | reason
-
-Only include assets where you have high conviction (>15% edge vs current price).
-If no strong signal, reply: NO_SIGNAL"""
+INSTRUCTIONS:
+- Consider: news sentiment, funding rate direction, 1h momentum, current market pricing
+- Negative funding = short pressure = bearish bias
+- Positive 1h return = bullish momentum
+- Only signal when you have HIGH conviction AND market price is significantly wrong
+- Format exactly: ASSET: 0.XX | one-sentence reason
+- If no strong edge on an asset, skip it entirely
+- If nothing is tradeable, reply: NO_SIGNAL"""
 
         try:
-            client  = anthropic.Anthropic(api_key=self._api_key)
-            message = client.messages.create(
+            client = anthropic.Anthropic(api_key=self._api_key)
+            msg = client.messages.create(
                 model=CLAUDE_MODEL,
-                max_tokens=300,
+                max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )
-            response = message.content[0].text.strip()
+            response = msg.content[0].text.strip()
         except Exception as exc:
             logger.debug(f"[CLAUDE-NEWS] Anthropic API error: {exc}")
             return []
 
         if "NO_SIGNAL" in response:
-            logger.debug("[CLAUDE-NEWS] Claude: no strong signals this cycle")
+            logger.debug("[CLAUDE-NEWS] Claude: no signals this cycle")
             return []
 
-        signals = []
+        signals: list[AISignal] = []
         for line in response.splitlines():
             line = line.strip()
-            if not line or ":" not in line:
+            if not line or ":" not in line or "|" not in line:
                 continue
             try:
-                parts = line.split(":", 1)
-                asset = parts[0].strip().upper()
-                rest  = parts[1].strip()
+                asset_part, rest = line.split(":", 1)
                 prob_str, reasoning = rest.split("|", 1)
-                ai_prob = float(prob_str.strip())
+                asset     = asset_part.strip().upper()
+                ai_prob   = float(prob_str.strip())
                 reasoning = reasoning.strip()
             except (ValueError, IndexError):
                 continue
 
-            market_mid = market_prices.get(asset, 0.0)
-            if market_mid <= 0:
+            mid = market_prices.get(asset, 0.0)
+            if mid <= 0:
                 continue
 
-            edge = abs(ai_prob - market_mid)
+            edge = abs(ai_prob - mid)
             if edge < AI_EDGE_THRESHOLD:
                 continue
 
-            direction = "YES" if ai_prob > market_mid else "NO"
+            direction = "YES" if ai_prob > mid else "NO"
+
+            # Count confirming sub-signals
+            confirming = 1  # Claude itself = 1
+            fr  = funding.get(asset)
+            mom = momentum_1h.get(asset)
+
+            if direction == "YES":
+                if fr is not None and fr < -0.0001:
+                    confirming += 1   # negative funding = short pressure = up squeeze potential
+                if mom is not None and mom > 0.001:
+                    confirming += 1   # positive 1h momentum
+            else:  # "NO" = DOWN
+                if fr is not None and fr > 0.0001:
+                    confirming += 1   # positive funding = over-levered longs = down pressure
+                if mom is not None and mom < -0.001:
+                    confirming += 1   # negative 1h momentum
+
+            if confirming < MIN_SIGNALS:
+                logger.debug(
+                    f"[CLAUDE-NEWS] {asset} {direction} skipped — "
+                    f"only {confirming}/{MIN_SIGNALS} confirming signals"
+                )
+                continue
+
             signals.append(AISignal(
-                asset=asset,
-                direction=direction,
-                ai_probability=ai_prob,
-                market_price=market_mid,
-                edge=edge,
-                headline=headlines[0] if headlines else "",
-                reasoning=reasoning,
+                asset=asset, direction=direction,
+                ai_probability=ai_prob, market_price=mid,
+                edge=edge, headline=headlines[0] if headlines else "",
+                reasoning=reasoning, confirming=confirming,
             ))
 
         return signals

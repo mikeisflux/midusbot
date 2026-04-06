@@ -38,6 +38,7 @@ from src.discord_bot import commander
 from src.positions import PositionsMixin
 from src.bot_sim import SimMixin
 from src.scanner import ScannerMixin
+from src.market_maker import MarketMakerMixin
 import config
 import src.webui as webui
 
@@ -160,7 +161,7 @@ class OpenPosition:
     strategy: str = "momentum"    # "momentum" | "chainlink" | "arb" | "mm"
 
 
-class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
+class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
     def __init__(self, *, dashboard_enabled: bool = True) -> None:
         self._learner       = AdaptiveLearner(name="main")
         self._client        = PolymarketClient()
@@ -172,6 +173,7 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin):
         # position closes. Without this, streaks freeze when the bot isn't trading.
         import src.session_tracker as _st
         _st.register_window_close_callback(self._trend_tracker.auto_record_direction)
+        self._mm_orders_init()   # market maker order tracking
         self._positions: dict[str, OpenPosition] = {}
         self._risk          = RiskManager(params=self._learner.risk_params, positions=self._positions)
         self._dashboard     = Dashboard(enabled=dashboard_enabled)
