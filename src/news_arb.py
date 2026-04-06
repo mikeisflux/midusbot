@@ -25,13 +25,14 @@ import requests
 from loguru import logger
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CLAUDE_MODEL          = "claude-opus-4-6"
+HAIKU_MODEL           = "claude-haiku-4-5-20251001"  # Stage 1: cheap semantic screening
+OPUS_MODEL            = "claude-opus-4-6"            # Stage 2: probability assessment
 NEWS_ARB_EDGE         = 0.12   # minimum probability divergence to fire signal
 MIN_LIQUIDITY         = 300    # minimum market liquidity USDC
 POLL_INTERVAL         = 60     # poll RSS every 60 seconds
 MARKET_CACHE_TTL      = 300    # refresh market list every 5 min
 MAX_ARTICLE_AGE_SECS  = 3600   # ignore articles older than 1 hour
-MAX_MARKETS_PER_QUERY = 8      # max markets sent to Claude per article
+HAIKU_BATCH_SIZE      = 25     # markets per Haiku screening call
 MAX_ARTICLES_PER_POLL = 5      # max new articles processed per poll cycle
 
 # ── RSS Feed Sources ─────────────────────────────────────────────────────────
@@ -63,16 +64,6 @@ RSS_SOURCES = [
     # WSJ via Google News
     ("WSJ",               _GN + "site%3Awsj.com"),
 ]
-
-_STOPWORDS = {
-    "will", "that", "this", "with", "from", "have", "been", "they", "their",
-    "what", "when", "where", "which", "would", "could", "should", "about",
-    "after", "before", "during", "while", "says", "said", "more", "than",
-    "into", "over", "also", "year", "years", "some", "time", "make", "made",
-    "both", "each", "just", "does", "doing", "were", "only", "then", "them",
-    "these", "those", "such", "much", "very", "well", "back", "even", "here",
-    "there", "being", "going", "getting", "having", "looking", "coming",
-}
 
 
 @dataclass
@@ -235,135 +226,205 @@ class NewsArbStrategy:
             logger.debug(f"[NEWS-ARB] Market fetch error: {exc}")
         return self._mkt_cache
 
-    # ── Keyword pre-filter ─────────────────────────────────────────────────────
+    # ── Stage 1: Haiku semantic screening ─────────────────────────────────────
+    # Haiku screens ALL markets for genuine relevance — no keyword shortcuts.
+    # Runs in batches of HAIKU_BATCH_SIZE. Cost: ~$0.003 per article screened.
 
-    @staticmethod
-    def _keywords(text: str) -> list[str]:
-        words = re.findall(r"\b[A-Za-z]{4,}\b", text.lower())
-        return [w for w in words if w not in _STOPWORDS]
+    def _haiku_screen(self, article: _Article, markets: list, client) -> list:
+        """
+        Ask Claude Haiku whether each market is CAUSALLY relevant to the article.
+        Returns only markets where Haiku is confident the news directly shifts odds.
 
-    def _match_markets(self, article: _Article, markets: list) -> list:
-        kws = self._keywords(article.title + " " + article.desc[:200])
-        if len(kws) < 2:
+        Haiku is strict: entity overlap alone is rejected. 'Trump signs bill' does
+        NOT match 'Will Iran attack Israel?' unless the bill directly concerns Iran.
+        """
+        relevant: list = []
+
+        for i in range(0, len(markets), HAIKU_BATCH_SIZE):
+            batch = markets[i : i + HAIKU_BATCH_SIZE]
+            mkt_block = "\n".join(
+                f"  {m.id[:16]} | {m.question[:90]}"
+                for m in batch
+            )
+            prompt = (
+                "A breaking news article was just published. Your job: identify which "
+                "Polymarket prediction markets (if any) this article is CAUSALLY and "
+                "DIRECTLY relevant to — meaning the news genuinely changes the probability "
+                "of the market's outcome.\n\n"
+                f"HEADLINE: {article.title}\n"
+                f"SOURCE: {article.source}\n"
+                f"DETAILS: {article.desc[:300]}\n\n"
+                "MARKETS TO SCREEN (ID | question):\n"
+                f"{mkt_block}\n\n"
+                "STRICT RULES — a market is relevant ONLY if:\n"
+                "  1. The article is about the EXACT same subject as the market question\n"
+                "  2. The news outcome would DIRECTLY change the resolution probability\n"
+                "  3. There is a clear causal chain, not just shared keywords\n\n"
+                "COUNTER-EXAMPLES (do NOT match these):\n"
+                "  - 'Trump signs budget bill' ≠ 'Will Iran attack Israel?' (no causal link)\n"
+                "  - 'Bitcoin price rises' ≠ 'Will Ethereum hit $5k?' (different asset)\n"
+                "  - 'Fed official speaks' ≠ 'Will Fed cut rates?' (unless it's a rate decision)\n\n"
+                "Reply with ONLY the relevant market IDs, one per line. "
+                "If none are relevant, reply: NONE"
+            )
+
+            try:
+                msg = client.messages.create(
+                    model=HAIKU_MODEL, max_tokens=200,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                response = msg.content[0].text.strip()
+            except Exception as exc:
+                logger.debug(f"[NEWS-ARB] Haiku screen error: {exc}")
+                continue
+
+            if response.strip().upper() == "NONE" or not response.strip():
+                continue
+
+            for line in response.splitlines():
+                prefix = line.strip().split()[0] if line.strip() else ""
+                if not prefix:
+                    continue
+                match = next(
+                    (m for m in batch
+                     if m.id.startswith(prefix) or prefix.startswith(m.id[:8])),
+                    None,
+                )
+                if match and match not in relevant:
+                    relevant.append(match)
+
+        if relevant:
+            logger.info(
+                f"[NEWS-ARB] Haiku screened {len(markets)} markets → "
+                f"{len(relevant)} causally relevant for '{article.title[:55]}'"
+            )
+        return relevant
+
+    # ── Stage 2: Opus probability assessment ───────────────────────────────────
+    # Only runs on Haiku-confirmed relevant markets. Gives precise probability.
+
+    def _opus_assess(
+        self,
+        article: _Article,
+        markets: list,
+        client,
+    ) -> list[NewsArbSignal]:
+        """Ask Claude Opus for precise probability estimates on confirmed-relevant markets."""
+        mkt_block = "\n".join(
+            f"  {m.id[:16]} | YES@{m.yes_price:.3f} | {m.question[:80]}"
+            for m in markets
+        )
+        prompt = (
+            "You are a Polymarket probability analyst. The following breaking news has just "
+            "been confirmed as directly relevant to these markets:\n\n"
+            f"HEADLINE: {article.title}\n"
+            f"SOURCE: {article.source}\n"
+            f"DETAILS: {article.desc[:400]}\n\n"
+            "MARKETS (ID | current YES price | question):\n"
+            f"{mkt_block}\n\n"
+            "For each market, give your updated YES probability given this news.\n"
+            "Format exactly: ID_PREFIX | NEW_YES_PROB | one-sentence reasoning\n\n"
+            "Rules:\n"
+            "- NEW_YES_PROB must be 0.00–1.00\n"
+            "- Only output a line if the news moves the probability by >12 percentage points\n"
+            "- Account for: how definitive the news is, source reliability, reversibility\n"
+            "- If no market crosses the 12-point threshold, reply: NO_SIGNAL"
+        )
+
+        try:
+            msg = client.messages.create(
+                model=OPUS_MODEL, max_tokens=400,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            response = msg.content[0].text.strip()
+        except Exception as exc:
+            logger.debug(f"[NEWS-ARB] Opus assess error: {exc}")
             return []
-        scored = []
-        for m in markets:
-            q_lower = m.question.lower()
-            score   = sum(1 for kw in kws if kw in q_lower)
-            if score >= 2:
-                scored.append((score, m))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [m for _, m in scored[:MAX_MARKETS_PER_QUERY]]
 
-    # ── Claude analysis ────────────────────────────────────────────────────────
+        if "NO_SIGNAL" in response:
+            logger.debug(f"[NEWS-ARB] Opus: insufficient edge on '{article.title[:50]}'")
+            return []
+
+        signals: list[NewsArbSignal] = []
+        for line in response.splitlines():
+            line = line.strip()
+            if not line or line.count("|") < 2:
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            try:
+                id_prefix = parts[0]
+                ai_prob   = float(parts[1])
+                reasoning = parts[2]
+            except (ValueError, IndexError):
+                continue
+            if not (0.0 < ai_prob < 1.0):
+                continue
+
+            market = next(
+                (m for m in markets
+                 if m.id.startswith(id_prefix) or id_prefix.startswith(m.id[:8])),
+                None,
+            )
+            if not market:
+                continue
+
+            mid  = market.yes_price
+            edge = abs(ai_prob - mid)
+            if edge < NEWS_ARB_EDGE:
+                continue
+
+            direction = "YES" if ai_prob > mid else "NO"
+            token_id  = (
+                market.yes_token.token_id if direction == "YES"
+                else market.no_token.token_id
+            )
+            hrs = _hours_to_close(market)
+            if hrs <= 0:
+                continue
+
+            self.last_headline = article.title
+            logger.info(
+                f"[NEWS-ARB] SIGNAL {direction} Opus={ai_prob:.2f} mkt={mid:.2f} "
+                f"edge={edge:.1%} '{market.question[:55]}' | {reasoning[:60]}"
+            )
+            signals.append(NewsArbSignal(
+                market_id=market.id,
+                question=market.question,
+                token_id=token_id,
+                side=direction,
+                ai_probability=ai_prob,
+                market_price=mid,
+                edge=edge,
+                headline=article.title,
+                reasoning=reasoning,
+                source=article.source,
+                hours_to_close=hrs,
+            ))
+        return signals
+
+    # ── Orchestrator ───────────────────────────────────────────────────────────
 
     def _analyze(self, articles: list[_Article], markets: list) -> list[NewsArbSignal]:
+        """
+        Two-stage pipeline:
+          1. Haiku screens all markets for genuine causal relevance (cheap, fast)
+          2. Opus assesses probability only on confirmed matches (accurate, expensive)
+        """
         import anthropic
         api_client = anthropic.Anthropic(api_key=self._api_key)
         signals: list[NewsArbSignal] = []
 
         for art in articles[:MAX_ARTICLES_PER_POLL]:
-            matched = self._match_markets(art, markets)
-            if not matched:
+            logger.debug(f"[NEWS-ARB] Screening: '{art.title[:65]}' ({art.source})")
+
+            # Stage 1 — Haiku semantic screening across all markets
+            confirmed = self._haiku_screen(art, markets, api_client)
+            if not confirmed:
                 continue
 
-            logger.info(
-                f"[NEWS-ARB] '{art.title[:65]}' ({art.source}) "
-                f"→ {len(matched)} keyword-matched market(s)"
-            )
-
-            mkt_block = "\n".join(
-                f"  {m.id[:16]} | YES@{m.yes_price:.3f} | {m.question[:80]}"
-                for m in matched
-            )
-
-            prompt = (
-                "You are a Polymarket probability analyst. Breaking news just published:\n\n"
-                f"HEADLINE: {art.title}\n"
-                f"SOURCE: {art.source}\n"
-                f"DETAILS: {art.desc[:350]}\n\n"
-                "RELATED POLYMARKET MARKETS (16-char ID prefix | current YES price | question):\n"
-                f"{mkt_block}\n\n"
-                "TASK: For each market where this news SIGNIFICANTLY changes the probability, respond:\n"
-                "  ID_PREFIX | YOUR_YES_PROBABILITY | one-sentence reason\n\n"
-                "Rules:\n"
-                "- Only include markets where news shifts probability by >12 percentage points\n"
-                "- YOUR_YES_PROBABILITY: your estimate of true YES probability (0.00–1.00)\n"
-                "- Be conservative — only signal when news is DIRECTLY, UNAMBIGUOUSLY relevant\n"
-                "- Breaking news moving fast: weight recency heavily\n"
-                "- If nothing is significantly affected, reply exactly: NO_SIGNAL"
-            )
-
-            try:
-                msg = api_client.messages.create(
-                    model=CLAUDE_MODEL, max_tokens=500,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                response = msg.content[0].text.strip()
-            except Exception as exc:
-                logger.debug(f"[NEWS-ARB] Claude API error: {exc}")
-                continue
-
-            if "NO_SIGNAL" in response:
-                logger.debug(f"[NEWS-ARB] No edge on: '{art.title[:55]}'")
-                continue
-
-            for line in response.splitlines():
-                line = line.strip()
-                if not line or line.count("|") < 2:
-                    continue
-                parts = [p.strip() for p in line.split("|")]
-                try:
-                    id_prefix = parts[0]
-                    ai_prob   = float(parts[1])
-                    reasoning = parts[2]
-                except (ValueError, IndexError):
-                    continue
-                if not (0.0 < ai_prob < 1.0):
-                    continue
-
-                market = next(
-                    (m for m in matched
-                     if m.id.startswith(id_prefix) or id_prefix.startswith(m.id[:8])),
-                    None,
-                )
-                if not market:
-                    continue
-
-                mid  = market.yes_price
-                edge = abs(ai_prob - mid)
-                if edge < NEWS_ARB_EDGE:
-                    continue
-
-                direction = "YES" if ai_prob > mid else "NO"
-                token_id  = (
-                    market.yes_token.token_id if direction == "YES"
-                    else market.no_token.token_id
-                )
-
-                hrs = _hours_to_close(market)
-                if hrs <= 0:
-                    continue  # already expired
-
-                self.last_headline = art.title
-                logger.info(
-                    f"[NEWS-ARB] SIGNAL {direction} "
-                    f"Claude={ai_prob:.2f} mkt={mid:.2f} edge={edge:.1%} "
-                    f"'{market.question[:55]}' | {reasoning[:60]}"
-                )
-                signals.append(NewsArbSignal(
-                    market_id=market.id,
-                    question=market.question,
-                    token_id=token_id,
-                    side=direction,
-                    ai_probability=ai_prob,
-                    market_price=mid,
-                    edge=edge,
-                    headline=art.title,
-                    reasoning=reasoning,
-                    source=art.source,
-                    hours_to_close=hrs,
-                ))
+            # Stage 2 — Opus probability assessment on confirmed markets only
+            art_signals = self._opus_assess(art, confirmed, api_client)
+            signals.extend(art_signals)
 
         return signals
 
