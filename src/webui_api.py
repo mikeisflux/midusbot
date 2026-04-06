@@ -298,7 +298,9 @@ def register(app, get_state, get_learner, get_close_fn):
         analyst_history = _load_json("data/analyst_history.json") or []
 
         def _wl(journal):
-            closed = [r for r in journal if r.get("closed")]
+            all_closed  = [r for r in journal if r.get("closed")]
+            live_closed = [r for r in all_closed if not r.get("dry_run", False)]
+            closed = live_closed if live_closed else all_closed
             wins   = [r for r in closed  if r.get("pnl_usdc", 0) > 0]
             losses = [r for r in closed  if r.get("pnl_usdc", 0) <= 0]
             total_pnl = sum(r.get("pnl_usdc", 0) for r in closed)
