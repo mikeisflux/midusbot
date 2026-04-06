@@ -261,6 +261,10 @@ INSTRUCTIONS:
             return []
 
         signals: list[AISignal] = []
+        _valid_lines = [l for l in response.splitlines()
+                        if l.strip() and ":" in l and "|" in l]
+        if _valid_lines:
+            self._send_news_webhook(headlines, _valid_lines, market_prices)
         for line in response.splitlines():
             line = line.strip()
             if not line or ":" not in line or "|" not in line:
@@ -315,6 +319,42 @@ INSTRUCTIONS:
             ))
 
         return signals
+
+    def _send_news_webhook(
+        self,
+        headlines: list[str],
+        signal_lines: list[str],
+        market_prices: dict[str, float],
+    ) -> None:
+        """Fire a Discord/Telegram alert before AI signals are executed."""
+        import os as _os, requests as _rq
+
+        msg_lines = ["**[CLAUDE-NEWS] AI signals detected**"]
+        msg_lines.append(f"Top headline: _{headlines[0][:120] if headlines else 'n/a'}_")
+        msg_lines.append("")
+        for line in signal_lines[:5]:
+            msg_lines.append(f"• `{line.strip()[:100]}`")
+
+        text = "\n".join(msg_lines)
+
+        discord_url = _os.getenv("DISCORD_WEBHOOK_URL", "")
+        if discord_url:
+            try:
+                _rq.post(discord_url, json={"content": text}, timeout=5)
+            except Exception as exc:
+                logger.debug(f"[CLAUDE-NEWS] Discord webhook failed: {exc}")
+
+        tg_token = _os.getenv("TELEGRAM_BOT_TOKEN", "")
+        tg_chat  = _os.getenv("TELEGRAM_CHAT_ID", "")
+        if tg_token and tg_chat:
+            try:
+                _rq.post(
+                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                    json={"chat_id": tg_chat, "text": text, "parse_mode": "Markdown"},
+                    timeout=5,
+                )
+            except Exception as exc:
+                logger.debug(f"[CLAUDE-NEWS] Telegram webhook failed: {exc}")
 
 
 # Module-level singleton

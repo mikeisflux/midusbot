@@ -176,6 +176,7 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
         self._mm_orders_init()   # market maker order tracking
         self._positions: dict[str, OpenPosition] = {}
         self._risk          = RiskManager(params=self._learner.risk_params, positions=self._positions)
+        self._risk._learner_ref = self._learner   # MC sizing reads journal via this ref
         self._dashboard     = Dashboard(enabled=dashboard_enabled)
         self._dash_state    = DashboardState()
 

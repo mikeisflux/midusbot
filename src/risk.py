@@ -125,10 +125,22 @@ class RiskManager:
 
         # UpDown HIGH-confidence signals allow larger positions to mirror
         # reference traders (200+ shares). Cap scales with confidence.
-        # Bankroll-proportional: effective max = 12% of known wallet balance,
+        # Bankroll-proportional: effective max = MC-optimal fraction × wallet,
         # but never exceeds config.MAX_POSITION_USDC (protects during drawdown).
+        _wallet_pct = config.POSITION_WALLET_PCT
+        if getattr(config, "MC_SIZING_ENABLED", True) and self._wallet_balance > 0:
+            try:
+                from src.monte_carlo import fraction_from_journal
+                _learner = getattr(self, "_learner_ref", None)
+                if _learner and hasattr(_learner, "_journal"):
+                    _mc_pct = fraction_from_journal(_learner._journal, self._wallet_balance)
+                    if 0.01 <= _mc_pct <= 0.25:
+                        _wallet_pct = _mc_pct
+            except Exception:
+                pass  # fall back to config default
+
         effective_max = (
-            min(self._wallet_balance * config.POSITION_WALLET_PCT, config.MAX_POSITION_USDC)
+            min(self._wallet_balance * _wallet_pct, config.MAX_POSITION_USDC)
             if self._wallet_balance > 0
             else config.MAX_POSITION_USDC
         )

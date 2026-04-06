@@ -96,15 +96,21 @@ class ChainlinkMonitor:
             logger.info("[CHAINLINK] web3 not installed — oracle monitor disabled")
             return False
 
-        # Reuse the same RPC list from client_redeem
+        # Build prioritized RPC list: dedicated endpoint first, then fallbacks
+        import config as _cfg
+        _POLYGON_RPC_URLS: list[str] = []
+        if _cfg.POLYGON_RPC_PRIMARY:
+            _POLYGON_RPC_URLS.append(_cfg.POLYGON_RPC_PRIMARY)
+        if _cfg.POLYGON_RPC_SECONDARY:
+            _POLYGON_RPC_URLS.append(_cfg.POLYGON_RPC_SECONDARY)
+        # Append fallbacks from client_redeem if available, else use defaults
         try:
-            from src.client_redeem import _POLYGON_RPC_URLS
+            from src.client_redeem import _POLYGON_RPC_URLS as _rpc_fallbacks
+            for _u in _rpc_fallbacks:
+                if _u not in _POLYGON_RPC_URLS:
+                    _POLYGON_RPC_URLS.append(_u)
         except ImportError:
-            _POLYGON_RPC_URLS = [
-                "https://polygon-rpc.com",
-                "https://rpc.ankr.com/polygon",
-                "https://polygon.llamarpc.com",
-            ]
+            _POLYGON_RPC_URLS.extend(_cfg.POLYGON_RPC_FALLBACKS)
 
         for rpc_url in _POLYGON_RPC_URLS:
             try:

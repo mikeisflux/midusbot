@@ -17,6 +17,80 @@ class SimMixin:
     _SIM_LOSS_RESET_PCT: float = 0.20
     _SIM_MIN_TRADEABLE:  float = 2.50
 
+    def _open_sim_position_raw(
+        self, *,
+        token_id: str,
+        market_id: str,
+        question: str,
+        side: str,
+        entry: float,
+        shares: float,
+        confidence: str = "HIGH",
+        hours_to_close: float = 5 / 60,
+        strategy: str = "arb",
+    ) -> None:
+        """
+        Simulate a position fill for strategies without a TradeSignal object
+        (dual-arb, corr-arb, market-maker DRY_RUN paths).
+
+        Calls sim.open_position(), adds to self._positions for monitoring,
+        and queues close via _sim_queue so _process_sim_queue handles resolution.
+        """
+        from src.bot import OpenPosition
+        import time as _time
+
+        ok = self._sim.open_position(
+            token_id=token_id,
+            market_id=market_id,
+            question=question,
+            side=side,
+            entry_price=entry,
+            shares=shares,
+        )
+        if not ok:
+            return  # insufficient balance or already open
+
+        cost = entry * shares
+        now  = _time.time()
+
+        if token_id not in self._positions:
+            self._positions[token_id] = OpenPosition(
+                market_id=market_id,
+                question=question,
+                token_id=token_id,
+                side=side,
+                shares=shares,
+                entry_price=entry,
+                cost_usdc=cost,
+                entry_time=now,
+                strategy=strategy,
+                confidence=confidence,
+            )
+            self._save_positions()
+            self._risk.record_open(cost_usdc=cost)
+
+        close_after = now + hours_to_close * 3600 + 90
+        self._sim_queue.append({
+            "question":        question,
+            "market_id":       market_id,
+            "token_id":        token_id,
+            "side":            side,
+            "entry":           entry,
+            "fair_value":      entry,
+            "shares":          shares,
+            "confidence":      confidence,
+            "close_after":     close_after,
+            "strategy":        strategy,
+            "momentum_signal": 0.0,
+            "imbalance_signal":0.0,
+            "rel_strength":    0.0,
+        })
+        self._save_sim_queue()
+        logger.info(
+            f"[SIM] {strategy.upper()} queued: {side} {shares:.0f}@{entry:.3f} "
+            f"cost=${cost:.2f}  {question[:45]}"
+        )
+
     def _queue_sim(self, sig, entry: float, shares: float) -> None:
         now = time.time()
         if sig.hours_to_close is not None and 0 < sig.hours_to_close <= 24:

@@ -25,6 +25,19 @@ CHAIN_ID: int = int(_env("CHAIN_ID", "137"))
 CLOB_HOST: str = "https://clob.polymarket.com"
 GAMMA_HOST: str = "https://gamma-api.polymarket.com"
 
+# Polygon RPC endpoints (in priority order).
+# Override POLYGON_RPC_PRIMARY in .env with your Alchemy/Infura endpoint for
+# lower latency and higher rate limits. Falls back to public RPCs automatically.
+# Example: POLYGON_RPC_PRIMARY=https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY
+POLYGON_RPC_PRIMARY:   str = os.getenv("POLYGON_RPC_PRIMARY",   "")
+POLYGON_RPC_SECONDARY: str = os.getenv("POLYGON_RPC_SECONDARY", "")
+# Public fallback RPCs (no key required, higher latency)
+POLYGON_RPC_FALLBACKS: list = [
+    "https://polygon-rpc.com",
+    "https://rpc-mainnet.matic.quiknode.pro",
+    "https://rpc-mainnet.maticvigil.com",
+]
+
 # ── Safety ───────────────────────────────────────────────────────────────────
 DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() != "false"
 # Set ANALYST_ENABLED=true to run the LLM analyst (disabled by default).
@@ -141,4 +154,15 @@ POSITION_WALLET_PCT: float = float(_env("POSITION_WALLET_PCT", "0.12"))
 
 # Polymarket win fee (2% on winnings — adjusts Kelly payout ratio)
 POLY_WIN_FEE:       float = float(_env("POLY_WIN_FEE", "0.02"))
+
+# ── Monte Carlo position sizing ───────────────────────────────────────────────
+# When enabled, replaces fixed POSITION_WALLET_PCT with a simulation-based
+# optimal fraction that maximises geometric mean while capping ruin probability.
+# Falls back to POSITION_WALLET_PCT if insufficient trade history (<20 trades).
+MC_SIZING_ENABLED:  bool  = os.getenv("MC_SIZING_ENABLED", "true").lower() != "false"
+MC_SIMULATIONS:     int   = int(_env("MC_SIMULATIONS",   "1000"))
+MC_HORIZON:         int   = int(_env("MC_HORIZON",       "50"))
+MC_RUIN_FLOOR:      float = float(_env("MC_RUIN_FLOOR",  "0.25"))
+MAX_RUIN_PROB:      float = float(_env("MAX_RUIN_PROB",   "0.05"))
+MC_MAX_FRACTION:    float = float(_env("MC_MAX_FRACTION", "0.25"))
 

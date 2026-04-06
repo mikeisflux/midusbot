@@ -180,6 +180,46 @@ def register(app, get_state, get_learner, get_close_fn):
 
         return json.dumps(result), 200, {"Content-Type": "application/json"}
 
+    @app.route("/api/backtest")
+    def api_backtest():
+        """
+        Run journal-based backtest across all 4 strategies.
+        Query params:
+          days=30       — lookback window (default 30)
+          strategy=arb  — filter to one strategy (default: all)
+          dry_run=true  — only sim trades (default: all)
+        """
+        from flask import request as _req
+        from src.backtest import BacktestEngine
+
+        try:
+            days    = float(_req.args.get("days", 30))
+            strat   = _req.args.get("strategy", None)
+            dr_arg  = _req.args.get("dry_run", None)
+            dry_run = None
+            if dr_arg is not None:
+                dry_run = dr_arg.lower() == "true"
+
+            engine = BacktestEngine()
+            r = engine.run_journal(
+                lookback_days=days,
+                strategies=[strat] if strat else None,
+                dry_run=dry_run,
+            )
+            payload = {
+                "trades":      r.n_trades,
+                "wins":        r.wins,
+                "win_rate":    round(r.win_rate, 4),
+                "total_pnl":   round(r.total_pnl, 4),
+                "sharpe":      r.sharpe(),
+                "by_strategy": r.by_strategy,
+                "by_asset":    r.by_asset,
+                "lookback_days": days,
+            }
+            return json.dumps(payload), 200, {"Content-Type": "application/json"}
+        except Exception as exc:
+            return json.dumps({"error": str(exc)}), 500, {"Content-Type": "application/json"}
+
     @app.route("/api/export")
     def api_export():
         """Download full training data as a JSON file for analysis."""

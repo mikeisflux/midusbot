@@ -487,6 +487,11 @@ class ScannerMixin:
         # cumulative violations). Executes mispriced legs as strategy="arb".
         self._run_corr_arb(all_markets)
 
+        # ── Kalshi cross-platform arbitrage (part of Arb 30% bucket) ─────────
+        # Compares Polymarket vs Kalshi prices for same events.
+        # Signals when divergence > 8%; buys the Polymarket leg.
+        self._run_kalshi_arb(all_markets)
+
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure        = self._risk.total_exposure()
 
@@ -545,6 +550,14 @@ class ScannerMixin:
             )
 
             if config.DRY_RUN:
+                hrs = (sig.hours_to_close or 24.0)
+                self._open_sim_position_raw(
+                    token_id=sig.token_id, market_id=sig.market_id,
+                    question=sig.question, side=sig.side,
+                    entry=entry, shares=shares,
+                    confidence="CORR-ARB", hours_to_close=hrs, strategy="arb",
+                )
+                _arb_exp += shares * entry
                 continue
 
             resp = self._client.place_limit_order(
@@ -570,6 +583,88 @@ class ScannerMixin:
                 entry_price=entry, shares=shares, cost_usdc=cost,
                 momentum_signal=0.0, imbalance_signal=0.0,
                 composite_signal=sig.edge, confidence="CORR-ARB",
+                strategy="arb",
+            )
+            _arb_exp += cost
+
+    def _run_kalshi_arb(self, all_markets: list) -> None:
+        """Execute Kalshi cross-platform arbitrage signals."""
+        try:
+            from src.kalshi import scanner as _kalshi
+        except Exception:
+            return
+
+        _wallet   = self._dash_state.wallet_balance or 0.0
+        _arb_pct  = float(getattr(config, "ARB_BUDGET_PCT", 0.30))
+        _arb_exp  = sum(
+            p.cost_usdc for p in self._positions.values()
+            if getattr(p, "strategy", "") == "arb"
+        )
+        if _arb_exp >= _wallet * _arb_pct:
+            return
+
+        signals = _kalshi.scan(all_markets)
+        for sig in signals:
+            if sig.poly_token_id in self._positions:
+                continue
+            if config.TRADING_PAUSED:
+                break
+
+            _floor = float(getattr(config, "CAPITAL_FLOOR_USDC", 15.0))
+            if _wallet > 0 and _wallet < _floor:
+                break
+
+            ob = self._client.get_order_book(sig.poly_token_id)
+            if not ob or ob.best_ask <= 0:
+                continue
+            entry = round(min(ob.best_ask + 0.01, 0.90), 2)
+
+            import math as _m
+            usdc   = min(config.MAX_POSITION_USDC, (_wallet * _arb_pct - _arb_exp))
+            shares = _m.floor(usdc / entry)
+            if shares < config.MIN_ORDER_SHARES:
+                continue
+
+            logger.info(
+                f"[KALSHI-ARB] {'[DRY-RUN] ' if config.DRY_RUN else ''}"
+                f"Entering {sig.side} {shares:.0f}@{entry:.3f} "
+                f"edge={sig.edge:.1%} cheap_side={sig.cheap_side} | {sig.poly_question[:50]}"
+            )
+
+            if config.DRY_RUN:
+                self._open_sim_position_raw(
+                    token_id=sig.poly_token_id, market_id=sig.poly_market_id,
+                    question=sig.poly_question, side=sig.side,
+                    entry=entry, shares=shares,
+                    confidence="KALSHI-ARB", hours_to_close=sig.hours_to_close,
+                    strategy="arb",
+                )
+                _arb_exp += shares * entry
+                continue
+
+            resp = self._client.place_limit_order(
+                token_id=sig.poly_token_id, side="BUY", price=entry, size=shares, fok=True
+            )
+            if not resp:
+                continue
+
+            cost = shares * entry
+            from src.bot import OpenPosition
+            self._positions[sig.poly_token_id] = OpenPosition(
+                market_id=sig.poly_market_id, question=sig.poly_question,
+                token_id=sig.poly_token_id, side=sig.side,
+                shares=shares, entry_price=entry, cost_usdc=cost,
+                entry_time=time.time(), strategy="arb", confidence="KALSHI-ARB",
+                composite_signal=sig.edge,
+            )
+            self._save_positions()
+            self._risk.record_open(cost_usdc=cost)
+            self._learner.record_open(
+                market_id=sig.poly_market_id, token_id=sig.poly_token_id,
+                side=sig.side, question=sig.poly_question,
+                entry_price=entry, shares=shares, cost_usdc=cost,
+                momentum_signal=0.0, imbalance_signal=0.0,
+                composite_signal=sig.edge, confidence="KALSHI-ARB",
                 strategy="arb",
             )
             _arb_exp += cost
@@ -717,9 +812,22 @@ class ScannerMixin:
 
             if config.DRY_RUN:
                 logger.info(
-                    f"[DUAL-ARB DRY-RUN] Would buy {shares} YES@{yes_ask:.3f} + "
+                    f"[DUAL-ARB DRY-RUN] Simulating {shares} YES@{yes_ask:.3f} + "
                     f"{shares} NO@{no_ask:.3f}  {market.question[:40]}"
                 )
+                mid_id = getattr(market, "market_id", "") or getattr(market, "id", "") or ""
+                hrs = 5 / 60  # 5-min window
+                self._open_sim_position_raw(
+                    token_id=yes_tid, market_id=mid_id, question=market.question,
+                    side="YES", entry=yes_ask, shares=shares,
+                    confidence="DUAL-ARB", hours_to_close=hrs, strategy="arb",
+                )
+                self._open_sim_position_raw(
+                    token_id=no_tid, market_id=mid_id, question=market.question,
+                    side="NO", entry=no_ask, shares=shares,
+                    confidence="DUAL-ARB", hours_to_close=hrs, strategy="arb",
+                )
+                _arb_exposure += (yes_ask + no_ask) * shares
                 continue
 
             # Place YES leg (FOK — guaranteed fill at this price or skip)

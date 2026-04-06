@@ -25,6 +25,7 @@ from loguru import logger
 DATA_DIR = Path("data")
 _SESSION_LOG   = DATA_DIR / "session_log.jsonl"
 _OUTCOMES_LOG  = DATA_DIR / "polymarket_outcomes.jsonl"
+_JOURNAL_LOG   = DATA_DIR / "journal.jsonl"
 
 
 @dataclass
@@ -36,6 +37,7 @@ class BacktestTrade:
     outcome:    str     # "UP" | "DOWN" (actual result)
     win:        bool
     pnl:        float   # net P&L in USDC (1.0 per share if win, -entry if loss)
+    strategy:   str = "momentum"
 
 
 @dataclass
@@ -76,15 +78,61 @@ class BacktestResults:
             d["pnl"] = round(d["pnl"], 4)
         return result
 
+    @property
+    def by_strategy(self) -> dict[str, dict]:
+        result: dict[str, dict] = {}
+        for t in self.trades:
+            s = getattr(t, "strategy", "momentum") or "momentum"
+            if s not in result:
+                result[s] = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0,
+                             "avg_win": 0.0, "avg_loss": 0.0}
+            result[s]["trades"] += 1
+            result[s]["pnl"]    += t.pnl
+            if t.win:
+                result[s]["wins"] += 1
+                result[s]["avg_win"] += t.pnl
+            else:
+                result[s]["losses"] += 1
+                result[s]["avg_loss"] += t.pnl
+        for s, d in result.items():
+            d["win_rate"]  = round(d["wins"] / d["trades"], 3) if d["trades"] else 0.0
+            d["pnl"]       = round(d["pnl"], 4)
+            d["avg_win"]   = round(d["avg_win"] / d["wins"], 4) if d["wins"] else 0.0
+            d["avg_loss"]  = round(d["avg_loss"] / d["losses"], 4) if d["losses"] else 0.0
+        return result
+
+    def sharpe(self, trades_subset: list | None = None) -> float:
+        """Annualised Sharpe ratio (assumes 5-min trades, ~105K per year)."""
+        import statistics as _st
+        trades = trades_subset if trades_subset is not None else self.trades
+        pnls = [t.pnl for t in trades]
+        if len(pnls) < 2:
+            return 0.0
+        mean = sum(pnls) / len(pnls)
+        std  = _st.stdev(pnls)
+        if std == 0:
+            return 0.0
+        # Annualise: 5-min windows ≈ 288/day, 252 trading days ≈ 72,576/year
+        return round((mean / std) * (72576 ** 0.5), 2)
+
     def summary(self) -> str:
         if not self.trades:
             return "No backtest data."
         lines = [
-            f"Backtest: {self.n_trades} trades | WR={self.win_rate:.1%} | P&L=${self.total_pnl:+.2f}",
+            f"Backtest: {self.n_trades} trades | WR={self.win_rate:.1%} | "
+            f"P&L=${self.total_pnl:+.2f} | Sharpe={self.sharpe():.2f}",
+            "",
+            "── By Asset ──",
         ]
         for sym, d in sorted(self.by_asset.items()):
             lines.append(
                 f"  {sym}: {d['trades']}t  WR={d['win_rate']:.1%}  P&L=${d['pnl']:+.4f}"
+            )
+        lines += ["", "── By Strategy ──"]
+        for strat, d in sorted(self.by_strategy.items()):
+            lines.append(
+                f"  {strat}: {d['trades']}t  WR={d['win_rate']:.1%}  "
+                f"P&L=${d['pnl']:+.2f}  avgW=${d['avg_win']:+.4f}  avgL=${d['avg_loss']:+.4f}"
             )
         return "\n".join(lines)
 
@@ -171,6 +219,80 @@ class BacktestEngine:
             ))
 
         logger.info(f"[BACKTEST] {results.summary()}")
+        return results
+
+    def run_journal(
+        self,
+        lookback_days: float = 30.0,
+        strategies: list[str] | None = None,
+        dry_run: bool | None = None,
+    ) -> BacktestResults:
+        """
+        Backtest from journal.jsonl — covers ALL 4 strategies since they all
+        write closed trade records there.
+
+        lookback_days: how far back to look (default 30 days)
+        strategies: filter to specific strategy tags (None = all)
+        dry_run: True = only sim trades, False = only live, None = both
+        """
+        if not _JOURNAL_LOG.exists():
+            logger.warning("[BACKTEST] journal.jsonl not found — no closed trades yet")
+            return BacktestResults()
+
+        cutoff = time.time() - lookback_days * 86400
+        trades: list[BacktestTrade] = []
+
+        try:
+            with _JOURNAL_LOG.open() as fh:
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+
+                    if not r.get("closed", False):
+                        continue
+
+                    closed_at = float(r.get("closed_at", 0) or r.get("entry_time", 0))
+                    if closed_at < cutoff:
+                        continue
+
+                    if dry_run is not None:
+                        if r.get("dry_run", False) != dry_run:
+                            continue
+
+                    strat = r.get("strategy", "momentum") or "momentum"
+                    if strategies and strat not in strategies:
+                        continue
+
+                    entry   = float(r.get("entry_price", 0.51) or 0.51)
+                    exit_p  = float(r.get("exit_price",  0.0)  or 0.0)
+                    pnl     = float(r.get("pnl_usdc",    0.0)  or 0.0)
+                    win     = pnl > 0
+
+                    from src.strategy import _detect_updown_market
+                    sym = _detect_updown_market(r.get("question", "")) or strat.upper()
+
+                    trades.append(BacktestTrade(
+                        symbol=sym,
+                        window_start=float(r.get("entry_time", 0) or closed_at),
+                        direction=r.get("side", "YES"),
+                        entry_price=entry,
+                        outcome="WIN" if win else "LOSS",
+                        win=win,
+                        pnl=round(pnl, 4),
+                        strategy=strat,
+                    ))
+        except Exception as exc:
+            logger.error(f"[BACKTEST] Failed to read journal: {exc}")
+            return BacktestResults()
+
+        results = BacktestResults(
+            trades=trades,
+            start_ts=cutoff,
+            end_ts=time.time(),
+        )
+        logger.info(f"[BACKTEST-JOURNAL] {results.summary()}")
         return results
 
     def run_threshold_sweep(
