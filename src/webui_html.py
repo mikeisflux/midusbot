@@ -92,7 +92,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 #strat-grid{
   display:grid;grid-template-columns:1fr 1fr;gap:10px;
 }
-#sc-news_arb,#sc-price_velocity{grid-column:1 / -1}  /* bottom rows span full width */
+/* news arb and smart money sit side-by-side like the top 4 tiles */
 
 /* ── STRATEGY CARD ── */
 .sc{
