@@ -1001,10 +1001,33 @@ class ScannerMixin:
             # Look up BTC price at window open (300s before close)
             _win_start_ts = _end_ts - 300
             _start_btc = _price_at_timestamp("BTC", _win_start_ts, tolerance_secs=45)
+
+            # Fallback: fetch from Binance 1m kline when history is missing
+            # (happens after bot restart — price history doesn't go back far enough)
+            if _start_btc is None:
+                try:
+                    import requests as _req
+                    _start_ms = int(_win_start_ts * 1000)
+                    _r = _req.get(
+                        "https://api.binance.com/api/v3/klines",
+                        params={"symbol": "BTCUSDT", "interval": "1m",
+                                "startTime": _start_ms, "limit": 1},
+                        timeout=3,
+                    )
+                    if _r.ok:
+                        _k = _r.json()
+                        if _k:
+                            _start_btc = float(_k[0][1])  # open price of that 1m candle
+                            logger.debug(
+                                f"[CHAINLINK] BTC start price from Binance kline: "
+                                f"${_start_btc:,.2f}  {_m.question[:40]}"
+                            )
+                except Exception as _ke:
+                    logger.debug(f"[CHAINLINK] Binance kline fallback failed: {_ke}")
+
             if _start_btc is None:
                 logger.debug(
-                    f"[CHAINLINK] No BTC start price for {_m.question[:40]} — "
-                    f"need price from {_win_start_ts:.0f} (window opened {_now - _win_start_ts:.0f}s ago)"
+                    f"[CHAINLINK] No BTC start price for {_m.question[:40]} — skipping"
                 )
                 continue
 
