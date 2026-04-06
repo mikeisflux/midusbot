@@ -486,6 +486,13 @@ class ScannerMixin:
         # cumulative violations). Executes mispriced legs as strategy="arb".
         self._run_corr_arb(all_markets)
 
+        # ── AP/Reuters/BBC News Arbitrage (15% bucket) ────────────────────────
+        # Polls AP, Reuters, BBC, Politico RSS every 60s. When breaking news
+        # matches an open Polymarket question, Claude assesses the new probability.
+        # Enters before market makers reprice — typically 10-30 min window.
+        # Strategy tag: "news_arb". Requires ANTHROPIC_API_KEY.
+        self._run_news_arb()
+
 
         self._dash_state.scan_latency_ms = int((time.time() - t0) * 1000)
         self._dash_state.exposure        = self._risk.total_exposure()
@@ -652,6 +659,75 @@ class ScannerMixin:
             )
             if self._execute_signal(sig):
                 self._asset_last_bet[ai_sig.asset] = time.time()
+
+    def _run_news_arb(self) -> None:
+        """
+        AP/Reuters/BBC News Arbitrage — poll RSS every 60s, match breaking headlines
+        to open Polymarket markets, ask Claude to reprice, enter before MMs catch up.
+        Strategy tag: "news_arb". Requires ANTHROPIC_API_KEY.
+        """
+        import os as _os
+        _api_key = _os.getenv("ANTHROPIC_API_KEY", "")
+        if not _api_key:
+            return
+
+        # Lazy-init singleton
+        if not hasattr(self, "_news_arb"):
+            from src.news_arb import NewsArbStrategy
+            self._news_arb = NewsArbStrategy(api_key=_api_key, client=self._client)
+
+        self._news_arb.maybe_poll()
+
+        for sig in self._news_arb.pop_signals():
+            # Budget gate: news_arb gets NEWS_ARB_BUDGET_PCT of wallet
+            _budget = getattr(config, "NEWS_ARB_BUDGET_PCT", 0.15)
+            _wallet = self._dash_state.wallet_balance or 0.0
+            _na_exp = sum(
+                p.cost_usdc for p in self._positions.values()
+                if getattr(p, "strategy", "") == "news_arb"
+            )
+            if _wallet > 0 and _na_exp >= _wallet * _budget:
+                logger.debug(
+                    f"[NEWS-ARB] Budget cap reached — "
+                    f"${_na_exp:.2f} >= {_budget:.0%} of ${_wallet:.2f}"
+                )
+                continue
+
+            # Skip if already in this market
+            if sig.token_id in self._positions:
+                continue
+
+            # Fetch live order book for best_ask/best_bid
+            try:
+                ob = self._client.get_order_book(sig.token_id)
+            except Exception:
+                ob = None
+
+            from src.strategy import TradeSignal
+            ts = TradeSignal(
+                market_id        = sig.market_id,
+                question         = sig.question,
+                token_id         = sig.token_id,
+                side             = sig.side,
+                fair_value       = sig.ai_probability if sig.side == "YES" else 1.0 - sig.ai_probability,
+                market_price     = sig.market_price,
+                edge             = sig.edge,
+                signal           = sig.edge,
+                confidence       = "NEWS_ARB",
+                is_news_arb      = True,
+                hours_to_close   = sig.hours_to_close,
+                rel_strength     = sig.edge * 100,
+                win_mins         = max(1, int(sig.hours_to_close * 60)),
+                best_ask         = ob.best_ask if ob else None,
+                best_bid         = ob.best_bid if ob else None,
+                momentum_signal  = 0.0,
+                imbalance_signal = 0.0,
+            )
+            logger.info(
+                f"[NEWS-ARB] Executing: {sig.side} '{sig.question[:55]}' "
+                f"edge={sig.edge:.1%} src={sig.source} | {sig.reasoning[:60]}"
+            )
+            self._execute_signal(ts)
 
     def _scan_dual_arb(self, updown_5m: list) -> None:
         """

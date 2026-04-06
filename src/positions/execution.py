@@ -262,7 +262,9 @@ class ExecutionMixin:
                 logger.debug(f"Urgency boost {boost:.2f}× — {h:.1f}h to close")
 
         limit_price = round(min(sig.fair_value, sig.market_price * 1.02), 4)
-        limit_price = max(0.01, min(0.68, limit_price))
+        # News arb can enter at any price (0.10-0.90) — the 0.68 cap is for 5-min UpDown only
+        _price_ceil = 0.92 if getattr(sig, "is_news_arb", False) else 0.68
+        limit_price = max(0.01, min(_price_ceil, limit_price))
         shares = self._risk.shares_from_usdc(usdc, limit_price)
 
         if shares < config.MIN_ORDER_SHARES:
@@ -344,7 +346,9 @@ class ExecutionMixin:
         # Re-fetch live orderbook right before placing the order. Signals are
         # evaluated seconds before execution — market can reprice in that window.
         # We saw entries at 0.31 and 0.40 due to stale signal prices.
-        if not config.DRY_RUN:
+        # NEWS_ARB bypasses this: it intentionally enters at any price (0.10-0.90)
+        # because the edge IS the mispriced market, not just the 0.46-0.54 zone.
+        if not config.DRY_RUN and not getattr(sig, "is_news_arb", False):
             _ob_live = self._client.get_order_book(sig.token_id)
             if _ob_live is not None and _ob_live.mid > 0:
                 _live_mid = _ob_live.mid
@@ -399,7 +403,9 @@ class ExecutionMixin:
             from src.bot import OpenPosition
             # Tag strategy bucket for portfolio tracking
             _strategy = "momentum"
-            if getattr(sig, "confidence", "") == "AI":
+            if getattr(sig, "is_news_arb", False):
+                _strategy = "news_arb"
+            elif getattr(sig, "confidence", "") == "AI":
                 _strategy = "momentum"   # AI signals are the momentum/AI bucket
             elif getattr(sig, "confidence", "") == "CHAINLINK":
                 _strategy = "chainlink"

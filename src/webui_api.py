@@ -136,10 +136,11 @@ def register(app, get_state, get_learner, get_close_fn):
         closed = [r for r in records if r.get("closed") and "pnl_usdc" in r]
 
         strategies = {
-            "momentum":  {"label": "Momentum / Oracle-lag", "target_pct": 35},
-            "chainlink": {"label": "Chainlink Oracle Arb",  "target_pct": 15},
-            "arb":       {"label": "Dual-side Arbitrage",   "target_pct": 30},
-            "mm":        {"label": "Market Making",         "target_pct": 20},
+            "momentum":  {"label": "Momentum / Oracle-lag", "target_pct": 30},
+            "chainlink": {"label": "Chainlink Oracle Arb",  "target_pct": 13},
+            "arb":       {"label": "Dual-side Arbitrage",   "target_pct": 25},
+            "mm":        {"label": "Market Making",         "target_pct": 17},
+            "news_arb":  {"label": "AP/Reuters News Arb",   "target_pct": 15},
         }
 
         def _stats(trades):
@@ -191,7 +192,7 @@ def register(app, get_state, get_learner, get_close_fn):
 
         port_s = _stats(closed)
         overall_readiness = round(
-            sum(result[k]["readiness_pct"] for k in strategies) / len(strategies), 1
+            sum(result[k]["readiness_pct"] for k in result if k != "portfolio") / len(strategies), 1
         )
         result["portfolio"] = {
             "label": "Combined Portfolio",

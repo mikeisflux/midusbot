@@ -16,7 +16,7 @@ HTML = r"""<!DOCTYPE html>
   --border:#1c2a38;--text:#b0c8e0;--dim:#4a6070;
   --green:#00e676;--red:#ff1744;--yellow:#ffab00;
   --blue:#40c4ff;--purple:#e040fb;--cyan:#00e5ff;
-  --s-chain:#40c4ff;--s-arb:#4caf50;--s-mom:#ff9800;--s-mm:#9c27b0;
+  --s-chain:#40c4ff;--s-arb:#4caf50;--s-mom:#ff9800;--s-mm:#9c27b0;--s-news:#26c6da;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
@@ -92,6 +92,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 #strat-grid{
   display:grid;grid-template-columns:1fr 1fr;gap:10px;
 }
+#sc-news_arb{grid-column:1 / -1}  /* news arb spans full width */
 
 /* ── STRATEGY CARD ── */
 .sc{
@@ -337,6 +338,11 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
       <div class="strat-ready-bar"><div class="strat-ready-fill" id="rd-mm" style="background:var(--s-mm)"></div></div>
       <span id="rd-mm-pct">0%</span>
     </div>
+    <div class="strat-ready">
+      <span style="color:var(--s-news)">📡</span>
+      <div class="strat-ready-bar"><div class="strat-ready-fill" id="rd-news_arb" style="background:var(--s-news)"></div></div>
+      <span id="rd-news_arb-pct">0%</span>
+    </div>
   </div>
   <span id="go-live-badge">✓ READY TO GO LIVE</span>
 </div>
@@ -505,6 +511,47 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
         <div class="sc-meta-item">
           <div class="sc-meta-lbl">Worst Trade</div>
           <div class="sc-meta-val d" id="sc-mm-worst">$0.00</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AP/REUTERS NEWS ARB -->
+    <div class="sc" id="sc-news_arb" style="--sc-color:var(--s-news)">
+      <div class="sc-header">
+        <div class="sc-title">
+          <span class="sc-icon">&#128225;</span>AP / REUTERS NEWS ARB
+        </div>
+        <div class="sc-alloc" id="sc-news_arb-alloc">15%</div>
+      </div>
+      <div class="sc-wr-row">
+        <div class="sc-wr" style="color:var(--s-news)" id="sc-news_arb-wr">—</div>
+        <div class="sc-wl">WIN RATE &nbsp;|&nbsp; <b id="sc-news_arb-wl">0W / 0L</b></div>
+      </div>
+      <div class="sc-pnl-row">
+        <div class="sc-pnl d" id="sc-news_arb-pnl">$0.00</div>
+        <div class="sc-status empty" id="sc-news_arb-status">SCANNING FEEDS</div>
+      </div>
+      <div class="sc-bar-row">
+        <div class="sc-bar-labels">
+          <span id="sc-news_arb-exp-lbl">$0 exposure</span>
+          <span id="sc-news_arb-tgt-lbl">$0 target</span>
+        </div>
+        <div class="sc-bar-track">
+          <div class="sc-bar-fill" id="sc-news_arb-bar" style="width:0%;background:var(--s-news)"></div>
+        </div>
+      </div>
+      <div class="sc-meta-row">
+        <div class="sc-meta-item">
+          <div class="sc-meta-lbl">Avg P&amp;L</div>
+          <div class="sc-meta-val d" id="sc-news_arb-avg">$0.00</div>
+        </div>
+        <div class="sc-meta-item">
+          <div class="sc-meta-lbl">Best Trade</div>
+          <div class="sc-meta-val d" id="sc-news_arb-best">$0.00</div>
+        </div>
+        <div class="sc-meta-item">
+          <div class="sc-meta-lbl">Worst Trade</div>
+          <div class="sc-meta-val d" id="sc-news_arb-worst">$0.00</div>
         </div>
       </div>
     </div>
@@ -730,12 +777,13 @@ async function refresh() {
 }
 
 // ── strategy stats (every 8s) ─────────────────────────────────────────────────
-var _strategyKeys = ['chainlink','arb','momentum','mm'];
+var _strategyKeys = ['chainlink','arb','momentum','mm','news_arb'];
 var _strategyDefaults = {
-  chainlink: { color: '#40c4ff', targetPct: 15, label: 'CHAINLINK ORACLE' },
-  arb:       { color: '#4caf50', targetPct: 30, label: 'ARBITRAGE'        },
-  momentum:  { color: '#ff9800', targetPct: 35, label: 'AI / MOMENTUM'    },
-  mm:        { color: '#9c27b0', targetPct: 20, label: 'MARKET MAKING'    }
+  chainlink: { color: '#40c4ff', targetPct: 13, label: 'CHAINLINK ORACLE'     },
+  arb:       { color: '#4caf50', targetPct: 25, label: 'ARBITRAGE'            },
+  momentum:  { color: '#ff9800', targetPct: 30, label: 'AI / MOMENTUM'        },
+  mm:        { color: '#9c27b0', targetPct: 17, label: 'MARKET MAKING'        },
+  news_arb:  { color: '#26c6da', targetPct: 15, label: 'AP/REUTERS NEWS ARB'  }
 };
 
 function updateStratCard(key, s, walletBal) {

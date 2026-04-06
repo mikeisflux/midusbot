@@ -124,13 +124,14 @@ OB_MIN_SPREAD:      float = float(_env("OB_MIN_SPREAD", "0.005"))
 # the latency-arbitrage strategy at window close.
 CHAINLINK_ONLY:     bool  = _env("CHAINLINK_ONLY", "false").lower() == "true"
 
-# ── Multi-strategy portfolio allocation (Aggressive Profile) ───────────────
-# Fraction of wallet budget each strategy can deploy simultaneously.
-# Chainlink 15% | Arb (dual-side) 30% | Momentum/AI 35% | MM 20%
-CHAINLINK_BUDGET_PCT:   float = float(_env("CHAINLINK_BUDGET_PCT",  "0.15"))
-ARB_BUDGET_PCT:         float = float(_env("ARB_BUDGET_PCT",        "0.30"))
-MOMENTUM_BUDGET_PCT:    float = float(_env("MOMENTUM_BUDGET_PCT",   "0.35"))
-MM_BUDGET_PCT:          float = float(_env("MM_BUDGET_PCT",         "0.20"))
+# ── Multi-strategy portfolio allocation ───────────────────────────────────────
+# 5-strategy portfolio — must sum to 1.0.
+# News Arb 15% | Chainlink 13% | Arb 25% | Momentum/AI 30% | MM 17%
+NEWS_ARB_BUDGET_PCT:    float = float(_env("NEWS_ARB_BUDGET_PCT",   "0.15"))
+CHAINLINK_BUDGET_PCT:   float = float(_env("CHAINLINK_BUDGET_PCT",  "0.13"))
+ARB_BUDGET_PCT:         float = float(_env("ARB_BUDGET_PCT",        "0.25"))
+MOMENTUM_BUDGET_PCT:    float = float(_env("MOMENTUM_BUDGET_PCT",   "0.30"))
+MM_BUDGET_PCT:          float = float(_env("MM_BUDGET_PCT",         "0.17"))
 
 # Dual-side arb: maximum combined YES+NO ask to enter (profit = 1.0 - this)
 ARB_MAX_COST:           float = float(_env("ARB_MAX_COST",          "0.97"))
