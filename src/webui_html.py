@@ -193,6 +193,35 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .k-divergence{color:var(--cyan)}.k-arb{color:var(--purple)}
 .k-scan{color:#1e3248}.k-info{color:var(--dim)}.k-exec{color:var(--text)}
 
+/* ── LIVE READINESS BAR ── */
+#readiness-bar{
+  flex-shrink:0;display:flex;align-items:center;gap:12px;
+  padding:6px 14px;background:var(--bg2);border-bottom:1px solid var(--border);
+}
+#readiness-label{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:var(--dim);white-space:nowrap}
+#readiness-track{
+  flex:1;height:8px;background:var(--bg4);border-radius:4px;overflow:hidden;
+  position:relative;
+}
+#readiness-fill{
+  height:8px;border-radius:4px;transition:width .8s ease;width:0%;
+  background:linear-gradient(90deg,var(--red),var(--yellow) 55%,var(--green));
+}
+#readiness-pct{font-size:11px;font-weight:bold;min-width:36px;text-align:right}
+.strat-ready{
+  display:flex;align-items:center;gap:4px;font-size:9px;color:var(--dim);
+  white-space:nowrap;
+}
+.strat-ready-bar{width:40px;height:4px;background:var(--bg4);border-radius:2px;overflow:hidden}
+.strat-ready-fill{height:4px;border-radius:2px;transition:width .8s}
+#readiness-detail{display:flex;gap:14px}
+#go-live-badge{
+  display:none;font-size:9px;font-weight:bold;letter-spacing:1px;
+  padding:2px 10px;border-radius:3px;
+  background:rgba(0,230,118,.15);color:var(--green);border:1px solid rgba(0,230,118,.4);
+  white-space:nowrap;
+}
+
 /* ── FOOTER ── */
 #footer{
   flex-shrink:0;display:flex;align-items:center;justify-content:space-between;
@@ -278,6 +307,38 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
     <span class="info-lbl">Risk %</span>
     <span class="info-val" id="i-risk">0%</span>
   </div>
+</div>
+
+<!-- ═══════════════ LIVE READINESS ═══════════════ -->
+<div id="readiness-bar">
+  <span id="readiness-label">LIVE READINESS</span>
+  <div id="readiness-track">
+    <div id="readiness-fill"></div>
+  </div>
+  <span id="readiness-pct" class="d">0%</span>
+  <div id="readiness-detail">
+    <div class="strat-ready">
+      <span style="color:var(--s-chain)">⛓</span>
+      <div class="strat-ready-bar"><div class="strat-ready-fill" id="rd-chainlink" style="background:var(--s-chain)"></div></div>
+      <span id="rd-chainlink-pct">0%</span>
+    </div>
+    <div class="strat-ready">
+      <span style="color:var(--s-arb)">⚖</span>
+      <div class="strat-ready-bar"><div class="strat-ready-fill" id="rd-arb" style="background:var(--s-arb)"></div></div>
+      <span id="rd-arb-pct">0%</span>
+    </div>
+    <div class="strat-ready">
+      <span style="color:var(--s-mom)">🚀</span>
+      <div class="strat-ready-bar"><div class="strat-ready-fill" id="rd-momentum" style="background:var(--s-mom)"></div></div>
+      <span id="rd-momentum-pct">0%</span>
+    </div>
+    <div class="strat-ready">
+      <span style="color:var(--s-mm)">🏦</span>
+      <div class="strat-ready-bar"><div class="strat-ready-fill" id="rd-mm" style="background:var(--s-mm)"></div></div>
+      <span id="rd-mm-pct">0%</span>
+    </div>
+  </div>
+  <span id="go-live-badge">✓ READY TO GO LIVE</span>
 </div>
 
 <!-- ═══════════════ STRATEGY GRID ═══════════════ -->
@@ -773,6 +834,29 @@ async function loadStrategyStats() {
       var s = data[key];
       if (s) updateStratCard(key, s, bal);
     });
+
+    // ── readiness bar ────────────────────────────────────────────────────────
+    var port = data['portfolio'];
+    var overall = port ? (port.readiness_pct || 0) : 0;
+    var fillEl  = $('readiness-fill');
+    var pctEl   = $('readiness-pct');
+    if (fillEl) fillEl.style.width = overall.toFixed(1) + '%';
+    if (pctEl) {
+      pctEl.textContent = overall.toFixed(0) + '%';
+      pctEl.className = overall >= 100 ? 'g' : overall >= 60 ? 'y' : 'r';
+    }
+    _strategyKeys.forEach(function(key) {
+      var s = data[key];
+      if (!s) return;
+      var rPct = s.readiness_pct || 0;
+      var fillEl2 = $('rd-' + key);
+      var lblEl  = $('rd-' + key + '-pct');
+      if (fillEl2) fillEl2.style.width = rPct.toFixed(1) + '%';
+      if (lblEl)  lblEl.textContent = rPct.toFixed(0) + '%';
+    });
+    var badge = $('go-live-badge');
+    if (badge) badge.style.display = overall >= 100 ? 'inline-block' : 'none';
+
   } catch(e) {}
 }
 

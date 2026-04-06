@@ -160,22 +160,46 @@ def register(app, get_state, get_learner, get_close_fn):
                 "worst":     round(min(pnls), 4),
             }
 
+        _LIVE_MIN_TRADES  = 20   # trades needed per strategy before going live
+        _LIVE_MIN_WINRATE = 0.55 # win rate needed to be considered ready
+
+        def _readiness(s):
+            """0–100 readiness score. 60% weight on trade count, 40% on win rate."""
+            t = s.get("trades", 0)
+            wr = s.get("win_rate", 0)
+            t_pct  = min(t / _LIVE_MIN_TRADES, 1.0)
+            wr_pct = min(wr / _LIVE_MIN_WINRATE, 1.0) if t >= 5 else 0.0
+            return round((t_pct * 0.6 + wr_pct * 0.4) * 100, 1)
+
         result = {}
         for key, meta in strategies.items():
             bucket = [r for r in closed if r.get("strategy", "momentum") == key]
-            result[key] = {**meta, **_stats(bucket)}
+            s = _stats(bucket)
+            result[key] = {**meta, **s, "readiness_pct": _readiness(s),
+                           "live_min_trades": _LIVE_MIN_TRADES,
+                           "live_min_winrate": _LIVE_MIN_WINRATE}
 
         # Catch records without a strategy field → default to momentum
         untagged = [r for r in closed if "strategy" not in r]
         if untagged:
-            # Merge untagged into momentum stats
             combined = [r for r in closed if r.get("strategy", "momentum") == "momentum"]
-            result["momentum"] = {**strategies["momentum"], **_stats(combined)}
+            s = _stats(combined)
+            result["momentum"] = {**strategies["momentum"], **s,
+                                  "readiness_pct": _readiness(s),
+                                  "live_min_trades": _LIVE_MIN_TRADES,
+                                  "live_min_winrate": _LIVE_MIN_WINRATE}
 
+        port_s = _stats(closed)
+        overall_readiness = round(
+            sum(result[k]["readiness_pct"] for k in strategies) / len(strategies), 1
+        )
         result["portfolio"] = {
             "label": "Combined Portfolio",
             "target_pct": 100,
-            **_stats(closed),
+            **port_s,
+            "readiness_pct": overall_readiness,
+            "live_min_trades": _LIVE_MIN_TRADES * len(strategies),
+            "live_min_winrate": _LIVE_MIN_WINRATE,
         }
 
         return json.dumps(result), 200, {"Content-Type": "application/json"}

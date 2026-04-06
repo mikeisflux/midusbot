@@ -445,6 +445,107 @@ class AdaptiveLearner:
             logger.debug(f"[Learner] Per-asset threshold update skipped: {_e}")
 
         self._save_params()
+        self._auto_mode_check()
+
+    # ------------------------------------------------------------------
+    # Auto live / dry-run switching
+    # ------------------------------------------------------------------
+
+    _LIVE_MIN_TRADES  = 20    # closed trades per strategy to qualify
+    _LIVE_MIN_WINRATE = 0.55  # minimum win rate to qualify
+    _RETREAT_WINDOW   = 10    # recent trades to evaluate for retreat
+    _RETREAT_WINRATE  = 0.40  # if recent win rate drops below this → retreat
+
+    def readiness(self) -> dict:
+        """Return per-strategy readiness 0–100 and overall score."""
+        closed = [r for r in self._journal if r.closed]
+        strategies = ["momentum", "chainlink", "arb", "mm"]
+        result = {}
+        for key in strategies:
+            bucket = [r for r in closed if getattr(r, "strategy", "momentum") == key]
+            t  = len(bucket)
+            wr = sum(1 for r in bucket if r.pnl_usdc > 0) / t if t else 0.0
+            t_pct  = min(t / self._LIVE_MIN_TRADES, 1.0)
+            wr_pct = min(wr / self._LIVE_MIN_WINRATE, 1.0) if t >= 5 else 0.0
+            result[key] = round((t_pct * 0.6 + wr_pct * 0.4) * 100, 1)
+        result["overall"] = round(sum(result.values()) / len(strategies), 1)
+        return result
+
+    def _auto_mode_check(self) -> None:
+        """
+        Auto-promote to LIVE when all 4 strategies are ready (readiness=100).
+        Auto-retreat to DRY-RUN if recent performance collapses.
+        Never erases journal — appends lessons to analyst_params for future runs.
+        """
+        import config as _cfg
+        closed = [r for r in self._journal if r.closed]
+        if len(closed) < self._LIVE_MIN_TRADES:
+            return
+
+        ready = self.readiness()
+
+        # ── Auto-promote ──────────────────────────────────────────────────
+        if ready["overall"] >= 100 and _cfg.DRY_RUN:
+            logger.info(
+                "[Learner] All strategies ready — AUTO-PROMOTING to LIVE trading. "
+                f"Readiness: {ready}"
+            )
+            _cfg.DRY_RUN = False
+            try:
+                import os, json as _json
+                env_path = ".env"
+                if os.path.exists(env_path):
+                    lines = open(env_path).readlines()
+                    lines = [l if not l.startswith("DRY_RUN=") else "DRY_RUN=false\n" for l in lines]
+                    if not any(l.startswith("DRY_RUN=") for l in lines):
+                        lines.append("DRY_RUN=false\n")
+                    open(env_path, "w").writelines(lines)
+            except Exception:
+                pass
+            return
+
+        # ── Auto-retreat ──────────────────────────────────────────────────
+        if not _cfg.DRY_RUN and len(closed) >= self._RETREAT_WINDOW:
+            recent = closed[-self._RETREAT_WINDOW:]
+            recent_wr = sum(1 for r in recent if r.pnl_usdc > 0) / len(recent)
+            if recent_wr < self._RETREAT_WINRATE:
+                logger.warning(
+                    f"[Learner] Recent win rate {recent_wr:.0%} < {self._RETREAT_WINRATE:.0%} "
+                    f"over last {self._RETREAT_WINDOW} trades — AUTO-RETREATING to DRY-RUN. "
+                    "Journal preserved. Thresholds will tighten."
+                )
+                _cfg.DRY_RUN = True
+                try:
+                    import os
+                    env_path = ".env"
+                    if os.path.exists(env_path):
+                        lines = open(env_path).readlines()
+                        lines = [l if not l.startswith("DRY_RUN=") else "DRY_RUN=true\n" for l in lines]
+                        if not any(l.startswith("DRY_RUN=") for l in lines):
+                            lines.append("DRY_RUN=true\n")
+                        open(env_path, "w").writelines(lines)
+                except Exception:
+                    pass
+                # Aggressively tighten thresholds — learn from the losses
+                try:
+                    import json as _json
+                    from pathlib import Path as _Path
+                    _ap_file = _Path("data/analyst_params.json")
+                    ap = _json.loads(_ap_file.read_text()) if _ap_file.exists() else {}
+                    asset_thresh = dict(ap.get("asset_thresholds", {}))
+                    for asset in asset_thresh:
+                        # Raise every threshold by 20% — demand stronger signals
+                        asset_thresh[asset] = round(
+                            min(asset_thresh[asset] * 1.20, 0.005), 6
+                        )
+                    ap["asset_thresholds"] = asset_thresh
+                    _ap_file.write_text(_json.dumps(ap, indent=2))
+                    logger.info(
+                        f"[Learner] Retreat: raised all thresholds 20% to filter weak signals. "
+                        f"Thresholds: {asset_thresh}"
+                    )
+                except Exception as _e:
+                    logger.debug(f"[Learner] Threshold retreat update failed: {_e}")
 
     # ------------------------------------------------------------------
     # Alpha decay detection
