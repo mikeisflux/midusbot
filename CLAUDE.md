@@ -83,9 +83,6 @@ python main.py --no-dashboard
 # Run with live trading (requires .env with PRIVATE_KEY etc.)
 DRY_RUN=false python main.py
 
-# Run via Docker
-docker-compose up
-
 # Syntax check a file
 python -m py_compile src/strategy.py
 

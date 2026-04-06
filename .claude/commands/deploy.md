@@ -26,32 +26,18 @@ Syntax-check all files, commit, push, and restart the bot via PM2.
    git push -u origin $(git branch --show-current)
    ```
 
-4. **Restart via PM2** (try each method until one succeeds):
+4. **Restart via PM2**:
    ```bash
-   # Try PM2 first (most likely on a server)
-   if command -v pm2 &>/dev/null; then
-     pm2 restart midusbot 2>/dev/null \
-       || pm2 restart all 2>/dev/null \
-       || pm2 start main.py --name midusbot --interpreter python3
-     pm2 logs midusbot --lines 10 --nostream
-   # Fall back to docker-compose
-   elif command -v docker-compose &>/dev/null; then
-     docker-compose down && docker-compose up -d
-     docker-compose logs --tail=10
-   # Fall back to pkill + relaunch
-   else
-     pkill -f "python.*main.py" || true
-     nohup python3 main.py --no-dashboard >> logs/bot.log 2>&1 &
-     echo "Bot relaunched as background process (PID $!)"
-   fi
+   pm2 restart midusbot 2>/dev/null \
+     || pm2 restart all 2>/dev/null \
+     || pm2 start main.py --name midusbot --interpreter python3
+   pm2 logs midusbot --lines 10 --nostream
    ```
 
 5. **Confirm it's running**:
    ```bash
    sleep 3
-   if command -v pm2 &>/dev/null; then
-     pm2 show midusbot | grep -E "status|pid|uptime"
-   fi
+   pm2 show midusbot | grep -E "status|pid|uptime"
    tail -20 logs/bot_$(date +%Y-%m-%d).log 2>/dev/null || echo "Log not yet written"
    ```
 
