@@ -175,7 +175,6 @@ class AdaptiveLearner:
         self._journal: list[TradeRecord]  = []
         self._closed_since_adapt: int     = 0
         self._adaptation_count: int       = 0
-        self._last_analyst_run: float     = 0.0   # wall-clock timestamp of last LLM run
 
         self._load()
 
@@ -280,32 +279,6 @@ class AdaptiveLearner:
             self._adapt()
 
         return rec.pnl_usdc
-
-    _ANALYST_INTERVAL_SECS: float = 4 * 3600  # run analyst at least every 4h
-
-    def maybe_run_analyst_timed(self) -> None:
-        """
-        Time-based fallback: run LLM analyst every 4h even when trade count
-        hasn't reached ADAPT_EVERY_N. Ensures analyst runs when bot is slow.
-        Safe to call every loop — does nothing if interval hasn't elapsed.
-        """
-        if time.time() - self._last_analyst_run < self._ANALYST_INTERVAL_SECS:
-            return
-        journal = [r for r in self._journal if r.closed]
-        if len(journal) < 3:
-            return   # not enough data for analyst to make any decision
-        if not config.ANALYST_ENABLED:
-            return
-        logger.info("[Learner] 4h analyst trigger — running timed LLM analysis")
-        self._last_analyst_run = time.time()
-        import threading
-        def _run():
-            try:
-                from src.analyst import analyse_and_update
-                analyse_and_update(self)
-            except Exception as exc:
-                logger.debug(f"[Learner] Timed analyst skipped: {exc}")
-        threading.Thread(target=_run, daemon=True, name="analyst-timed").start()
 
     def get_dashboard_dict(self) -> dict:
         """Return current learned params for the dashboard."""
@@ -420,11 +393,25 @@ class AdaptiveLearner:
         # window the bot scanned — not just the ones it bet on — giving 10-100×
         # more data points and no bias from entry price or position sizing.
         try:
-            from src.analyst import load_params as _load_ap, save_params as _save_ap
+            import json as _json
+            from pathlib import Path as _Path
             from src.session_tracker import get_all_stats as _session_stats
-            _FLOOR = 0.0001   # absolute minimum threshold (0.01%)
-            _CEIL  = 0.005    # absolute maximum threshold (0.50%)
-            _MIN_WINDOWS = 10  # need at least 10 windows of session data to adapt
+            _FLOOR = 0.0001
+            _CEIL  = 0.005
+            _MIN_WINDOWS = 10
+            _ap_file = _Path("data/analyst_params.json")
+
+            def _load_ap():
+                if _ap_file.exists():
+                    try:
+                        return _json.loads(_ap_file.read_text())
+                    except Exception:
+                        pass
+                return {}
+
+            def _save_ap(d):
+                _ap_file.parent.mkdir(parents=True, exist_ok=True)
+                _ap_file.write_text(_json.dumps(d, indent=2))
 
             ap           = _load_ap()
             asset_thresh = dict(ap.get("asset_thresholds", {}))
@@ -433,21 +420,16 @@ class AdaptiveLearner:
 
             changed = []
             for asset, s in stats.items():
-                # Only act on assets where the bot actually generated signals
                 if s.get("signal_windows", 0) < _MIN_WINDOWS:
                     continue
                 accuracy = s.get("signal_accuracy", 0.5)
                 cur = asset_thresh.get(asset, global_thresh)
                 if accuracy < 0.45:
-                    # Direction prediction worse than random — raise threshold,
-                    # demand a stronger signal before betting
                     new_t = min(_CEIL, cur * 1.10)
                 elif accuracy > 0.60:
-                    # Direction prediction consistently right — lower threshold
-                    # slightly to capture more of these good signals
                     new_t = max(_FLOOR, cur * 0.97)
                 else:
-                    continue   # 45–60% accuracy: leave threshold alone
+                    continue
                 if abs(new_t - cur) > 1e-8:
                     asset_thresh[asset] = round(new_t, 6)
                     changed.append(
@@ -462,23 +444,6 @@ class AdaptiveLearner:
         except Exception as _e:
             logger.debug(f"[Learner] Per-asset threshold update skipped: {_e}")
 
-        # ── 6. LLM analysis (non-blocking) ────────────────────────────
-        # Run in a daemon thread so the bot loop never stalls waiting for
-        # the LLM. The analyst writes analyst_params.json when done; the
-        # strategy picks them up on the next loop automatically.
-        if config.ANALYST_ENABLED:
-            import threading
-            self._last_analyst_run = time.time()  # record before thread starts
-            def _run_analyst():
-                try:
-                    from src.analyst import analyse_and_update
-                    analyse_and_update(self)
-                except Exception as exc:
-                    logger.debug(f"[Learner] LLM analysis skipped: {exc}")
-            threading.Thread(target=_run_analyst, daemon=True, name="analyst").start()
-            logger.info("[Learner] LLM analyst started in background thread")
-        else:
-            pass  # Ollama analyst disabled — not needed for 4-strategy portfolio
         self._save_params()
 
     # ------------------------------------------------------------------
