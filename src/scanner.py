@@ -287,6 +287,12 @@ class ScannerMixin:
         # is 6× leverage on one direction, not diversification.
         pending_signals: list[tuple] = []  # (sig, _asset)
 
+        # In CHAINLINK_ONLY mode, skip all oracle-lag (T=0) signal evaluation.
+        # Entries come exclusively from Chainlink oracle confirmation at T≈270s.
+        if getattr(config, "CHAINLINK_ONLY", False):
+            logger.debug("[CHAINLINK-ONLY] Oracle-lag evaluation skipped — Chainlink watches active")
+            candidates = []
+
         for market in candidates:
             if not self._running:
                 break
