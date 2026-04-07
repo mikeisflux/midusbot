@@ -129,7 +129,7 @@ class BinanceWSFeed:
         self._backoff = 1  # reset on successful connect
 
     def _on_close(self, ws, code, msg) -> None:
-        logger.warning(f"BinanceWSFeed disconnected (code={code})")
+        logger.info(f"BinanceWSFeed disconnected (code={code}) — reconnecting…")
 
     def _on_error(self, ws, error) -> None:
         logger.warning(f"BinanceWSFeed error: {error}")
