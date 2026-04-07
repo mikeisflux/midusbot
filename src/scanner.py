@@ -1140,6 +1140,18 @@ class ScannerMixin:
             _mkt_id   = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
             _question = _m.question
 
+            # Only buy in the final 5 seconds of the window
+            _m_secs_left = 999.0
+            if getattr(_m, "end_date", None):
+                try:
+                    from datetime import datetime as _mdt, timezone as _mtz
+                    _m_end = _mdt.fromisoformat(_m.end_date.replace("Z", "+00:00"))
+                    _m_secs_left = (_m_end - _mdt.now(_mtz.utc)).total_seconds()
+                except Exception:
+                    pass
+            if _m_secs_left < 3 or _m_secs_left > 5:
+                continue
+
             for (_penny_side, _penny_token_id, _opp_token_id) in [
                 ("YES", _m.yes_token.token_id, _m.no_token.token_id),
                 ("NO",  _m.no_token.token_id,  _m.yes_token.token_id),
