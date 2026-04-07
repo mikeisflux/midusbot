@@ -196,9 +196,9 @@ class ScannerMixin:
                         )
                         resp = self._client.place_limit_order(
                             token_id=_opp_token_id, side="BUY",
-                            price=round(_opp_ask, 4), size=float(_opp_shares), fok=False,
+                            price=round(_opp_ask, 4), size=float(_opp_shares), fok=True,
                         )
-                        if not resp:
+                        if not resp or resp.get("status") not in ("matched", "delayed"):
                             continue
                         _opp_cost = _opp_shares * _opp_ask
                         self._positions[_opp_token_id] = OpenPosition(
@@ -1186,10 +1186,10 @@ class ScannerMixin:
                 )
                 _opp_resp = self._client.place_limit_order(
                     token_id=_opp_token_id, side="BUY",
-                    price=round(_opp_ask, 4), size=float(_opp_shares), fok=False,
+                    price=round(_opp_ask, 4), size=float(_opp_shares), fok=True,
                 )
-                if not _opp_resp:
-                    logger.warning(f"[BTC-OPP] Order failed  {_question[:40]}")
+                if not _opp_resp or _opp_resp.get("status") not in ("matched", "delayed"):
+                    logger.warning(f"[BTC-OPP] Order not filled (FOK miss)  {_question[:40]}")
                     continue
 
                 _opp_cost = _opp_shares * _opp_ask
