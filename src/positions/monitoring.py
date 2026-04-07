@@ -106,10 +106,19 @@ class MonitoringMixin:
             else:
                 current_price = ob.mid
 
-            # ── BTC penny bets: hold to resolution, no early exits ────────────
-            # Bought at ≤$0.01. AUTO-CLEAR would fire immediately so we bypass
-            # it. Let them run to the end — Polymarket redeems the winner.
+            # ── BTC penny bets: sell after 30s, bypass AUTO-CLEAR ────────────
             if getattr(pos, "strategy", "") == "btc_penny":
+                if not config.DRY_RUN and pos.sell_at_ts > 0 and time.time() >= pos.sell_at_ts:
+                    logger.info(
+                        f"[BTC-PENNY] 30s elapsed — selling penny at market  {pos.question[:50]}"
+                    )
+                    self._close_position(token_id, current_price=current_price)
+                    continue
+                position_snapshots.append((pos, current_price))
+                continue
+
+            # ── BTC penny hedge: hold to resolution, bypass AUTO-CLEAR ────────
+            if getattr(pos, "strategy", "") == "btc_penny_hedge":
                 position_snapshots.append((pos, current_price))
                 continue
 

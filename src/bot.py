@@ -135,6 +135,7 @@ class OpenPosition:
     entry_time: float = 0.0   # unix timestamp for time-based exits
     high_water_mark: float = 0.0  # highest price seen since entry (trailing stop)
     strategy: str = "momentum"    # "momentum" | "chainlink" | "arb" | "mm"
+    sell_at_ts: float = 0.0       # if > 0, sell this position at or after this unix timestamp
 
 
 class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
