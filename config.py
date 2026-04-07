@@ -130,6 +130,9 @@ CHAINLINK_ONLY:     bool  = _env("CHAINLINK_ONLY", "false").lower() == "true"
 # 5-strategy portfolio — must sum to 1.0.
 # News Arb 15% | Chainlink 13% | Arb 25% | Momentum/AI 30% | MM 17%
 NEWS_ARB_BUDGET_PCT:    float = float(_env("NEWS_ARB_BUDGET_PCT",   "0.15"))
+# Flat wallet fraction per news-arb trade — bypasses Kelly (which under-sizes news signals).
+# 25% of $40 wallet = $10/trade. Overrides POSITION_WALLET_PCT for news_arb signals only.
+NEWS_ARB_POSITION_PCT:  float = float(_env("NEWS_ARB_POSITION_PCT", "0.25"))
 # News arb scalp exits — sell the repricing wave, don't hold to resolution
 NEWS_ARB_SCALP_TARGET: float = float(_env("NEWS_ARB_SCALP_TARGET", "0.07"))  # take profit +7pp above entry
 NEWS_ARB_SCALP_STOP:   float = float(_env("NEWS_ARB_SCALP_STOP",   "0.05"))  # stop loss  -5pp below entry

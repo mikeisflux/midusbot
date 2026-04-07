@@ -88,6 +88,13 @@ class RiskManager:
                 )
                 return 0.0
 
+        # News arb: use flat wallet fraction, not Kelly.
+        # Kelly under-sizes news signals (edge/odds math doesn't fit the model).
+        # NEWS_ARB_POSITION_PCT (default 25%) × wallet, capped at MAX_POSITION_USDC.
+        if getattr(signal, "is_news_arb", False) and self._wallet_balance > 0:
+            _na_pct = float(getattr(config, "NEWS_ARB_POSITION_PCT", 0.25))
+            return min(self._wallet_balance * _na_pct, config.MAX_POSITION_USDC)
+
         usdc = self._kelly_size(signal)
         if usdc <= 0:
             return 0.0
