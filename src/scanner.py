@@ -226,7 +226,7 @@ class ScannerMixin:
                     for _ce in list(self._btc_penny_token_cache):
                         if len(_ce) == 6 and _ce[5]:
                             _et = _wdt3.fromisoformat(_ce[5].replace("Z", "+00:00"))
-                            if (_et - _now3).total_seconds() <= 5:
+                            if (_et - _now3).total_seconds() <= 10:
                                 _rapid = True
                                 break
                 except Exception:
