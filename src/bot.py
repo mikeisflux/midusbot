@@ -300,16 +300,30 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
 
         # ── LIVE → DRY-RUN: liquidate real open positions first ──────────
         if dry_run and self._positions:
-            open_count = len(self._positions)
-            logger.warning(
-                f"[MODE-SWITCH] Switching to DRY-RUN with {open_count} open live position(s) — "
-                f"closing all at market to protect real capital."
-            )
+            # Never force-close penny bets — they're lottery tickets that need
+            # to run to resolution. Closing mid-window at market destroys value
+            # (e.g. sold at 3¢ a position worth $255 at close).
+            _closeable = {
+                tid: pos for tid, pos in self._positions.items()
+                if getattr(pos, "strategy", "") != "btc_penny"
+            }
+            _penny_kept = len(self._positions) - len(_closeable)
+            if _penny_kept:
+                logger.warning(
+                    f"[MODE-SWITCH] Keeping {_penny_kept} btc_penny position(s) open — "
+                    f"must run to resolution, force-close would destroy value."
+                )
+            open_count = len(_closeable)
+            if open_count:
+                logger.warning(
+                    f"[MODE-SWITCH] Switching to DRY-RUN with {open_count} open live position(s) — "
+                    f"closing all at market to protect real capital."
+                )
             self._dash_state.add_exec_log(
                 "warning",
                 f"LIVE→DRY-RUN: closing {open_count} real position(s) before switching"
             )
-            for token_id in list(self._positions.keys()):
+            for token_id in list(_closeable.keys()):
                 try:
                     self._close_position(token_id)
                 except Exception as exc:
