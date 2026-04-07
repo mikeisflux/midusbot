@@ -149,7 +149,7 @@ class ScannerMixin:
         self._btc_penny_token_cache: list = []  # [(side, token_id, market_id, question)]
 
         def _watch():
-            _PENNY_MAX = 0.15   # ≤15¢ on one side = signal to buy the other
+            _PENNY_MAX = 0.18   # ≤18¢ on one side = signal to buy the other
             _MAX_BET   = 5.0
             from src.bot import OpenPosition
             while getattr(self, "_running", True):
@@ -1081,7 +1081,7 @@ class ScannerMixin:
         Requires >= 15 seconds remaining so the order can settle.
         """
         _MAX_BET   = 5.0
-        _PENNY_MAX = 0.15   # ≤15¢ on one side = signal to buy the other (~85¢ opp)
+        _PENNY_MAX = 0.18   # ≤18¢ on one side = signal to buy the other (~82¢ opp)
 
         from src.bot import OpenPosition
         from datetime import datetime as _dt_penny, timezone as _tz_penny
