@@ -106,19 +106,40 @@ class MonitoringMixin:
             else:
                 current_price = ob.mid
 
-            # ── BTC penny bets: hold to resolution, no early exits ───────────
-            # These are bought at ≤$0.01. AUTO-CLEAR would fire immediately
-            # (price is already ≤0.03), wiping a potential $1000+ payout.
-            # Only exit on WIN (≥0.90). Let everything else resolve naturally.
+            # ── BTC penny bets: hold to resolution with trailing stop ────────
+            # Bought at ≤$0.01. AUTO-CLEAR would fire immediately (price is
+            # already ≤0.03), so we bypass it. Once we've run up to ≥0.20,
+            # protect 50% of the peak gain with a trailing stop — prevents
+            # a mid-window spike from collapsing back to zero (as happened
+            # when BTC reversed after the Down token hit 42.5¢).
             if getattr(pos, "strategy", "") == "btc_penny":
-                if not config.DRY_RUN and current_price >= 0.90:
-                    logger.info(
-                        f"[BTC-PENNY] WIN @ {current_price:.3f} "
-                        f"({pos.shares:.2f} shares) — claiming  {pos.question[:50]}"
-                    )
-                    self._close_position(token_id, current_price=current_price)
-                else:
-                    position_snapshots.append((pos, current_price))
+                # Track high-water mark
+                if current_price > pos.high_water_mark:
+                    pos.high_water_mark = current_price
+
+                if not config.DRY_RUN:
+                    if current_price >= 0.90:
+                        logger.info(
+                            f"[BTC-PENNY] WIN @ {current_price:.3f} "
+                            f"({pos.shares:.2f} shares) — claiming  {pos.question[:50]}"
+                        )
+                        self._close_position(token_id, current_price=current_price)
+                        continue
+
+                    # Trailing stop: activate once peak ≥ 0.20, floor = 50% of peak
+                    # Example: peak 42¢ → floor 21¢. Sell if price retreats below floor.
+                    if pos.high_water_mark >= 0.20:
+                        _trail_floor = pos.high_water_mark * 0.50
+                        if current_price < _trail_floor:
+                            logger.info(
+                                f"[BTC-PENNY] Trailing stop — peak={pos.high_water_mark:.3f} "
+                                f"now={current_price:.3f} floor={_trail_floor:.3f} "
+                                f"— locking in gain  {pos.question[:45]}"
+                            )
+                            self._close_position(token_id, current_price=current_price)
+                            continue
+
+                position_snapshots.append((pos, current_price))
                 continue
 
             # ── WIN auto-claim ────────────────────────────────────────────────
