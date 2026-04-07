@@ -575,8 +575,8 @@ class ScannerMixin:
         self._start_penny_watcher()  # no-op after first call
 
         if getattr(config, "PENNY_ONLY", False):
-            # All other strategies disabled — penny bets only.
-            pass
+            # All other strategies disabled — penny hedge + news_arb only.
+            self._run_news_arb()
         else:
             # ── Chainlink close-watch launcher ────────────────────────────────
             self._launch_chainlink_watches(updown)
