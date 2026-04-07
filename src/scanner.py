@@ -160,13 +160,14 @@ class ScannerMixin:
                             _side, _token_id, _opp_token_id, _mkt_id, _question, _end_date = _entry
                         else:
                             continue  # stale cache format, skip
-                        # Skip if market already closed
+                        # Skip if market is not freshly opened (must have >= 290s remaining)
                         if _end_date:
                             try:
                                 from datetime import datetime as _wdt2, timezone as _wtz2
                                 _end_ts = _wdt2.fromisoformat(_end_date.replace("Z", "+00:00"))
-                                if (_end_ts - _wdt2.now(_wtz2.utc)).total_seconds() <= 0:
-                                    continue
+                                _secs_left = (_end_ts - _wdt2.now(_wtz2.utc)).total_seconds()
+                                if _secs_left < 290:
+                                    continue  # market is not new (or already closed)
                             except Exception:
                                 pass
                         if _token_id in self._positions:
@@ -1098,20 +1099,32 @@ class ScannerMixin:
 
         from src.bot import OpenPosition
 
-        # Build the full BTC 5-min market list: filtered + near-close raw markets
-        # The secs < 90 filter drops markets exactly when prices reach penny levels.
+        # Build the full BTC 5-min market list: only newly-opened markets
+        # (secs_left >= 290 = within first 10 seconds of window opening).
+        # Penny prices appear near close, but buying near-close means buying into
+        # already-resolved or near-resolved markets. Only enter fresh windows.
+        from datetime import datetime as _dt_penny, timezone as _tz_penny
+        _now_ts = _dt_penny.now(_tz_penny.utc)
         _btc_all: list = []
         _seen_ids: set = set()
         for _m in updown_5m:
             if _detect_updown_market(_m.question) != "BTC":
                 continue
             _mid = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
+            # Only include markets in the first 10 seconds of their window
+            _secs_rem = 300.0
+            if getattr(_m, "end_date", None):
+                try:
+                    _end = _dt_penny.fromisoformat(_m.end_date.replace("Z", "+00:00"))
+                    _secs_rem = (_end - _now_ts).total_seconds()
+                except Exception:
+                    pass
+            if _secs_rem < 290:
+                continue  # not a newly-opened market, skip
             _seen_ids.add(_mid)
             _btc_all.append(_m)
-        # Add near-close BTC markets from raw unfiltered list
+        # Also check raw list for any freshly-opened BTC markets not yet in filtered list
         if updown_raw:
-            from datetime import datetime, timezone as _tz
-            _now_ts = datetime.now(_tz.utc)
             for _m in updown_raw:
                 if _detect_updown_market(_m.question) != "BTC":
                     continue
@@ -1119,15 +1132,14 @@ class ScannerMixin:
                     continue
                 _mid = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
                 if _mid in _seen_ids:
-                    continue  # already included from filtered list
+                    continue
                 if not getattr(_m, "active", True) or getattr(_m, "closed", False):
                     continue
-                # Only include markets still within their window (not yet closed)
                 if _m.end_date:
                     try:
-                        _end = datetime.fromisoformat(_m.end_date.replace("Z", "+00:00"))
+                        _end = _dt_penny.fromisoformat(_m.end_date.replace("Z", "+00:00"))
                         _secs = (_end - _now_ts).total_seconds()
-                        if 0 < _secs <= 300:  # must still be open
+                        if 290 <= _secs <= 300:  # first 10 seconds of new window only
                             _seen_ids.add(_mid)
                             _btc_all.append(_m)
                     except Exception:
