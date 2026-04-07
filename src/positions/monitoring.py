@@ -106,21 +106,15 @@ class MonitoringMixin:
             else:
                 current_price = ob.mid
 
-            # ── BTC penny bets: sell after 30s, bypass AUTO-CLEAR ────────────
-            if getattr(pos, "strategy", "") == "btc_penny":
-                if not config.DRY_RUN and pos.sell_at_ts > 0 and time.time() >= pos.sell_at_ts:
-                    logger.info(
-                        f"[BTC-PENNY] 30s elapsed — selling penny at market  {pos.question[:50]}"
-                    )
-                    self._close_position(token_id, current_price=current_price)
-                    continue
+            # ── BTC penny bets / opposing-side bets: bypass stop-loss but not WIN ──
+            # Both btc_penny and btc_penny_hedge hold to resolution.
+            # If price ≥ 0.90 (WIN) or ≤ 0.03 (LOSS), fall through to normal
+            # auto-claim / auto-clear so the position gets redeemed immediately.
+            _is_penny_strat = getattr(pos, "strategy", "") in ("btc_penny", "btc_penny_hedge")
+            if _is_penny_strat and (config.DRY_RUN or 0.03 < current_price < 0.90):
                 position_snapshots.append((pos, current_price))
                 continue
-
-            # ── BTC penny hedge: hold to resolution, bypass AUTO-CLEAR ────────
-            if getattr(pos, "strategy", "") == "btc_penny_hedge":
-                position_snapshots.append((pos, current_price))
-                continue
+            # current_price >= 0.90 or <= 0.03 → fall through to WIN/LOSS handling below
 
             # ── WIN auto-claim ────────────────────────────────────────────────
             if not config.DRY_RUN:
