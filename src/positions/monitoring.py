@@ -126,7 +126,21 @@ class MonitoringMixin:
                         self._close_position(token_id, current_price=current_price)
                         continue
 
-                    # Trailing stop: activate once peak ≥ 0.20, floor = 50% of peak
+                    # Quick take-profit: sell at 4× entry price (300% gain).
+                    # Pocket the sure money rather than risking a reversal.
+                    # Example: entry 1¢ → sell at 4¢ → ~$28 profit secured.
+                    _take_profit = pos.entry_price * 4.0
+                    if current_price >= _take_profit:
+                        logger.info(
+                            f"[BTC-PENNY] Take-profit @ {current_price:.3f} "
+                            f"({current_price / pos.entry_price:.0f}× entry={pos.entry_price:.3f}) "
+                            f"— pocketing gain  {pos.question[:45]}"
+                        )
+                        self._close_position(token_id, current_price=current_price)
+                        continue
+
+                    # Trailing stop: activate once peak ≥ 0.20, floor = 50% of peak.
+                    # Handles big runs (42¢+) that overshoot the 4× take-profit.
                     # Example: peak 42¢ → floor 21¢. Sell if price retreats below floor.
                     if pos.high_water_mark >= 0.20:
                         _trail_floor = pos.high_water_mark * 0.50
