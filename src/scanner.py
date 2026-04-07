@@ -151,7 +151,6 @@ class ScannerMixin:
         def _watch():
             _PENNY_MAX = 0.01
             _MAX_BET   = 10.0
-            _MIN_SECS  = 30   # don't buy if < 30s left in window
             from src.bot import OpenPosition
             from datetime import datetime as _wdt, timezone as _wtz
             while getattr(self, "_running", True):
@@ -162,18 +161,8 @@ class ScannerMixin:
                             _side, _token_id, _mkt_id, _question, _end_date = _entry
                         else:
                             _side, _token_id, _mkt_id, _question = _entry
-                            _end_date = ""
                         if _token_id in self._positions:
                             continue
-                        # Check time remaining — skip if window is almost closed
-                        if _end_date:
-                            try:
-                                _end_ts = _wdt.fromisoformat(_end_date.replace("Z", "+00:00"))
-                                _secs_rem = (_end_ts - _wdt.now(_wtz.utc)).total_seconds()
-                                if _secs_rem < _MIN_SECS:
-                                    continue
-                            except Exception:
-                                pass
                         _ob  = self._client.get_order_book(_token_id)
                         _ask = _ob.best_ask if _ob else None
                         if _ask is None or _ask > _PENNY_MAX:
@@ -1128,24 +1117,7 @@ class ScannerMixin:
         if hasattr(self, "_btc_penny_token_cache"):
             self._btc_penny_token_cache = _new_cache
 
-        _MIN_SECS_REMAINING = 30  # don't buy if < 30s left — no time for reversal
-
         for _m in _btc_all:
-            # Skip if not enough time left for a reversal to play out
-            if _m.end_date:
-                try:
-                    from datetime import datetime as _dt2, timezone as _tz2
-                    _end2 = _dt2.fromisoformat(_m.end_date.replace("Z", "+00:00"))
-                    _secs_left2 = (_end2 - _dt2.now(_tz2.utc)).total_seconds()
-                    if _secs_left2 < _MIN_SECS_REMAINING:
-                        logger.debug(
-                            f"[BTC-PENNY] Skipping — only {_secs_left2:.0f}s left "
-                            f"(need ≥{_MIN_SECS_REMAINING}s)  {_m.question[:45]}"
-                        )
-                        continue
-                except Exception:
-                    pass
-
             _mkt_id   = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
             _question = _m.question
 
