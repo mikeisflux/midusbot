@@ -149,7 +149,7 @@ class ScannerMixin:
         self._btc_penny_token_cache: list = []  # [(side, token_id, market_id, question)]
 
         def _watch():
-            _PENNY_MAX = 0.01
+            _PENNY_MAX = 0.15   # ≤15¢ on one side = signal to buy the other
             _MAX_BET   = 5.0
             from src.bot import OpenPosition
             while getattr(self, "_running", True):
@@ -166,7 +166,7 @@ class ScannerMixin:
                                 from datetime import datetime as _wdt2, timezone as _wtz2
                                 _end_ts = _wdt2.fromisoformat(_end_date.replace("Z", "+00:00"))
                                 _secs_left = (_end_ts - _wdt2.now(_wtz2.utc)).total_seconds()
-                                if _secs_left < 15:
+                                if _secs_left < 3:
                                     continue  # closed or about to close, skip
                             except Exception:
                                 pass
@@ -215,7 +215,20 @@ class ScannerMixin:
                         )
                 except Exception as exc:
                     logger.debug(f"[BTC-PENNY-FAST] watcher error: {exc}")
-                time.sleep(2.0)
+                # Rapid-fire 1s polling in the last 20s of any active window
+                _rapid = False
+                try:
+                    from datetime import datetime as _wdt3, timezone as _wtz3
+                    _now3 = _wdt3.now(_wtz3.utc)
+                    for _ce in list(self._btc_penny_token_cache):
+                        if len(_ce) == 6 and _ce[5]:
+                            _et = _wdt3.fromisoformat(_ce[5].replace("Z", "+00:00"))
+                            if (_et - _now3).total_seconds() <= 20:
+                                _rapid = True
+                                break
+                except Exception:
+                    pass
+                time.sleep(1.0 if _rapid else 2.0)
 
         t = threading.Thread(target=_watch, daemon=True, name="btc-penny-watcher")
         t.start()
@@ -1068,7 +1081,7 @@ class ScannerMixin:
         Requires >= 15 seconds remaining so the order can settle.
         """
         _MAX_BET   = 5.0
-        _PENNY_MAX = 0.01   # ≤1¢ ask price on one side = signal to buy the other
+        _PENNY_MAX = 0.15   # ≤15¢ on one side = signal to buy the other (~85¢ opp)
 
         from src.bot import OpenPosition
         from datetime import datetime as _dt_penny, timezone as _tz_penny
@@ -1100,7 +1113,7 @@ class ScannerMixin:
                     try:
                         _end = _dt_penny.fromisoformat(_m.end_date.replace("Z", "+00:00"))
                         _secs = (_end - _now_ts).total_seconds()
-                        if 15 <= _secs <= 300:  # still open with time to settle
+                        if 3 <= _secs <= 300:  # still open with time to settle
                             _seen_ids.add(_mid)
                             _btc_all.append(_m)
                     except Exception:
