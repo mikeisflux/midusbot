@@ -150,7 +150,7 @@ class ScannerMixin:
 
         def _watch():
             _PENNY_MAX = 0.01
-            _MAX_BET   = 10.0
+            _MAX_BET   = 5.0
             from src.bot import OpenPosition
             from datetime import datetime as _wdt, timezone as _wtz
             while getattr(self, "_running", True):
@@ -1066,7 +1066,7 @@ class ScannerMixin:
         updown_raw: unfiltered UpDown market list — includes near-close markets
         (< 90s left) that were dropped from updown_5m but are prime penny targets.
         """
-        _MAX_BET   = 10.0
+        _MAX_BET   = 5.0
         _PENNY_MAX = 0.01   # ≤1¢ ask price triggers the buy
 
         from src.bot import OpenPosition
