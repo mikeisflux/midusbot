@@ -166,8 +166,8 @@ class ScannerMixin:
                                 from datetime import datetime as _wdt2, timezone as _wtz2
                                 _end_ts = _wdt2.fromisoformat(_end_date.replace("Z", "+00:00"))
                                 _secs_left = (_end_ts - _wdt2.now(_wtz2.utc)).total_seconds()
-                                if _secs_left <= 0:
-                                    continue  # market already closed
+                                if _secs_left < 3:
+                                    continue  # too close to close, skip
                                 if _secs_left > 15:
                                     continue  # not in buy window yet (last 15s only)
                             except Exception:
