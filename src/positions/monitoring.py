@@ -106,17 +106,16 @@ class MonitoringMixin:
             else:
                 current_price = ob.mid
 
-            # ── BTC penny bets / opposing-side bets: bypass stop-loss but not WIN ──
-            # Both btc_penny and btc_penny_hedge hold to resolution.
-            # btc_penny_hedge uses 0.97 threshold (not 0.90) to prevent re-entry:
-            # selling at 0.90 causes the watcher to immediately re-buy the same
-            # market (penny still ≤0.18), compounding costs for near-zero gain.
+            # ── BTC penny bets / opposing-side bets: bypass stop-loss and auto-claim ──
+            # btc_penny_hedge positions always resolve to 1.0 — never sell via CLOB.
+            # Attempting a CLOB sell after settlement fails (balance=0) because
+            # Polymarket auto-redeems the winning token before we can sell it.
+            # The reconcile loop / ghost-pos handler records P&L on settlement.
             _is_penny_strat = getattr(pos, "strategy", "") in ("btc_penny", "btc_penny_hedge")
-            _win_threshold = 0.97 if getattr(pos, "strategy", "") == "btc_penny_hedge" else 0.90
-            if _is_penny_strat and (config.DRY_RUN or 0.03 < current_price < _win_threshold):
+            if _is_penny_strat and (config.DRY_RUN or current_price > 0.03):
                 position_snapshots.append((pos, current_price))
                 continue
-            # current_price >= _win_threshold or <= 0.03 → fall through to WIN/LOSS handling below
+            # current_price <= 0.03 → fall through to LOSS handling below
 
             # ── WIN auto-claim ────────────────────────────────────────────────
             if not config.DRY_RUN:
