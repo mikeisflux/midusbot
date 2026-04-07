@@ -117,6 +117,14 @@ class MonitoringMixin:
                 continue
             # current_price <= 0.03 → fall through to LOSS handling below
 
+            # ── Chainlink-confirmed positions: bypass stop-loss ───────────────
+            # Oracle has already confirmed the outcome — pre-settlement price
+            # dips are noise. Stop-loss here books a loss on a guaranteed winner.
+            # Hold to resolution; auto-claim / ghost-pos handler records P&L.
+            if getattr(pos, "strategy", "") == "chainlink":
+                position_snapshots.append((pos, current_price))
+                continue
+
             # ── WIN auto-claim ────────────────────────────────────────────────
             if not config.DRY_RUN:
                 if current_price >= 0.90:
