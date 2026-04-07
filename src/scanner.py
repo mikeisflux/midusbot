@@ -168,6 +168,8 @@ class ScannerMixin:
                                 _secs_left = (_end_ts - _wdt2.now(_wtz2.utc)).total_seconds()
                                 if _secs_left < 3:
                                     continue  # closed or about to close, skip
+                                if _secs_left > 15:
+                                    continue  # not in buy window yet (last 15s only)
                             except Exception:
                                 pass
                         # Check if this token is at penny price (the SIGNAL)
@@ -223,7 +225,7 @@ class ScannerMixin:
                     for _ce in list(self._btc_penny_token_cache):
                         if len(_ce) == 6 and _ce[5]:
                             _et = _wdt3.fromisoformat(_ce[5].replace("Z", "+00:00"))
-                            if (_et - _now3).total_seconds() <= 20:
+                            if (_et - _now3).total_seconds() <= 15:
                                 _rapid = True
                                 break
                 except Exception:
