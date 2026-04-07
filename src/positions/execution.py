@@ -568,13 +568,13 @@ class ExecutionMixin:
             logger.info(f"[CHAINLINK-ENTRY] No orderbook for {token_id[:12]} — skip")
             return False
 
-        entry_price = round(min(ob.best_ask + 0.01, CHAINLINK_MAX_ENTRY), 2)
-        if entry_price > CHAINLINK_MAX_ENTRY:
+        if ob.best_ask > CHAINLINK_MAX_ENTRY:
             logger.info(
                 f"[CHAINLINK-ENTRY] best_ask={ob.best_ask:.3f} > max={CHAINLINK_MAX_ENTRY} "
                 f"— margin too thin, skip {question[:40]}"
             )
             return False
+        entry_price = round(min(ob.best_ask + 0.01, CHAINLINK_MAX_ENTRY), 2)
 
         # Size: standard Kelly position (same as normal entries)
         usdc   = min(config.MAX_POSITION_USDC, max(3.0, (_wallet or 50.0) * 0.12))

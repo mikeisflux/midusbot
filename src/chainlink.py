@@ -49,10 +49,10 @@ _AGGREGATOR_ABI = [
 ]
 
 # Maximum entry price for Chainlink-confirmed positions.
-# At 0.94 we still earn 6.4% on resolution — guaranteed when oracle confirmed.
-# Raised from 0.92: by the time oracle fires (~30-90s before close), the book
-# has typically moved to 0.92-0.94 and FOK at 0.92 finds no liquidity.
-CHAINLINK_MAX_ENTRY = 0.94
+# At 0.97 we still earn 3% on resolution — guaranteed when oracle confirmed.
+# Raised from 0.94: by the time oracle fires (~18-35s before close), the book
+# has moved to 0.95-0.97 and FOK at 0.94 finds no liquidity.
+CHAINLINK_MAX_ENTRY = 0.97
 
 # Start intensive polling this many seconds before expected window close.
 POLL_LEAD_SECS = 60
