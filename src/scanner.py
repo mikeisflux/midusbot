@@ -555,8 +555,11 @@ class ScannerMixin:
         # No window-level cooldown — per-asset 300s cooldown (COOLDOWN_SECS) and
         # signal quality gates (ENTRY_PRICE_GUARD, thresholds) are sufficient filters.
         if getattr(config, "PENNY_ONLY", False):
-            if pending_signals:
-                logger.debug(f"[PENNY-ONLY] Skipping {len(pending_signals)} oracle-lag signals")
+            # Execute oracle-lag/trend-follow signals — these are the core edge
+            for sig, _asset in pending_signals:
+                if self._execute_signal(sig):
+                    trades_placed += 1
+                    self._asset_last_bet[_asset] = time.time()
         elif not getattr(config, "CHAINLINK_ONLY", False):
             for sig, _asset in pending_signals:
                 if self._execute_signal(sig):
