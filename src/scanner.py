@@ -150,7 +150,7 @@ class ScannerMixin:
 
         def _watch():
             _PENNY_MAX = 0.18   # ≤18¢ on one side = signal to buy the other
-            _MAX_BET   = 5.0
+            _MAX_BET   = 7.50
             from src.bot import OpenPosition
             while getattr(self, "_running", True):
                 try:
