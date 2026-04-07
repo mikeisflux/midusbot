@@ -112,6 +112,14 @@ class ChainlinkMonitor:
         except ImportError:
             _POLYGON_RPC_URLS.extend(_cfg.POLYGON_RPC_FALLBACKS)
 
+        if not _POLYGON_RPC_URLS:
+            logger.warning(
+                "[CHAINLINK] No RPC URLs configured — oracle monitor disabled. "
+                "Set POLYGON_RPC_PRIMARY in .env for chainlink to work."
+            )
+            return False
+
+        last_exc: Exception | None = None
         for rpc_url in _POLYGON_RPC_URLS:
             try:
                 w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 5}))
@@ -132,15 +140,24 @@ class ChainlinkMonitor:
                 dec = contract.functions.decimals().call()
                 self._contract = contract
                 self._decimals = int(dec)
+
+                # Verify the feed is actually returning data
+                _r, _ans, _s, _upd, _arnd = contract.functions.latestRoundData().call()
+                _live_price = _ans / (10 ** int(dec))
                 logger.info(
                     f"[CHAINLINK] Connected via {rpc_url.split('/')[2]} — "
-                    f"BTC/USD feed live (decimals={dec})"
+                    f"BTC/USD feed live (decimals={dec}, "
+                    f"current price=${_live_price:,.2f}, round={_r})"
                 )
                 return True
             except Exception as exc:
-                logger.debug(f"[CHAINLINK] RPC {rpc_url} failed: {exc}")
+                logger.warning(f"[CHAINLINK] RPC {rpc_url.split('/')[2]} failed: {exc}")
+                last_exc = exc
 
-        logger.warning("[CHAINLINK] All RPCs failed — oracle monitor disabled")
+        logger.error(
+            f"[CHAINLINK] All {len(_POLYGON_RPC_URLS)} RPCs failed — oracle monitor DISABLED. "
+            f"Chainlink entries will not fire. Last error: {last_exc}"
+        )
         return False
 
     @property
@@ -162,7 +179,7 @@ class ChainlinkMonitor:
             price = answer / (10 ** self._decimals)
             return OracleRound(int(round_id), price, int(updated_at))
         except Exception as exc:
-            logger.debug(f"[CHAINLINK] latestRoundData error: {exc}")
+            logger.warning(f"[CHAINLINK] latestRoundData RPC error: {exc}")
             return None
 
     # ------------------------------------------------------------------ #
@@ -205,7 +222,7 @@ class ChainlinkMonitor:
         # Grab baseline round so we can detect changes
         baseline = self.get_latest()
         if baseline is None:
-            logger.debug(f"[CHAINLINK] {tag} — baseline fetch failed, aborting watch")
+            logger.error(f"[CHAINLINK] {tag} — baseline fetch failed, aborting watch (RPC down?)")
             return
 
         logger.info(
@@ -249,9 +266,10 @@ class ChainlinkMonitor:
                 )
             prev_updated_at = r.updated_at
 
-        logger.debug(
-            f"[CHAINLINK] {tag} — watch expired without new round "
-            f"(deadline={window_close_ts + POLL_TRAIL_SECS:.0f})"
+        logger.warning(
+            f"[CHAINLINK] {tag} — watch expired without oracle update "
+            f"(polled for {POLL_LEAD_SECS + POLL_TRAIL_SECS}s, no new round near close). "
+            f"Oracle may be stale or RPC lagging."
         )
 
     def watch_async(
