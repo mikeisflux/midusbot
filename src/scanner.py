@@ -214,6 +214,7 @@ class ScannerMixin:
                             question=_question, entry_price=_opp_ask, shares=float(_opp_shares),
                             cost_usdc=_opp_cost, confidence="OPP",
                             dry_run=config.DRY_RUN, strategy="btc_penny_hedge",
+                            momentum_signal=0.0, imbalance_signal=0.0, composite_signal=0.0,
                         )
                 except Exception as exc:
                     logger.debug(f"[BTC-PENNY-FAST] watcher error: {exc}")
@@ -1191,6 +1192,7 @@ class ScannerMixin:
                     question=_question, entry_price=_opp_ask, shares=float(_opp_shares),
                     cost_usdc=_opp_cost, confidence="OPP",
                     dry_run=config.DRY_RUN, strategy="btc_penny_hedge",
+                    momentum_signal=0.0, imbalance_signal=0.0, composite_signal=0.0,
                 )
 
 
