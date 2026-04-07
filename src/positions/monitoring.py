@@ -117,6 +117,30 @@ class MonitoringMixin:
                 if current_price > pos.high_water_mark:
                     pos.high_water_mark = current_price
 
+                # If the orderbook is gone, the market resolved — check CLOB for winner
+                if not config.DRY_RUN and book_is_empty and pos.market_id:
+                    try:
+                        _bpmkt = clob_mkt or self._client.get_clob_market(pos.market_id)
+                        if _bpmkt:
+                            _bp_active = _bpmkt.get("active", True)
+                            _bp_closed = _bpmkt.get("closed", False)
+                            if not _bp_active or _bp_closed:
+                                # Market resolved — redeem and remove regardless of displayed price
+                                logger.info(
+                                    f"[BTC-PENNY] Market resolved — redeeming  {pos.question[:50]}"
+                                )
+                                neg_risk = bool(_bpmkt.get("neg_risk", False))
+                                self._client.redeem_position(pos.market_id, neg_risk=neg_risk)
+                                pnl = self._learner.record_close(token_id, current_price)
+                                cost = pos.cost_usdc
+                                self._risk.record_close(pnl_usdc=pnl, cost_usdc=cost)
+                                self._dash_state.record_closed_trade(pnl, fee_usdc=0.0)
+                                del self._positions[token_id]
+                                self._save_positions()
+                                continue
+                    except Exception as _bp_e:
+                        logger.debug(f"[BTC-PENNY] resolved-market check failed: {_bp_e}")
+
                 if not config.DRY_RUN:
                     if current_price >= 0.90:
                         logger.info(
