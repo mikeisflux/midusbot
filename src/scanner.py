@@ -541,7 +541,9 @@ class ScannerMixin:
                 )
 
         # ── BTC penny bets ($0.01 tokens) — HIGHEST PRIORITY ─────────────────
-        self._scan_btc_penny_bets(updown_5m)
+        # Pass the raw unfiltered updown list so near-close markets (< 90s left)
+        # are included — that's exactly when one side drops to ≤$0.01.
+        self._scan_btc_penny_bets(updown_5m, updown_raw=updown)
         self._start_penny_watcher()  # no-op after first call
 
         if getattr(config, "PENNY_ONLY", False):
@@ -1047,33 +1049,67 @@ class ScannerMixin:
                 f"{_secs_left:.0f}s to close | start_btc=${_start_btc:,.2f}"
             )
 
-    def _scan_btc_penny_bets(self, updown_5m: list) -> None:
+    def _scan_btc_penny_bets(self, updown_5m: list, updown_raw: list | None = None) -> None:
         """
         Buy ANY BTC 5-min UpDown token priced at ≤$0.01, in any direction,
         in any window, at all costs. Max $10 per token. Both YES and NO in
         the same window are bought independently if both are ≤$0.01.
         Bypasses ALL normal rules: cooldowns, exposure caps, trading pause,
         existing positions. Only skips if already holding that exact token.
+
+        updown_raw: unfiltered UpDown market list — includes near-close markets
+        (< 90s left) that were dropped from updown_5m but are prime penny targets.
         """
         _MAX_BET   = 10.0
         _PENNY_MAX = 0.01   # ≤1¢ ask price triggers the buy
 
         from src.bot import OpenPosition
 
-        # Rebuild the fast-watcher cache with current BTC token IDs
-        _new_cache = []
+        # Build the full BTC 5-min market list: filtered + near-close raw markets
+        # The secs < 90 filter drops markets exactly when prices reach penny levels.
+        _btc_all: list = []
+        _seen_ids: set = set()
         for _m in updown_5m:
             if _detect_updown_market(_m.question) != "BTC":
                 continue
+            _mid = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
+            _seen_ids.add(_mid)
+            _btc_all.append(_m)
+        # Add near-close BTC markets from raw unfiltered list
+        if updown_raw:
+            from datetime import datetime, timezone as _tz
+            _now_ts = datetime.now(_tz.utc)
+            for _m in updown_raw:
+                if _detect_updown_market(_m.question) != "BTC":
+                    continue
+                if _updown_window_mins(_m.question) != 5:
+                    continue
+                _mid = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
+                if _mid in _seen_ids:
+                    continue  # already included from filtered list
+                if not getattr(_m, "active", True) or getattr(_m, "closed", False):
+                    continue
+                # Only include markets within their window (0s–300s remaining)
+                if _m.end_date:
+                    try:
+                        _end = datetime.fromisoformat(_m.end_date.replace("Z", "+00:00"))
+                        _secs = (_end - _now_ts).total_seconds()
+                        if -30 <= _secs <= 300:  # within window (allow 30s grace after close)
+                            _seen_ids.add(_mid)
+                            _btc_all.append(_m)
+                    except Exception:
+                        pass
+
+        # Rebuild the fast-watcher cache with all BTC token IDs (including near-close)
+        _new_cache = []
+        for _m in _btc_all:
             _mkt_id_c = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
             _new_cache.append(("YES", _m.yes_token.token_id, _mkt_id_c, _m.question))
             _new_cache.append(("NO",  _m.no_token.token_id,  _mkt_id_c, _m.question))
         if hasattr(self, "_btc_penny_token_cache"):
             self._btc_penny_token_cache = _new_cache
 
-        for _m in updown_5m:
-            if _detect_updown_market(_m.question) != "BTC":
-                continue
+        for _m in _btc_all:
 
             _mkt_id   = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
             _question = _m.question
