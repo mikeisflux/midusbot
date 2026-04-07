@@ -555,11 +555,7 @@ class ScannerMixin:
         # No window-level cooldown — per-asset 300s cooldown (COOLDOWN_SECS) and
         # signal quality gates (ENTRY_PRICE_GUARD, thresholds) are sufficient filters.
         if getattr(config, "PENNY_ONLY", False):
-            # Execute oracle-lag/trend-follow signals — these are the core edge
-            for sig, _asset in pending_signals:
-                if self._execute_signal(sig):
-                    trades_placed += 1
-                    self._asset_last_bet[_asset] = time.time()
+            pass  # NEWS_ONLY mode — no crypto oracle-lag signals
         elif not getattr(config, "CHAINLINK_ONLY", False):
             for sig, _asset in pending_signals:
                 if self._execute_signal(sig):
@@ -571,15 +567,13 @@ class ScannerMixin:
                     f"[CHAINLINK-ONLY] Skipping {len(pending_signals)} oracle-lag signals"
                 )
 
-        # ── BTC penny bets ($0.01 tokens) — HIGHEST PRIORITY ─────────────────
-        # Pass the raw unfiltered updown list so near-close markets (< 90s left)
-        # are included — that's exactly when one side drops to ≤$0.01.
-        self._scan_btc_penny_bets(updown_5m, updown_raw=updown)
-        self._start_penny_watcher()  # no-op after first call
+        # ── BTC penny bets ($0.01 tokens) ────────────────────────────────────
+        if not getattr(config, "PENNY_ONLY", False):
+            self._scan_btc_penny_bets(updown_5m, updown_raw=updown)
+            self._start_penny_watcher()  # no-op after first call
 
         if getattr(config, "PENNY_ONLY", False):
-            # All other strategies disabled — penny hedge + news_arb + chainlink only.
-            self._launch_chainlink_watches(updown)
+            # NEWS_ONLY mode — all crypto strategies disabled, news arb only.
             self._run_news_arb()
         else:
             # ── Chainlink close-watch launcher ────────────────────────────────
