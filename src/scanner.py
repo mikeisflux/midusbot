@@ -1092,20 +1092,20 @@ class ScannerMixin:
         from datetime import datetime as _dt_penny, timezone as _tz_penny
         _now_ts = _dt_penny.now(_tz_penny.utc)
 
-        # Build the full 5-min market list for all assets: all open markets (any stage of window)
+        # Build the full 5-min market list for BTC + ETH: all open markets (any stage of window)
         # Penny prices appear near close — that's the signal we're watching for.
         _btc_all: list = []
         _seen_ids: set = set()
         for _m in updown_5m:
-            if not _detect_updown_market(_m.question):
+            if _detect_updown_market(_m.question) not in ("BTC", "ETH"):
                 continue
             _mid = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
             _seen_ids.add(_mid)
             _btc_all.append(_m)
-        # Add near-close markets dropped by the secs<90 filter
+        # Add near-close BTC/ETH markets dropped by the secs<90 filter
         if updown_raw:
             for _m in updown_raw:
-                if not _detect_updown_market(_m.question):
+                if _detect_updown_market(_m.question) not in ("BTC", "ETH"):
                     continue
                 if _updown_window_mins(_m.question) != 5:
                     continue
