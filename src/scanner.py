@@ -160,85 +160,59 @@ class ScannerMixin:
                             _side, _token_id, _opp_token_id, _mkt_id, _question, _end_date = _entry
                         else:
                             continue  # stale cache format, skip
-                        # Skip if market is not freshly opened (must have >= 290s remaining)
+                        # Skip if market has already closed (need >= 15s to settle)
                         if _end_date:
                             try:
                                 from datetime import datetime as _wdt2, timezone as _wtz2
                                 _end_ts = _wdt2.fromisoformat(_end_date.replace("Z", "+00:00"))
                                 _secs_left = (_end_ts - _wdt2.now(_wtz2.utc)).total_seconds()
-                                if _secs_left < 290:
-                                    continue  # market is not new (or already closed)
+                                if _secs_left < 15:
+                                    continue  # closed or about to close, skip
                             except Exception:
                                 pass
-                        if _token_id in self._positions:
-                            continue
+                        # Check if this token is at penny price (the SIGNAL)
                         _ob  = self._client.get_order_book(_token_id)
                         _ask = _ob.best_ask if _ob else None
                         if _ask is None or _ask > _PENNY_MAX:
                             continue
-                        _ask    = max(_ask, 0.001)
-                        _shares = int(_MAX_BET / _ask)
-                        if _shares < config.MIN_ORDER_SHARES:
+                        # Penny detected — buy the OPPOSING (winning) side, not the penny
+                        _opp_side = "NO" if _side == "YES" else "YES"
+                        if not _opp_token_id or _opp_token_id in self._positions:
+                            continue
+                        _opp_ob  = self._client.get_order_book(_opp_token_id)
+                        _opp_ask = _opp_ob.best_ask if _opp_ob else None
+                        if not _opp_ask or _opp_ask <= 0 or _opp_ask >= 1.0:
+                            continue
+                        _opp_shares = max(1, int(_MAX_BET / _opp_ask))
+                        if _opp_shares < config.MIN_ORDER_SHARES:
                             continue
                         logger.info(
-                            f"[BTC-PENNY-FAST] {_side} @ ${_ask:.4f} — buying {_shares} shares "
-                            f"for ${_MAX_BET:.2f}  {_question[:45]}"
+                            f"[BTC-OPP-FAST] {_side} penny @ ${_ask:.4f} → buying {_opp_side} "
+                            f"@ ${_opp_ask:.4f} ({_opp_shares} shares)  {_question[:45]}"
                         )
                         resp = self._client.place_limit_order(
-                            token_id=_token_id, side="BUY",
-                            price=round(_ask, 4), size=float(_shares), fok=False,
+                            token_id=_opp_token_id, side="BUY",
+                            price=round(_opp_ask, 4), size=float(_opp_shares), fok=False,
                         )
                         if not resp:
                             continue
-                        _cost = _shares * _ask
-                        _sell_ts = time.time() + 30.0
-                        self._positions[_token_id] = OpenPosition(
+                        _opp_cost = _opp_shares * _opp_ask
+                        self._positions[_opp_token_id] = OpenPosition(
                             market_id=_mkt_id, question=_question,
-                            token_id=_token_id, side=_side,
-                            shares=float(_shares), entry_price=_ask, cost_usdc=_cost,
-                            confidence="PENNY", entry_time=time.time(),
-                            strategy="btc_penny", sell_at_ts=_sell_ts,
+                            token_id=_opp_token_id, side=_opp_side,
+                            shares=float(_opp_shares), entry_price=_opp_ask,
+                            cost_usdc=_opp_cost, confidence="OPP",
+                            entry_time=time.time(), strategy="btc_penny_hedge",
                         )
                         self._save_positions()
-                        self._risk.record_open(cost_usdc=_cost)
+                        self._risk.record_open(cost_usdc=_opp_cost)
                         self._dash_state.orders_placed += 1
                         self._learner.record_open(
-                            market_id=_mkt_id, token_id=_token_id, side=_side,
-                            question=_question, entry_price=_ask, shares=float(_shares),
-                            cost_usdc=_cost, confidence="PENNY",
-                            dry_run=config.DRY_RUN, strategy="btc_penny",
+                            market_id=_mkt_id, token_id=_opp_token_id, side=_opp_side,
+                            question=_question, entry_price=_opp_ask, shares=float(_opp_shares),
+                            cost_usdc=_opp_cost, confidence="OPP",
+                            dry_run=config.DRY_RUN, strategy="btc_penny_hedge",
                         )
-                        # Immediately buy opposing side ($5) — hold to resolution
-                        if _opp_token_id and _opp_token_id not in self._positions:
-                            try:
-                                _opp_side = "NO" if _side == "YES" else "YES"
-                                _opp_ob   = self._client.get_order_book(_opp_token_id)
-                                _opp_ask  = _opp_ob.best_ask if _opp_ob else None
-                                if _opp_ask and 0 < _opp_ask < 1.0:
-                                    _opp_shares = max(1, int(_MAX_BET / _opp_ask))
-                                    _opp_resp = self._client.place_limit_order(
-                                        token_id=_opp_token_id, side="BUY",
-                                        price=round(_opp_ask, 4),
-                                        size=float(_opp_shares), fok=False,
-                                    )
-                                    if _opp_resp:
-                                        _opp_cost = _opp_shares * _opp_ask
-                                        self._positions[_opp_token_id] = OpenPosition(
-                                            market_id=_mkt_id, question=_question,
-                                            token_id=_opp_token_id, side=_opp_side,
-                                            shares=float(_opp_shares), entry_price=_opp_ask,
-                                            cost_usdc=_opp_cost, confidence="PENNY-HEDGE",
-                                            entry_time=time.time(), strategy="btc_penny_hedge",
-                                        )
-                                        self._save_positions()
-                                        self._risk.record_open(cost_usdc=_opp_cost)
-                                        self._dash_state.orders_placed += 1
-                                        logger.info(
-                                            f"[BTC-PENNY-HEDGE] {_opp_side} @ ${_opp_ask:.4f} "
-                                            f"— {_opp_shares} shares  {_question[:45]}"
-                                        )
-                            except Exception as _he:
-                                logger.debug(f"[BTC-PENNY-HEDGE] hedge order failed: {_he}")
                 except Exception as exc:
                     logger.debug(f"[BTC-PENNY-FAST] watcher error: {exc}")
                 time.sleep(2.0)
@@ -1085,45 +1059,32 @@ class ScannerMixin:
 
     def _scan_btc_penny_bets(self, updown_5m: list, updown_raw: list | None = None) -> None:
         """
-        Buy ANY BTC 5-min UpDown token priced at ≤$0.01, in any direction,
-        in any window, at all costs. Max $10 per token. Both YES and NO in
-        the same window are bought independently if both are ≤$0.01.
-        Bypasses ALL normal rules: cooldowns, exposure caps, trading pause,
-        existing positions. Only skips if already holding that exact token.
+        Use ≤$0.01 token price as a signal that the OTHER side has won.
+        When YES token is at a penny, the market has resolved heavily toward NO —
+        so we buy NO (the winning side). Skip the penny token itself.
 
         updown_raw: unfiltered UpDown market list — includes near-close markets
-        (< 90s left) that were dropped from updown_5m but are prime penny targets.
+        (< 90s left) which is exactly when penny prices appear.
+        Requires >= 15 seconds remaining so the order can settle.
         """
         _MAX_BET   = 5.0
-        _PENNY_MAX = 0.01   # ≤1¢ ask price triggers the buy
+        _PENNY_MAX = 0.01   # ≤1¢ ask price on one side = signal to buy the other
 
         from src.bot import OpenPosition
-
-        # Build the full BTC 5-min market list: only newly-opened markets
-        # (secs_left >= 290 = within first 10 seconds of window opening).
-        # Penny prices appear near close, but buying near-close means buying into
-        # already-resolved or near-resolved markets. Only enter fresh windows.
         from datetime import datetime as _dt_penny, timezone as _tz_penny
         _now_ts = _dt_penny.now(_tz_penny.utc)
+
+        # Build the full BTC 5-min market list: all open markets (any stage of window)
+        # Penny prices appear near close — that's the signal we're watching for.
         _btc_all: list = []
         _seen_ids: set = set()
         for _m in updown_5m:
             if _detect_updown_market(_m.question) != "BTC":
                 continue
             _mid = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
-            # Only include markets in the first 10 seconds of their window
-            _secs_rem = 300.0
-            if getattr(_m, "end_date", None):
-                try:
-                    _end = _dt_penny.fromisoformat(_m.end_date.replace("Z", "+00:00"))
-                    _secs_rem = (_end - _now_ts).total_seconds()
-                except Exception:
-                    pass
-            if _secs_rem < 290:
-                continue  # not a newly-opened market, skip
             _seen_ids.add(_mid)
             _btc_all.append(_m)
-        # Also check raw list for any freshly-opened BTC markets not yet in filtered list
+        # Add near-close BTC markets dropped by the secs<90 filter
         if updown_raw:
             for _m in updown_raw:
                 if _detect_updown_market(_m.question) != "BTC":
@@ -1139,14 +1100,15 @@ class ScannerMixin:
                     try:
                         _end = _dt_penny.fromisoformat(_m.end_date.replace("Z", "+00:00"))
                         _secs = (_end - _now_ts).total_seconds()
-                        if 290 <= _secs <= 300:  # first 10 seconds of new window only
+                        if 15 <= _secs <= 300:  # still open with time to settle
                             _seen_ids.add(_mid)
                             _btc_all.append(_m)
                     except Exception:
                         pass
 
-        # Rebuild the fast-watcher cache with all BTC token IDs (including near-close)
+        # Rebuild the fast-watcher cache
         # 6-tuple: (side, token_id, opp_token_id, mkt_id, question, end_date)
+        # side = the PENNY side (signal); opp_token_id = the side we actually BUY
         _new_cache = []
         for _m in _btc_all:
             _mkt_id_c   = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
@@ -1162,84 +1124,59 @@ class ScannerMixin:
             _mkt_id   = getattr(_m, "market_id", "") or getattr(_m, "id", "") or ""
             _question = _m.question
 
-            for (_side, _token_id, _opp_token_id) in [
+            for (_penny_side, _penny_token_id, _opp_token_id) in [
                 ("YES", _m.yes_token.token_id, _m.no_token.token_id),
                 ("NO",  _m.no_token.token_id,  _m.yes_token.token_id),
             ]:
-                if _token_id in self._positions:
-                    continue
-
-                _ob  = self._client.get_order_book(_token_id)
+                # Check if this side is at penny price (the signal)
+                _ob  = self._client.get_order_book(_penny_token_id)
                 _ask = (_ob.best_ask if _ob else None)
                 if _ask is None or _ask > _PENNY_MAX:
                     continue
 
-                _ask    = max(_ask, 0.001)
-                _shares = int(_MAX_BET / _ask)
-                if _shares < config.MIN_ORDER_SHARES:
+                # Penny detected — buy the OPPOSING (winning) side
+                _opp_side = "NO" if _penny_side == "YES" else "YES"
+                if _opp_token_id in self._positions:
+                    continue  # already holding the winning side
+
+                _opp_ob  = self._client.get_order_book(_opp_token_id)
+                _opp_ask = _opp_ob.best_ask if _opp_ob else None
+                if not _opp_ask or _opp_ask <= 0 or _opp_ask >= 1.0:
+                    continue
+
+                _opp_shares = max(1, int(_MAX_BET / _opp_ask))
+                if _opp_shares < config.MIN_ORDER_SHARES:
                     continue
 
                 logger.info(
-                    f"[BTC-PENNY] {_side} @ ${_ask:.4f} — buying {_shares} shares "
-                    f"for ${_MAX_BET:.2f}  {_question[:45]}"
+                    f"[BTC-OPP] {_penny_side} penny @ ${_ask:.4f} → buying {_opp_side} "
+                    f"@ ${_opp_ask:.4f} ({_opp_shares} shares)  {_question[:45]}"
                 )
-                resp = self._client.place_limit_order(
-                    token_id=_token_id, side="BUY",
-                    price=round(_ask, 4), size=float(_shares), fok=False,
+                _opp_resp = self._client.place_limit_order(
+                    token_id=_opp_token_id, side="BUY",
+                    price=round(_opp_ask, 4), size=float(_opp_shares), fok=False,
                 )
-                if not resp:
-                    logger.warning(f"[BTC-PENNY] Order failed for {_side} {_question[:40]}")
+                if not _opp_resp:
+                    logger.warning(f"[BTC-OPP] Order failed  {_question[:40]}")
                     continue
 
-                _cost    = _shares * _ask
-                _sell_ts = time.time() + 30.0
-                self._positions[_token_id] = OpenPosition(
+                _opp_cost = _opp_shares * _opp_ask
+                self._positions[_opp_token_id] = OpenPosition(
                     market_id=_mkt_id, question=_question,
-                    token_id=_token_id, side=_side,
-                    shares=float(_shares), entry_price=_ask, cost_usdc=_cost,
-                    confidence="PENNY", order_id=resp.get("id") if isinstance(resp, dict) else None,
-                    entry_time=time.time(), strategy="btc_penny", sell_at_ts=_sell_ts,
+                    token_id=_opp_token_id, side=_opp_side,
+                    shares=float(_opp_shares), entry_price=_opp_ask,
+                    cost_usdc=_opp_cost, confidence="OPP",
+                    entry_time=time.time(), strategy="btc_penny_hedge",
                 )
                 self._save_positions()
-                self._risk.record_open(cost_usdc=_cost)
+                self._risk.record_open(cost_usdc=_opp_cost)
                 self._dash_state.orders_placed += 1
                 self._learner.record_open(
-                    market_id=_mkt_id, token_id=_token_id, side=_side,
-                    question=_question, entry_price=_ask, shares=float(_shares),
-                    cost_usdc=_cost, confidence="PENNY",
-                    dry_run=config.DRY_RUN, strategy="btc_penny",
+                    market_id=_mkt_id, token_id=_opp_token_id, side=_opp_side,
+                    question=_question, entry_price=_opp_ask, shares=float(_opp_shares),
+                    cost_usdc=_opp_cost, confidence="OPP",
+                    dry_run=config.DRY_RUN, strategy="btc_penny_hedge",
                 )
-
-                # Immediately buy opposing side — hold to resolution
-                if _opp_token_id and _opp_token_id not in self._positions:
-                    try:
-                        _opp_side = "NO" if _side == "YES" else "YES"
-                        _opp_ob   = self._client.get_order_book(_opp_token_id)
-                        _opp_ask  = _opp_ob.best_ask if _opp_ob else None
-                        if _opp_ask and 0 < _opp_ask < 1.0:
-                            _opp_shares = max(1, int(_MAX_BET / _opp_ask))
-                            _opp_resp = self._client.place_limit_order(
-                                token_id=_opp_token_id, side="BUY",
-                                price=round(_opp_ask, 4), size=float(_opp_shares), fok=False,
-                            )
-                            if _opp_resp:
-                                _opp_cost = _opp_shares * _opp_ask
-                                self._positions[_opp_token_id] = OpenPosition(
-                                    market_id=_mkt_id, question=_question,
-                                    token_id=_opp_token_id, side=_opp_side,
-                                    shares=float(_opp_shares), entry_price=_opp_ask,
-                                    cost_usdc=_opp_cost, confidence="PENNY-HEDGE",
-                                    entry_time=time.time(), strategy="btc_penny_hedge",
-                                )
-                                self._save_positions()
-                                self._risk.record_open(cost_usdc=_opp_cost)
-                                self._dash_state.orders_placed += 1
-                                logger.info(
-                                    f"[BTC-PENNY-HEDGE] {_opp_side} @ ${_opp_ask:.4f} "
-                                    f"— {_opp_shares} shares  {_question[:45]}"
-                                )
-                    except Exception as _he:
-                        logger.debug(f"[BTC-PENNY-HEDGE] hedge failed: {_he}")
 
 
 def _record_error(msg: str) -> None:
