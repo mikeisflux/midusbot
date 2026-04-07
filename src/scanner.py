@@ -185,6 +185,8 @@ class ScannerMixin:
                         _opp_ask = _opp_ob.best_ask if _opp_ob else None
                         if not _opp_ask or _opp_ask <= 0 or _opp_ask >= 1.0:
                             continue
+                        if _opp_ask <= _PENNY_MAX:
+                            continue  # both sides under threshold — skip
                         _opp_shares = max(1, int(_MAX_BET / _opp_ask))
                         if _opp_shares < config.MIN_ORDER_SHARES:
                             continue
@@ -1171,6 +1173,8 @@ class ScannerMixin:
                 _opp_ask = _opp_ob.best_ask if _opp_ob else None
                 if not _opp_ask or _opp_ask <= 0 or _opp_ask >= 1.0:
                     continue
+                if _opp_ask <= _PENNY_MAX:
+                    continue  # both sides under threshold — skip
 
                 _opp_shares = max(1, int(_MAX_BET / _opp_ask))
                 if _opp_shares < config.MIN_ORDER_SHARES:
