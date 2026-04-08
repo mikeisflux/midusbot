@@ -242,6 +242,7 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
         self._dash_state.restore_from_journal(self._learner.journal)
         self._sync_wallet_balance()
         self._dash_state.add_equity_point()
+        self._start_news_arb_fast_monitor()
         self._dash_state.add_exec_log("info", "MIDUSBOT started — scanning Polymarket CLOB...")
         self._dash_state.add_exec_log("info",
             f"Config: MAX_POS=${config.MAX_POSITION_USDC}  "

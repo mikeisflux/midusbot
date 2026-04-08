@@ -134,8 +134,8 @@ NEWS_ARB_BUDGET_PCT:    float = float(_env("NEWS_ARB_BUDGET_PCT",   "0.15"))
 # 25% of $40 wallet = $10/trade. Overrides POSITION_WALLET_PCT for news_arb signals only.
 NEWS_ARB_POSITION_PCT:  float = float(_env("NEWS_ARB_POSITION_PCT", "0.25"))
 # News arb scalp exits — sell the repricing wave, don't hold to resolution
-NEWS_ARB_SCALP_TARGET: float = float(_env("NEWS_ARB_SCALP_TARGET", "0.07"))  # take profit +7pp above entry
-NEWS_ARB_SCALP_STOP:   float = float(_env("NEWS_ARB_SCALP_STOP",   "0.05"))  # stop loss  -5pp below entry
+NEWS_ARB_SCALP_TARGET: float = float(_env("NEWS_ARB_SCALP_TARGET", "0.04"))  # take profit +4pp above entry — sell fast
+NEWS_ARB_SCALP_STOP:   float = float(_env("NEWS_ARB_SCALP_STOP",   "0.03"))  # stop loss  -3pp below entry
 CHAINLINK_BUDGET_PCT:   float = float(_env("CHAINLINK_BUDGET_PCT",  "0.13"))
 ARB_BUDGET_PCT:         float = float(_env("ARB_BUDGET_PCT",        "0.25"))
 MOMENTUM_BUDGET_PCT:    float = float(_env("MOMENTUM_BUDGET_PCT",   "0.30"))

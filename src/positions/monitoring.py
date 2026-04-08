@@ -7,6 +7,7 @@ MonitoringMixin provides:
 """
 from __future__ import annotations
 
+import threading
 import time
 
 from loguru import logger
@@ -16,6 +17,72 @@ import config
 
 
 class MonitoringMixin:
+
+    def _start_news_arb_fast_monitor(self) -> None:
+        """
+        Background thread: checks news_arb/price_velocity positions every 2 seconds
+        and fires scalp exits the moment target/stop is hit — does NOT wait for the
+        15-second main loop. Call once after bot startup.
+        """
+        if getattr(self, "_news_monitor_started", False):
+            return
+        self._news_monitor_started = True
+        self._news_monitor_lock = threading.Lock()
+
+        def _loop() -> None:
+            while getattr(self, "_running", True):
+                try:
+                    self._fast_news_scalp_check()
+                except Exception as exc:
+                    logger.debug(f"[NEWS-FAST-MON] error: {exc}")
+                time.sleep(2)
+
+        t = threading.Thread(target=_loop, daemon=True, name="news-arb-monitor")
+        t.start()
+        logger.info("[NEWS-FAST-MON] Fast position monitor started (2s interval)")
+
+    def _fast_news_scalp_check(self) -> None:
+        """Check news_arb positions right now and exit if target/stop hit."""
+        news_positions = {
+            tid: pos for tid, pos in list(self._positions.items())
+            if getattr(pos, "strategy", "") in ("news_arb", "price_velocity")
+        }
+        if not news_positions:
+            return
+
+        scalp_target = float(getattr(config, "NEWS_ARB_SCALP_TARGET", 0.04))
+        scalp_stop   = float(getattr(config, "NEWS_ARB_SCALP_STOP",   0.03))
+
+        for token_id, pos in news_positions.items():
+            try:
+                ob = self._client.get_order_book(token_id)
+                if ob is None or ob.mid <= 0:
+                    continue
+                current_price = ob.mid
+                move = current_price - pos.entry_price
+
+                if move >= scalp_target:
+                    logger.info(
+                        f"[NEWS-FAST] TAKE PROFIT {pos.side} "
+                        f"{pos.entry_price:.3f}→{current_price:.3f} (+{move:.3f}) "
+                        f"{pos.question[:55]}"
+                    )
+                    with self._news_monitor_lock:
+                        if token_id in self._positions:
+                            self._close_position(token_id, current_price=current_price)
+
+                elif move <= -scalp_stop:
+                    logger.warning(
+                        f"[NEWS-FAST] STOP LOSS {pos.side} "
+                        f"{pos.entry_price:.3f}→{current_price:.3f} ({move:.3f}) "
+                        f"{pos.question[:55]}"
+                    )
+                    with self._news_monitor_lock:
+                        if token_id in self._positions:
+                            self._close_position(token_id, current_price=current_price)
+
+            except Exception as exc:
+                logger.debug(f"[NEWS-FAST] {token_id[:12]} check failed: {exc}")
 
     def _manage_positions(self) -> None:
         if not self._positions:
