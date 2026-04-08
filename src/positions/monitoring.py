@@ -106,6 +106,19 @@ class MonitoringMixin:
             else:
                 current_price = ob.mid
 
+            # ── Empty-book stop for news_arb ──────────────────────────────────
+            # If the orderbook is completely empty and we can't price the position,
+            # we have no way to stop-loss normally. For news_arb positions this is
+            # almost always bad: the market has resolved or gone one-sided against us.
+            # Force-close at whatever we can get rather than hold a worthless bag.
+            if current_price is None and getattr(pos, "strategy", "") in ("news_arb", "price_velocity"):
+                logger.warning(
+                    f"[NEWS-SCALP] Empty book — no price for {pos.side} {pos.question[:50]} "
+                    f"entry={pos.entry_price:.3f} — force-closing to avoid holding $0 bag"
+                )
+                to_close.append((token_id, 0.01))
+                continue
+
             # ── BTC penny bets / opposing-side bets: bypass stop-loss and auto-claim ──
             # btc_penny_hedge positions always resolve to 1.0 — never sell via CLOB.
             # Attempting a CLOB sell after settlement fails (balance=0) because
@@ -155,7 +168,7 @@ class MonitoringMixin:
 
             pnl_pct = (
                 (current_price - pos.entry_price) / pos.entry_price
-                if pos.entry_price else 0.0
+                if (pos.entry_price and current_price is not None) else 0.0
             )
 
             position_snapshots.append((pos, current_price))
@@ -282,8 +295,9 @@ class MonitoringMixin:
         for token_id, cur_price in to_close:
             self._close_position(token_id, current_price=cur_price)
 
-    def _gamma_position_price(self, pos) -> float:
-        """Fetch the current token price from CLOB market data (fallback for resolved markets)."""
+    def _gamma_position_price(self, pos) -> float | None:
+        """Fetch the current token price from CLOB market data (fallback for resolved markets).
+        Returns None if price cannot be determined — callers must handle this."""
         if pos.market_id:
             try:
                 mkt = self._client.get_clob_market(pos.market_id)
@@ -302,4 +316,5 @@ class MonitoringMixin:
                                 return price
             except Exception as exc:
                 logger.debug(f"_gamma_position_price CLOB fallback failed: {exc}")
-        return pos.entry_price
+        # Do NOT fall back to entry_price — that masks losses and disables stop-loss.
+        return None

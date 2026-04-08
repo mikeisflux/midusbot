@@ -796,9 +796,37 @@ class ScannerMixin:
                 )
                 continue
 
-            # Skip if already in this market
+            # Skip if already in this market (same side)
             if sig.token_id in self._positions:
                 continue
+
+            # ── News reversal: close opposite-side position in same market ────
+            # If we hold YES and news now says NO (or vice versa), the signal has
+            # reversed. Close the wrong-side position immediately before entering.
+            _opp_token_id = (
+                sig.no_token_id if sig.side == "YES" else sig.yes_token_id
+            ) if hasattr(sig, "no_token_id") else None
+            if _opp_token_id and _opp_token_id in self._positions:
+                _opp_pos = self._positions[_opp_token_id]
+                if getattr(_opp_pos, "strategy", "") in ("news_arb", "price_velocity"):
+                    logger.warning(
+                        f"[NEWS-REVERSAL] New {sig.side} signal contradicts open "
+                        f"{_opp_pos.side} position — closing reversed position first  "
+                        f"{sig.question[:55]}"
+                    )
+                    self._close_position(_opp_token_id, current_price=None)
+
+            # Also check by market_id for any opposite position in this market
+            for _tid, _pos in list(self._positions.items()):
+                if (getattr(_pos, "market_id", "") == sig.market_id
+                        and _pos.side != sig.side
+                        and getattr(_pos, "strategy", "") in ("news_arb", "price_velocity")):
+                    logger.warning(
+                        f"[NEWS-REVERSAL] {sig.side} signal reverses open {_pos.side} "
+                        f"in same market — force-closing  {sig.question[:55]}"
+                    )
+                    self._close_position(_tid, current_price=None)
+                    break
 
             # Fetch live order book for best_ask/best_bid
             try:
