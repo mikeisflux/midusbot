@@ -203,11 +203,16 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
         commander.do_reset_dry = self._reset_sim_wallet
         commander.start()
 
-        if not config.DRY_RUN:
+        # Always cancel stale open orders, even in DRY_RUN mode.
+        # Handles the common case where the user sets DRY_RUN=true in .env
+        # and restarts — any live orders from the previous session must be cancelled.
+        try:
             stale = self._client.get_open_orders()
             if stale:
                 logger.info(f"Cancelling {len(stale)} stale open order(s) from previous session...")
                 self._client.cancel_all_orders()
+        except Exception as _exc:
+            logger.debug(f"[STARTUP] Order cancel check skipped: {_exc}")
 
         self._positions.clear()
         _pos_file = Path("data/positions.json")
@@ -215,8 +220,26 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
             _pos_file.unlink()
             logger.info("Cleared stale positions file — will re-reconcile from CLOB.")
 
-        if not config.DRY_RUN:
-            self._reconcile_positions()
+        # Always reconcile positions from CLOB.
+        # In DRY_RUN mode: if any live positions are found (left over from a previous
+        # live session), close them with real orders before entering paper-trading mode.
+        self._reconcile_positions()
+        if config.DRY_RUN and self._positions:
+            _live_count = len(self._positions)
+            logger.warning(
+                f"[DRY-RUN STARTUP] Found {_live_count} live position(s) on Polymarket — "
+                f"closing all with real orders before entering dry-run mode."
+            )
+            alerter.send(
+                f"DRY-RUN startup: closing {_live_count} live position(s) from previous session.",
+                level="warning",
+            )
+            for _tok in list(self._positions.keys()):
+                try:
+                    self._close_position(_tok)
+                except Exception as _exc:
+                    logger.error(f"[DRY-RUN STARTUP] Could not close {_tok[:16]}: {_exc}")
+            self._positions.clear()
 
         for token_id in list(self._sim._open.keys()):
             if not any(s["token_id"] == token_id for s in self._sim_queue):

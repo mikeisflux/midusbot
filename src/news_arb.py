@@ -32,7 +32,7 @@ NEWS_ARB_EDGE         = 0.08   # minimum probability divergence to fire signal (
 MIN_LIQUIDITY         = 100    # minimum market liquidity USDC (was 300 — too restrictive)
 POLL_INTERVAL         = 15     # poll RSS every 15 seconds
 MARKET_CACHE_TTL      = 300    # refresh market list every 5 min
-MAX_ARTICLE_AGE_SECS  = 3600   # ignore articles older than 1 hour
+MAX_ARTICLE_AGE_SECS  = 600    # ignore articles older than 10 minutes — freshness required
 HAIKU_BATCH_SIZE      = 25     # markets per Haiku screening call
 MAX_ARTICLES_PER_POLL = 10     # max new articles processed per poll cycle (was 5)
 
@@ -43,6 +43,24 @@ VELOCITY_MIN_MOVE      = 0.08  # minimum absolute price shift to investigate (8p
 VELOCITY_STABLE_SECS   = 1800  # market must have been flat this long before signal (30 min)
 VELOCITY_STABLE_MAX    = 0.025 # max allowed drift during the stable window (2.5pp)
 VELOCITY_COOLDOWN_SECS = 900   # suppress repeated signals on same market (15 min)
+
+# ── Title deduplication helpers ───────────────────────────────────────────────
+# Prevents follow-up / "extended version" articles on the same topic from
+# triggering a second position. Uses Jaccard similarity on content words.
+_STOP_WORDS = frozenset({
+    "the","a","an","in","on","at","to","for","of","and","or","but","is","are",
+    "was","were","be","been","being","have","has","had","will","would","could",
+    "should","may","might","with","from","by","up","as","his","her","its",
+    "their","this","that","these","those","new","says","said","say","after",
+    "over","into","than","more","also","about","how","who","what","when",
+    "update","breaking","analysis","exclusive","report","reports","sources",
+})
+
+def _title_tokens(title: str) -> frozenset:
+    """Return meaningful content words from a headline for similarity comparison."""
+    words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()
+    return frozenset(w for w in words if len(w) > 3 and w not in _STOP_WORDS)
+
 
 # ── RSS Feed Sources ─────────────────────────────────────────────────────────
 # Google News trick: any Google News search URL becomes an RSS feed by inserting /rss/
@@ -122,10 +140,37 @@ class NewsArbStrategy:
         # market_id → last time we fired a velocity signal (cooldown)
         self._velocity_fired: dict[str, float] = {}
         self._vel_thread: Optional[threading.Thread] = None
+        # Topic dedup: (timestamp, token_set) for articles we actually analyzed today
+        self._analyzed_titles: list[tuple[float, frozenset]] = []
 
     @property
     def available(self) -> bool:
         return bool(self._api_key)
+
+    def _is_topic_repeat(self, title: str) -> bool:
+        """True if this headline is a follow-up / extended version of a story already analyzed today."""
+        tokens = _title_tokens(title)
+        if not tokens:
+            return False
+        cutoff = time.time() - 86400  # rolling 24h window
+        for ts, prev in self._analyzed_titles:
+            if ts < cutoff:
+                continue
+            union = tokens | prev
+            if not union:
+                continue
+            jaccard = len(tokens & prev) / len(union)
+            if jaccard >= 0.45:  # 45% word overlap = same story
+                return True
+        return False
+
+    def _record_analyzed(self, title: str) -> None:
+        """Mark a headline as analyzed so follow-ups are suppressed."""
+        now = time.time()
+        self._analyzed_titles.append((now, _title_tokens(title)))
+        # Prune entries older than 24h
+        cutoff = now - 86400
+        self._analyzed_titles = [(ts, t) for ts, t in self._analyzed_titles if ts > cutoff]
 
     def maybe_poll(self) -> None:
         """Start background RSS poll if POLL_INTERVAL has elapsed."""
@@ -450,7 +495,15 @@ class NewsArbStrategy:
         signals: list[NewsArbSignal] = []
 
         for art in articles[:MAX_ARTICLES_PER_POLL]:
+            # Skip follow-up / "extended version" articles — same topic already analyzed today
+            if self._is_topic_repeat(art.title):
+                logger.debug(
+                    f"[NEWS-ARB] Topic repeat — skipping follow-up article: '{art.title[:65]}'"
+                )
+                continue
+
             logger.info(f"[NEWS-ARB] Screening: '{art.title[:65]}' ({art.source})")
+            self._record_analyzed(art.title)  # mark BEFORE calling Haiku (even if no match)
 
             # Stage 1 — Haiku semantic screening across all markets
             confirmed = self._haiku_screen(art, markets, api_client)
