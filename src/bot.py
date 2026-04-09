@@ -234,11 +234,15 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
                 f"DRY-RUN startup: closing {_live_count} live position(s) from previous session.",
                 level="warning",
             )
+            # Force DRY_RUN=False so sell calls send real orders.
+            # Both sell_via_swaps and place_limit_order short-circuit when DRY_RUN=True.
+            config.DRY_RUN = False
             for _tok in list(self._positions.keys()):
                 try:
                     self._close_position(_tok)
                 except Exception as _exc:
                     logger.error(f"[DRY-RUN STARTUP] Could not close {_tok[:16]}: {_exc}")
+            config.DRY_RUN = True
             self._positions.clear()
 
         for token_id in list(self._sim._open.keys()):
@@ -334,11 +338,15 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
                 "warning",
                 f"LIVE→DRY-RUN: closing {open_count} real position(s) before switching"
             )
+            # Temporarily force DRY_RUN=False so sell_via_swaps / place_limit_order
+            # send REAL orders. Both functions short-circuit when DRY_RUN=True.
+            config.DRY_RUN = False
             for token_id in list(self._positions.keys()):
                 try:
                     self._close_position(token_id)
                 except Exception as exc:
                     logger.error(f"[MODE-SWITCH] Could not close {token_id[:16]}… : {exc}")
+            config.DRY_RUN = True   # will be re-set below — be explicit
 
         # ── DRY-RUN → LIVE: discard sim state, reload real positions ─────
         if not dry_run:
