@@ -136,6 +136,9 @@ NEWS_ARB_POSITION_PCT:  float = float(_env("NEWS_ARB_POSITION_PCT", "0.25"))
 # News arb scalp exits — sell the repricing wave, don't hold to resolution
 NEWS_ARB_SCALP_TARGET: float = float(_env("NEWS_ARB_SCALP_TARGET", "0.04"))  # take profit +4pp above entry — sell fast
 NEWS_ARB_SCALP_STOP:   float = float(_env("NEWS_ARB_SCALP_STOP",   "0.03"))  # stop loss  -3pp below entry
+# Max token price to enter news arb — only buy underpriced tokens with room to appreciate.
+# Tokens already at 0.78 have little upside; we want tokens priced low that news pushes up.
+NEWS_ARB_MAX_ENTRY:    float = float(_env("NEWS_ARB_MAX_ENTRY",    "0.60"))  # skip if token ask > 60¢
 CHAINLINK_BUDGET_PCT:   float = float(_env("CHAINLINK_BUDGET_PCT",  "0.13"))
 ARB_BUDGET_PCT:         float = float(_env("ARB_BUDGET_PCT",        "0.25"))
 MOMENTUM_BUDGET_PCT:    float = float(_env("MOMENTUM_BUDGET_PCT",   "0.30"))

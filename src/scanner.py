@@ -796,43 +796,36 @@ class ScannerMixin:
                 )
                 continue
 
-            # Skip if already in this market (same side)
-            if sig.token_id in self._positions:
+            # Skip if already in this market on EITHER side — never hold YES and NO
+            # of the same question simultaneously. One bet per market, full stop.
+            _already_in = any(
+                getattr(p, "market_id", "") == sig.market_id
+                for p in self._positions.values()
+            )
+            if _already_in:
+                logger.debug(
+                    f"[NEWS-ARB] Already in market — skipping to avoid both-sides "
+                    f"{sig.question[:55]}"
+                )
                 continue
-
-            # ── News reversal: close opposite-side position in same market ────
-            # If we hold YES and news now says NO (or vice versa), the signal has
-            # reversed. Close the wrong-side position immediately before entering.
-            _opp_token_id = (
-                sig.no_token_id if sig.side == "YES" else sig.yes_token_id
-            ) if hasattr(sig, "no_token_id") else None
-            if _opp_token_id and _opp_token_id in self._positions:
-                _opp_pos = self._positions[_opp_token_id]
-                if getattr(_opp_pos, "strategy", "") in ("news_arb", "price_velocity"):
-                    logger.warning(
-                        f"[NEWS-REVERSAL] New {sig.side} signal contradicts open "
-                        f"{_opp_pos.side} position — closing reversed position first  "
-                        f"{sig.question[:55]}"
-                    )
-                    self._close_position(_opp_token_id, current_price=None)
-
-            # Also check by market_id for any opposite position in this market
-            for _tid, _pos in list(self._positions.items()):
-                if (getattr(_pos, "market_id", "") == sig.market_id
-                        and _pos.side != sig.side
-                        and getattr(_pos, "strategy", "") in ("news_arb", "price_velocity")):
-                    logger.warning(
-                        f"[NEWS-REVERSAL] {sig.side} signal reverses open {_pos.side} "
-                        f"in same market — force-closing  {sig.question[:55]}"
-                    )
-                    self._close_position(_tid, current_price=None)
-                    break
 
             # Fetch live order book for best_ask/best_bid
             try:
                 ob = self._client.get_order_book(sig.token_id)
             except Exception:
                 ob = None
+
+            # Only buy tokens that are UNDERPRICED — news should push the price UP.
+            # If the token is already expensive there's no room to appreciate.
+            # Default ceiling 0.60 — configurable via NEWS_ARB_MAX_ENTRY.
+            _max_entry = float(getattr(config, "NEWS_ARB_MAX_ENTRY", 0.60))
+            _ask_price = (ob.best_ask if ob and ob.best_ask else None) or sig.market_price
+            if _ask_price > _max_entry:
+                logger.debug(
+                    f"[NEWS-ARB] Token at {_ask_price:.2f} > ceiling {_max_entry:.2f} "
+                    f"— already expensive, skip  {sig.question[:55]}"
+                )
+                continue
 
             from src.strategy import TradeSignal
             ts = TradeSignal(
