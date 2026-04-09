@@ -319,36 +319,68 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
     def _set_mode(self, dry_run: bool, reason: str) -> None:
         """Switch between live and dry-run mode safely.
 
-        LIVE → DRY-RUN: close all open live positions at market before switching
-                        so real USDC isn't left unmanaged on Polymarket.
-        DRY-RUN → LIVE: discard pending sim trades (they're not real orders)
-                        and reconcile real positions from CLOB.
+        LIVE → DRY-RUN: re-reconcile, cancel open orders, sell all positions.
+        DRY-RUN → LIVE: fetch + log all open orders and positions from CLOB.
         """
         if dry_run == config.DRY_RUN:
             return  # already in requested mode, nothing to do
 
-        # ── LIVE → DRY-RUN: liquidate real open positions first ──────────
-        if dry_run and self._positions:
-            open_count = len(self._positions)
-            logger.warning(
-                f"[MODE-SWITCH] Switching to DRY-RUN with {open_count} open live position(s) — "
-                f"closing all at market to protect real capital."
-            )
-            self._dash_state.add_exec_log(
-                "warning",
-                f"LIVE→DRY-RUN: closing {open_count} real position(s) before switching"
-            )
-            # Temporarily force DRY_RUN=False so sell_via_swaps / place_limit_order
-            # send REAL orders. Both functions short-circuit when DRY_RUN=True.
-            config.DRY_RUN = False
-            for token_id in list(self._positions.keys()):
-                try:
-                    self._close_position(token_id)
-                except Exception as exc:
-                    logger.error(f"[MODE-SWITCH] Could not close {token_id[:16]}… : {exc}")
-            config.DRY_RUN = True   # will be re-set below — be explicit
+        # ── LIVE → DRY-RUN: liquidate everything on Polymarket ───────────
+        if dry_run:
+            # Step 1: re-reconcile so we have the freshest position list
+            logger.warning("[MODE-SWITCH] LIVE→DRY-RUN: re-reconciling positions from CLOB…")
+            try:
+                self._reconcile_positions()
+            except Exception as exc:
+                logger.warning(f"[MODE-SWITCH] Reconcile failed: {exc}")
 
-        # ── DRY-RUN → LIVE: discard sim state, reload real positions ─────
+            # Step 2: cancel any open (unfilled) limit orders
+            try:
+                _open_orders = self._client.get_open_orders()
+                if _open_orders:
+                    logger.warning(
+                        f"[MODE-SWITCH] Cancelling {len(_open_orders)} open order(s) before going dry:"
+                    )
+                    for _o in _open_orders:
+                        _oid   = str(_o.get("id") or _o.get("orderID") or "?")
+                        _side  = _o.get("side", "?")
+                        _price = _o.get("price", "?")
+                        _size  = _o.get("size") or _o.get("originalSize") or "?"
+                        _asset = str(_o.get("asset_id") or _o.get("tokenId") or _o.get("assetId") or "")[:16]
+                        logger.warning(
+                            f"  CANCEL {_side} {_size}@{_price}  token={_asset}…  id={_oid[:12]}…"
+                        )
+                    self._client.cancel_all_orders()
+            except Exception as exc:
+                logger.error(f"[MODE-SWITCH] Could not cancel open orders: {exc}")
+
+            # Step 3: sell all open positions using real orders
+            if self._positions:
+                open_count = len(self._positions)
+                logger.warning(
+                    f"[MODE-SWITCH] Selling {open_count} open position(s) before going dry:"
+                )
+                self._dash_state.add_exec_log(
+                    "warning",
+                    f"LIVE→DRY-RUN: selling {open_count} real position(s)"
+                )
+                for _tok, _pos in list(self._positions.items()):
+                    logger.warning(
+                        f"  SELL {_pos.side} {_pos.shares:.2f}@{_pos.entry_price:.4f} "
+                        f"= ${_pos.cost_usdc:.2f} — {_pos.question[:55]}"
+                    )
+                # Force DRY_RUN=False so sell_via_swaps / place_limit_order send REAL orders
+                config.DRY_RUN = False
+                for token_id in list(self._positions.keys()):
+                    try:
+                        self._close_position(token_id)
+                    except Exception as exc:
+                        logger.error(f"[MODE-SWITCH] Could not close {token_id[:16]}… : {exc}")
+                config.DRY_RUN = True   # restored below; explicit here for safety
+            else:
+                logger.info("[MODE-SWITCH] No open positions to sell.")
+
+        # ── DRY-RUN → LIVE: log everything found on Polymarket ───────────
         if not dry_run:
             sim_count = len(getattr(self._sim, "_open", {}))
             if sim_count:
@@ -361,11 +393,41 @@ class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):
                 self._save_sim_queue()
                 self._sim._save()
 
-            # Re-reconcile so bot picks up any real open positions from Polymarket
-            logger.info("[MODE-SWITCH] Re-reconciling positions from CLOB after switch to LIVE…")
+            # Fetch and log all open orders on Polymarket before reconciling
+            try:
+                _open_orders = self._client.get_open_orders()
+                if _open_orders:
+                    logger.info(
+                        f"[LIVE MODE] {len(_open_orders)} open order(s) found on Polymarket:"
+                    )
+                    for _o in _open_orders:
+                        _oid   = str(_o.get("id") or _o.get("orderID") or "?")
+                        _side  = _o.get("side", "?")
+                        _price = _o.get("price", "?")
+                        _size  = _o.get("size") or _o.get("originalSize") or "?"
+                        _asset = str(_o.get("asset_id") or _o.get("tokenId") or _o.get("assetId") or "")[:16]
+                        logger.info(
+                            f"  ORDER {_side} {_size}@{_price}  token={_asset}…  id={_oid[:12]}…"
+                        )
+                else:
+                    logger.info("[LIVE MODE] No open orders found on Polymarket.")
+            except Exception as exc:
+                logger.warning(f"[LIVE MODE] Could not fetch open orders: {exc}")
+
+            # Reconcile and log all open positions
+            logger.info("[LIVE MODE] Reconciling positions from CLOB…")
             try:
                 self._positions.clear()
                 self._reconcile_positions()
+                if self._positions:
+                    logger.info(f"[LIVE MODE] {len(self._positions)} open position(s):")
+                    for _tok, _pos in self._positions.items():
+                        logger.info(
+                            f"  {_pos.side} {_pos.shares:.2f}@{_pos.entry_price:.4f} "
+                            f"= ${_pos.cost_usdc:.2f} — {_pos.question[:55]}"
+                        )
+                else:
+                    logger.info("[LIVE MODE] No open positions found.")
             except Exception as exc:
                 logger.warning(f"[MODE-SWITCH] Reconcile failed (positions may be stale): {exc}")
 
