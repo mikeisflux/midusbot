@@ -90,18 +90,68 @@ class ClobMixin:
 
     def get_positions(self) -> list[dict]:
         """
-        Reconstruct open positions from confirmed trade history.
-
-        Algorithm:
-          1. Fetch confirmed trades via authenticated CLOB API.
-          2. Group by token: net_shares = sum(BUY) - sum(SELL).
-          3. Tokens with net_shares > 0.01 → synthetic position dicts.
-
-        Falls back to data-api.polymarket.com/positions if trade history fails.
+        Fetch open positions from Polymarket. Tries three sources in order:
+          1. data-api.polymarket.com/positions  (most reliable — direct portfolio view)
+          2. Gamma API /portfolio                (alternative data source)
+          3. CLOB trade history (net BUY-SELL)  (fallback, may miss external positions)
         """
         address = config.FUNDER_ADDRESS.lower() if config.FUNDER_ADDRESS else ""
 
-        # ── 1. Authenticated trade history ────────────────────────────────────
+        # ── 1. data-api.polymarket.com — direct portfolio, most reliable ───────
+        if address:
+            for addr_fmt in (address, address.lower(), address.upper()):
+                try:
+                    data = self._get(
+                        "https://data-api.polymarket.com/positions",
+                        params={"user": addr_fmt, "sizeThreshold": "0.1", "limit": "500"},
+                    )
+                    logger.debug(
+                        f"[get_positions] data-api ({addr_fmt[:10]}…): "
+                        f"type={type(data).__name__} len={len(data) if isinstance(data, list) else '?'} "
+                        f"preview={str(data)[:200]}"
+                    )
+                    if isinstance(data, list) and data:
+                        logger.info(f"get_positions: {len(data)} position(s) from data-api")
+                        return data
+                    if isinstance(data, dict):
+                        for key in ("data", "results", "positions"):
+                            if key in data and isinstance(data[key], list) and data[key]:
+                                logger.info(f"get_positions: {len(data[key])} position(s) from data-api[{key}]")
+                                return data[key]
+                    # Empty response — no positions on this address format
+                    if isinstance(data, list) and len(data) == 0:
+                        logger.info(f"get_positions: data-api returned empty list for {addr_fmt[:10]}…")
+                        break   # don't retry other formats if API responded cleanly
+                except Exception as exc:
+                    logger.warning(f"get_positions data-api ({addr_fmt[:10]}…) failed: {exc}")
+
+        # ── 2. Gamma API portfolio ─────────────────────────────────────────────
+        if address:
+            for addr_fmt in (address, address.lower()):
+                try:
+                    data = self._get(
+                        f"{config.GAMMA_HOST}/positions",
+                        params={"user": addr_fmt, "limit": "500"},
+                    )
+                    logger.debug(
+                        f"[get_positions] Gamma ({addr_fmt[:10]}…): "
+                        f"type={type(data).__name__} preview={str(data)[:200]}"
+                    )
+                    rows = []
+                    if isinstance(data, list):
+                        rows = data
+                    elif isinstance(data, dict):
+                        for key in ("data", "results", "positions"):
+                            if key in data and isinstance(data[key], list):
+                                rows = data[key]
+                                break
+                    if rows:
+                        logger.info(f"get_positions: {len(rows)} position(s) from Gamma API")
+                        return rows
+                except Exception as exc:
+                    logger.debug(f"get_positions Gamma ({addr_fmt[:10]}…) failed: {exc}")
+
+        # ── 3. CLOB trade history (net BUY − SELL) ────────────────────────────
         trades: list[dict] = []
         if self._clob_client:
             try:
@@ -134,7 +184,6 @@ class ClobMixin:
             except Exception as exc:
                 logger.warning(f"get_positions: REST tradeHistory failed: {exc}")
 
-        # ── 2. Aggregate into net positions ───────────────────────────────────
         if trades:
             buys: dict[str, list[tuple[float, float]]] = defaultdict(list)
             sells: dict[str, float] = defaultdict(float)
@@ -184,28 +233,6 @@ class ClobMixin:
             logger.info(f"get_positions: {len(positions)} net open position(s) from trade history")
             if positions:
                 return positions
-            logger.info("get_positions: 0 net open from trade history — trying data-api")
-
-        # ── 3. data-api.polymarket.com fallback ───────────────────────────────
-        if address:
-            for addr_fmt in (address, address.lower(), address.upper()):
-                try:
-                    data = self._get(
-                        "https://data-api.polymarket.com/positions",
-                        params={"user": addr_fmt, "limit": "500"},
-                    )
-                    logger.info(
-                        f"get_positions data-api ({addr_fmt[:10]}…): "
-                        f"type={type(data).__name__} preview={str(data)[:300]}"
-                    )
-                    if isinstance(data, list) and data:
-                        return data
-                    if isinstance(data, dict):
-                        for key in ("data", "results", "positions"):
-                            if key in data and isinstance(data[key], list) and data[key]:
-                                return data[key]
-                except Exception as exc:
-                    logger.warning(f"get_positions data-api ({addr_fmt[:10]}…) failed: {exc}")
 
         logger.warning("get_positions: all methods exhausted — returning empty list")
         return []

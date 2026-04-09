@@ -56,8 +56,16 @@ class ReconcileMixin:
                 continue
 
             if token_id in self._redeemed_tokens:
-                logger.debug(f"  Skipping already-redeemed token: {token_id[:16]}…")
-                continue
+                # The token was previously marked as redeemed/closed, but the trade
+                # history shows net shares > 0 — meaning a new position was opened
+                # after the old one closed, OR the redeemed flag was incorrectly set.
+                # Trust the live trade data: clear the stale flag and process normally.
+                logger.info(
+                    f"  Clearing stale redeemed flag for {token_id[:16]}… "
+                    f"(trade history shows {size:.4f} net shares still open)"
+                )
+                self._redeemed_tokens.discard(token_id)
+                # fall through — process this position normally
 
             _early_market_id = str(raw.get("conditionId") or raw.get("market_id") or "")
             if _early_market_id and _early_market_id in self._closed_market_ids:
