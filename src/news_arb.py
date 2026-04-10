@@ -406,9 +406,9 @@ class NewsArbStrategy:
             "Format exactly: ID_PREFIX | NEW_YES_PROB | one-sentence reasoning\n\n"
             "Rules:\n"
             "- NEW_YES_PROB must be 0.00–1.00\n"
-            "- Only output a line if the news moves the probability by >12 percentage points\n"
+            f"- Only output a line if the news moves the probability by >{int(NEWS_ARB_EDGE * 100)} percentage points\n"
             "- Account for: how definitive the news is, source reliability, reversibility\n"
-            "- If no market crosses the 12-point threshold, reply: NO_SIGNAL"
+            f"- If no market crosses the {int(NEWS_ARB_EDGE * 100)}-point threshold, reply: NO_SIGNAL"
         )
 
         try:
@@ -503,7 +503,6 @@ class NewsArbStrategy:
                 continue
 
             logger.info(f"[NEWS-ARB] Screening: '{art.title[:65]}' ({art.source})")
-            self._record_analyzed(art.title)  # mark BEFORE calling Haiku (even if no match)
 
             # Stage 1 — Haiku semantic screening across all markets
             confirmed = self._haiku_screen(art, markets, api_client)
@@ -515,6 +514,10 @@ class NewsArbStrategy:
             art_signals = self._opus_assess(art, confirmed, api_client)
             if not art_signals:
                 logger.info(f"[NEWS-ARB] Opus: edge too small on '{art.title[:55]}'")
+            else:
+                # Only suppress follow-ups when we actually found a signal on this topic.
+                # If we got no signal, future articles on the same topic might have new info.
+                self._record_analyzed(art.title)
             signals.extend(art_signals)
 
         if not signals and articles:
