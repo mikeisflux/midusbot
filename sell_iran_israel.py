@@ -1,6 +1,7 @@
+#!/usr/local/bin/python3
 """
 One-shot: find "Iran x Israel/US conflict ends by May 15?" YES position and sell it.
-Run with:  python sell_iran_israel.py
+Run with:  ./sell_iran_israel.py
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(__file__))
