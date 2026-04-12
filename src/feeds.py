@@ -70,12 +70,18 @@ class BinanceWSFeed:
         )
     )
 
+    # Seconds since last tick before treating price data as stale
+    WS_STALE_SECS: int = 10
+
     def __init__(self) -> None:
         self._thread: threading.Thread | None = None
         self._ws = None
         self._running = False
+        self._connected = False
         self._last_prices: dict[str, float] = {}
         self._on_price: list[Callable[[str, float], None]] = []
+        self._reconnect_count = 0       # failed reconnects since last success
+        self._last_disconnect_ts: float = 0.0
 
     # ------------------------------------------------------------------
 
@@ -124,15 +130,48 @@ class BinanceWSFeed:
             time.sleep(self._backoff)
             self._backoff = min(self._backoff * 2, 60)
 
+    def is_stale(self, symbol: str = "BTC") -> bool:
+        """Return True if price data for symbol is older than WS_STALE_SECS."""
+        try:
+            import src.signals as _sig
+            last = _sig._LAST_WS_TICK.get(symbol.upper())
+            if last is None:
+                return True
+            return (time.time() - last) > self.WS_STALE_SECS
+        except Exception:
+            return True
+
     def _on_open(self, ws) -> None:
-        logger.info("BinanceWSFeed connected ✓")
-        self._backoff = 1  # reset on successful connect
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"BinanceWSFeed connected ✓ at {ts}")
+        self._backoff = 1          # reset exponential backoff
+        self._reconnect_count = 0  # reset failure counter
+        self._connected = True
 
     def _on_close(self, ws, code, msg) -> None:
-        logger.info(f"BinanceWSFeed disconnected (code={code}) — reconnecting…")
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._last_disconnect_ts = time.time()
+        self._connected = False
+        logger.warning(f"BinanceWSFeed disconnected at {ts} (code={code}) — reconnecting…")
 
     def _on_error(self, ws, error) -> None:
-        logger.warning(f"BinanceWSFeed error: {error}")
+        self._reconnect_count += 1
+        logger.warning(f"BinanceWSFeed error (attempt #{self._reconnect_count}): {error}")
+        if self._reconnect_count >= 10:
+            self._send_reconnect_alert()
+
+    def _send_reconnect_alert(self) -> None:
+        """Fire a Discord alert when the WS has failed to reconnect 10+ times."""
+        try:
+            from src.utils import Alerter
+            msg = (
+                f"⚠ BinanceWSFeed: {self._reconnect_count} failed reconnect attempts. "
+                f"Last disconnect: {time.strftime('%H:%M:%S', time.localtime(self._last_disconnect_ts))}. "
+                "Trading paused on stale data. Bot is still running."
+            )
+            Alerter().send(msg)
+        except Exception as exc:
+            logger.debug(f"Reconnect alert send failed: {exc}")
 
     # Reverse map: binance base (e.g. "btcusdt") → internal symbol (e.g. "BTC")
     _STREAM_TO_SYM: dict[str, str] = {v: k for k, v in _WS_SYMBOLS.items()}

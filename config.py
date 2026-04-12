@@ -64,7 +64,8 @@ KELLY_FRACTION: float = float(_env("KELLY_FRACTION", "0.25"))
 MAX_EXPOSURE_PCT: float = float(_env("MAX_EXPOSURE_PCT", "0.07"))  # 7% of $150 = ~$10 max deployed
 
 # ── Strategy ─────────────────────────────────────────────────────────────────
-MIN_EDGE: float = float(_env("MIN_EDGE", "0.03"))
+MIN_EDGE: float = float(_env("MIN_EDGE", "0.05"))           # minimum detected edge — 3% fired on noise, 5% required
+MIN_EXECUTION_EDGE: float = float(_env("MIN_EXECUTION_EDGE", "0.08"))  # must have 8%+ edge before actually placing order
 MIN_ORDER_SHARES: float = float(_env("MIN_ORDER_SHARES", "5.0"))    # Polymarket CLOB minimum
 MAX_DAYS_TO_RESOLUTION: int = int(_env("MAX_DAYS_TO_RESOLUTION", "2"))   # 48-hour max — only bet on markets resolving soon
 MIN_MINUTES_TO_RESOLUTION: int = int(_env("MIN_MINUTES_TO_RESOLUTION", "5"))  # don't enter near-expired (UpDown uses 1 min override)

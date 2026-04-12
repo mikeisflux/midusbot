@@ -290,6 +290,18 @@ class ExecutionMixin:
                     )
                     return False
 
+        # Execution edge gate: MIN_EDGE qualifies a signal for tracking; only execute
+        # when edge ≥ MIN_EXECUTION_EDGE (8%). Prevents borderline 5-6% signals from
+        # turning into real orders where the edge evaporates before fill.
+        # News_arb already requires NEWS_ARB_EDGE_THRESHOLD ≥ 12% — skip this gate for it.
+        _min_exec_edge = float(getattr(config, "MIN_EXECUTION_EDGE", 0.08))
+        if not getattr(sig, "is_news_arb", False) and sig.edge < _min_exec_edge:
+            logger.debug(
+                f"[EXEC-EDGE] {sig.edge:.1%} < MIN_EXECUTION_EDGE={_min_exec_edge:.0%} "
+                f"— signal tracked but not executed  {sig.question[:40]}"
+            )
+            return False
+
         usdc = self._risk.position_size(sig)
         if usdc <= 0:
             return False

@@ -348,8 +348,31 @@ class ScannerMixin:
         self._dash_state.add_exec_log("scan",
             f"Orderbook depth scan — evaluating {self._dash_state.markets_scanned or '...'} markets")
 
-        markets = self._client.get_markets()
-        updown  = self._client.get_updown_markets()
+        # ── Stale-price guard ─────────────────────────────────────────────────
+        # If BTC tick is older than WS_STALE_SECS (default 10s), the WebSocket
+        # is down and we'd be trading on stale prices — skip signal evaluation
+        # for this loop. Position management above still runs normally.
+        _feed = getattr(self, "_price_feed", None)
+        if _feed is not None and _feed.is_stale("BTC"):
+            from src.signals import _LAST_WS_TICK as _LWT
+            _btc_age = time.time() - _LWT.get("BTC", 0)
+            logger.warning(
+                f"[STALE-FEED] BTC tick {_btc_age:.0f}s old — "
+                f"skipping signal scan until WebSocket reconnects"
+            )
+            return
+
+        # ── Market list (cached 60s) ───────────────────────────────────────────
+        # get_markets() + get_updown_markets() are slow Gamma API calls (~200ms each).
+        # The market list changes at most once per minute; caching saves ~400ms/loop.
+        _now_mono = time.monotonic()
+        _mkt_ttl  = 60.0
+        if not hasattr(self, "_mkt_cache_ts") or (_now_mono - self._mkt_cache_ts) > _mkt_ttl:
+            self._mkt_cache_ts  = _now_mono
+            self._mkt_cache     = self._client.get_markets()
+            self._updown_cache  = self._client.get_updown_markets()
+        markets = self._mkt_cache
+        updown  = self._updown_cache
 
         seen_ids    = {m.id for m in updown}
         all_markets = updown + [m for m in markets if m.id not in seen_ids]
