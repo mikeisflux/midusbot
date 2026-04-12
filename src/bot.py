@@ -136,6 +136,8 @@ class OpenPosition:
     high_water_mark: float = 0.0  # highest price seen since entry (trailing stop)
     strategy: str = "momentum"    # "momentum" | "chainlink" | "arb" | "mm"
     sell_at_ts: float = 0.0       # if > 0, sell this position at or after this unix timestamp
+    pair_id: str = ""             # UUID shared between YES+NO legs of the same dual-arb trade
+    arb_partner_token_id: str = "" # the other leg's token_id (for complete-pair detection)
 
 
 class PolymarketBot(ScannerMixin, SimMixin, PositionsMixin, MarketMakerMixin):

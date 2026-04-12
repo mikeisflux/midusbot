@@ -933,11 +933,24 @@ class ScannerMixin:
         YES + NO always resolves to exactly $1.00. If we buy both for $0.94 total,
         we earn $0.06 = 6.4% guaranteed regardless of direction.
 
+        Gabagool v5 innovations integrated:
+        - Liquidity-first sizing: only trade volume at the best-ask level. This
+          prevents walking the book (v4 bug: $350 trades caused slippage that
+          turned 1% theoretical profit into 2-3% actual loss).
+        - pair_id: UUID links YES and NO legs so monitoring knows the pair is
+          complete and skips directional exits (stop-loss, trailing stop, etc.)
+          that would destroy the hedge.
+
         Allocation: ARB_BUDGET_PCT of wallet (default 30%). Tracks as strategy="arb".
         """
-        _arb_max  = float(getattr(config, "ARB_MAX_COST", 0.97))
-        _arb_pct  = float(getattr(config, "ARB_BUDGET_PCT", 0.30))
-        _wallet   = self._dash_state.wallet_balance or 0.0
+        import math as _math
+        import uuid as _uuid
+
+        _arb_max    = float(getattr(config, "ARB_MAX_COST", 0.97))
+        _arb_pct    = float(getattr(config, "ARB_BUDGET_PCT", 0.30))
+        _min_margin = float(getattr(config, "ARB_MIN_PROFIT_MARGIN", 0.02))
+        _liq_only   = bool(getattr(config, "ARB_LIQUIDITY_ONLY", True))
+        _wallet     = self._dash_state.wallet_balance or 0.0
 
         # Cap arb exposure: count existing arb positions
         _arb_exposure = sum(
@@ -978,48 +991,60 @@ class ScannerMixin:
                 continue
 
             profit_pct = (1.0 - total_cost) / total_cost
-            # Only trade if profit margin > 3% (covers 2% Poly fee + gas slop)
-            if profit_pct < 0.03:
+            if profit_pct < _min_margin:
                 continue
 
-            # Size: equal split across both legs, respecting arb budget
-            # Don't cap at MAX_POSITION_USDC — arb has its own budget (ARB_BUDGET_PCT).
-            # Ensure each leg can buy at least MIN_ORDER_SHARES (5 shares).
-            import math as _math
-            avg_price    = total_cost / 2
-            min_leg_usdc = _math.ceil(config.MIN_ORDER_SHARES * avg_price * 1.05 * 100) / 100
+            # ── Liquidity-first sizing (Gabagool v5) ─────────────────────────
+            # Only buy what's sitting at the best-ask price level — never walk
+            # the book. Slippage converts guaranteed profit into a loss.
             remaining_budget = _arb_budget - _arb_exposure
-            usdc_per_leg = max(min_leg_usdc, min(remaining_budget / 2, 10.0))
-            shares = _math.floor(usdc_per_leg / avg_price)
+            if _liq_only:
+                yes_avail = sum(
+                    float(a["size"]) for a in (yes_ob.asks or [])
+                    if abs(float(a["price"]) - yes_ask) < 0.0005
+                )
+                no_avail = sum(
+                    float(a["size"]) for a in (no_ob.asks or [])
+                    if abs(float(a["price"]) - no_ask) < 0.0005
+                )
+                # Match sizes: both legs must have equal shares for the hedge to work
+                avail_shares = min(yes_avail, no_avail)
+                max_by_budget = (remaining_budget / 2) / ((yes_ask + no_ask) / 2)
+                shares = _math.floor(min(avail_shares, max_by_budget))
+            else:
+                avg_price    = total_cost / 2
+                min_leg_usdc = _math.ceil(config.MIN_ORDER_SHARES * avg_price * 1.05 * 100) / 100
+                usdc_per_leg = max(min_leg_usdc, min(remaining_budget / 2, 10.0))
+                shares = _math.floor(usdc_per_leg / avg_price)
+
             if shares < config.MIN_ORDER_SHARES:
                 continue
 
             logger.info(
                 f"[DUAL-ARB] YES={yes_ask:.3f} + NO={no_ask:.3f} = {total_cost:.3f} "
-                f"→ {profit_pct:.1%} guaranteed  {market.question[:45]}"
+                f"→ {profit_pct:.1%} guaranteed | {shares} shares  {market.question[:45]}"
             )
 
+            # Shared pair ID — links YES and NO legs so monitoring skips directional exits
+            _pair_id = str(_uuid.uuid4())
+            mid = getattr(market, "market_id", "") or getattr(market, "id", "") or ""
+
             if config.DRY_RUN:
-                logger.info(
-                    f"[DUAL-ARB DRY-RUN] Simulating {shares} YES@{yes_ask:.3f} + "
-                    f"{shares} NO@{no_ask:.3f}  {market.question[:40]}"
-                )
-                mid_id = getattr(market, "market_id", "") or getattr(market, "id", "") or ""
                 hrs = 5 / 60  # 5-min window
                 self._open_sim_position_raw(
-                    token_id=yes_tid, market_id=mid_id, question=market.question,
+                    token_id=yes_tid, market_id=mid, question=market.question,
                     side="YES", entry=yes_ask, shares=shares,
                     confidence="DUAL-ARB", hours_to_close=hrs, strategy="arb",
                 )
                 self._open_sim_position_raw(
-                    token_id=no_tid, market_id=mid_id, question=market.question,
+                    token_id=no_tid, market_id=mid, question=market.question,
                     side="NO", entry=no_ask, shares=shares,
                     confidence="DUAL-ARB", hours_to_close=hrs, strategy="arb",
                 )
                 _arb_exposure += (yes_ask + no_ask) * shares
                 continue
 
-            # Place YES leg (FOK — guaranteed fill at this price or skip)
+            # Place YES leg (FOK — fill at this exact price or skip entirely)
             resp_yes = self._client.place_limit_order(
                 token_id=yes_tid, side="BUY", price=yes_ask, size=shares, fok=True
             )
@@ -1027,41 +1052,48 @@ class ScannerMixin:
                 logger.debug(f"[DUAL-ARB] YES leg rejected — skip {market.question[:40]}")
                 continue
 
-            # Place NO leg immediately after
+            # Place NO leg immediately after YES fills
             resp_no = self._client.place_limit_order(
                 token_id=no_tid, side="BUY", price=no_ask, size=shares, fok=True
             )
             if not resp_no:
                 logger.warning(
-                    f"[DUAL-ARB] YES filled but NO rejected — directional YES exposure! "
+                    f"[DUAL-ARB] YES filled but NO rejected — unpaired YES leg! "
+                    f"Will auto-close in {getattr(config, 'ARB_MAX_UNPAIRED_SECS', 1800)}s  "
                     f"{market.question[:40]}"
                 )
-                # Still track the YES we bought — monitoring will manage it
 
-            mid = getattr(market, "market_id", "") or getattr(market, "id", "") or ""
             from src.bot import OpenPosition
             cost_yes = shares * yes_ask
             cost_no  = shares * no_ask if resp_no else 0.0
+            _now     = time.time()
 
+            # pair_id + arb_partner_token_id link the two legs.
+            # Monitoring uses these to identify complete pairs and skip directional exits.
             if resp_yes:
                 self._positions[yes_tid] = OpenPosition(
                     market_id=mid, question=market.question, token_id=yes_tid,
                     side="YES", shares=shares, entry_price=yes_ask,
-                    cost_usdc=cost_yes, entry_time=time.time(), strategy="arb",
+                    cost_usdc=cost_yes, entry_time=_now, strategy="arb",
+                    pair_id=_pair_id,
+                    arb_partner_token_id=no_tid if resp_no else "",
                 )
             if resp_no:
                 self._positions[no_tid] = OpenPosition(
                     market_id=mid, question=market.question, token_id=no_tid,
                     side="NO", shares=shares, entry_price=no_ask,
-                    cost_usdc=cost_no, entry_time=time.time(), strategy="arb",
+                    cost_usdc=cost_no, entry_time=_now, strategy="arb",
+                    pair_id=_pair_id,
+                    arb_partner_token_id=yes_tid,
                 )
 
             self._save_positions()
             self._risk.record_open(cost_usdc=cost_yes + cost_no)
             _arb_exposure += cost_yes + cost_no
+            _status = "PAIRED ✓" if resp_no else "UNPAIRED ⚠"
             logger.info(
-                f"[DUAL-ARB] Opened YES+NO {shares}@{yes_ask:.3f}+{no_ask:.3f} "
-                f"cost=${cost_yes+cost_no:.2f}  guaranteed {profit_pct:.1%} profit"
+                f"[DUAL-ARB] {_status} {shares}sh YES@{yes_ask:.3f}+NO@{no_ask:.3f} "
+                f"cost=${cost_yes+cost_no:.2f} locked={profit_pct:.1%} profit"
             )
 
     def _launch_chainlink_watches(self, updown_markets: list) -> None:

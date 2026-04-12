@@ -153,6 +153,12 @@ MM_BUDGET_PCT:          float = float(_env("MM_BUDGET_PCT",         "0.17"))
 
 # Dual-side arb: maximum combined YES+NO ask to enter (profit = 1.0 - this)
 ARB_MAX_COST:           float = float(_env("ARB_MAX_COST",          "0.97"))
+# Minimum profit margin to enter a dual-arb (covers gas + 2% Poly win fee)
+ARB_MIN_PROFIT_MARGIN:  float = float(_env("ARB_MIN_PROFIT_MARGIN", "0.02"))
+# Max seconds to hold an UNPAIRED arb leg before closing to free capital
+ARB_MAX_UNPAIRED_SECS:  int   = int(_env("ARB_MAX_UNPAIRED_SECS",   "1800"))
+# Liquidity-first sizing: only trade volume at best-ask level (no book walking)
+ARB_LIQUIDITY_ONLY:     bool  = _env("ARB_LIQUIDITY_ONLY", "true").lower() != "false"
 
 # ── Kill switch rules (enforced before every trade) ──────────────────────────
 # Rule 1: Halt trading for the rest of the calendar day if daily P&L < -X%

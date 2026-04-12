@@ -240,6 +240,34 @@ class MonitoringMixin:
 
             position_snapshots.append((pos, current_price))
 
+            # ── Complete dual-arb pairs: hold to resolution ───────────────────
+            # YES and NO legs of the same arb trade always pay $1.00 combined at
+            # resolution. Applying any directional exit (stop-loss, trailing stop,
+            # early-exit) to one leg DESTROYS the hedge and turns a guaranteed
+            # profit into a naked directional bet (confirmed XRP bug, 2026-04-12).
+            #
+            # Rule: if pair_id is set and the partner leg still exists → hold both
+            # until auto-claim (≥0.90) or auto-clear (≤0.03) fires naturally.
+            #
+            # Unpaired legs (YES bought but NO fill failed) get a timeout: close
+            # after ARB_MAX_UNPAIRED_SECS (default 30 min) to free capital.
+            if getattr(pos, "strategy", "") == "arb" and getattr(pos, "pair_id", ""):
+                _partner_tid = getattr(pos, "arb_partner_token_id", "")
+                if _partner_tid and _partner_tid in self._positions:
+                    # Complete pair — skip ALL directional exits
+                    continue
+                # Unpaired leg: enforce holding time limit
+                _max_unpaired = int(getattr(config, "ARB_MAX_UNPAIRED_SECS", 1800))
+                _held = time.time() - getattr(pos, "entry_time", 0)
+                if _held > _max_unpaired:
+                    to_close.append((token_id, current_price))
+                    logger.warning(
+                        f"[ARB-TIMEOUT] Unpaired {pos.side} held {_held:.0f}s "
+                        f"(max {_max_unpaired}s) — closing to free capital  "
+                        f"{pos.question[:45]}"
+                    )
+                    continue
+
             # ── News arb scalp exits (strategy="news_arb") ───────────────────
             # We're trading the repricing wave, not holding to resolution.
             # News breaks → market is mispriced → MMs reprice over next few minutes.
