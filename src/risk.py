@@ -40,9 +40,15 @@ class RiskManager:
         self._wallet_balance: float = 0.0
         self._daily_pnl: float = 0.0
         self._trades_today: int = 0
+        self._day_start_balance: float = 0.0
         # Internal exposure counter — incremented on open, decremented on close.
         # Never reads from _positions or the CLOB API so it can't drift/freeze.
         self._open_exposure: float = 0.0
+        # Kill switch state
+        self._peak_balance: float = 0.0          # highest wallet balance ever seen
+        self._kill_switch_active: bool = False   # permanent halt — requires manual restart
+        self._consecutive_losses: int = 0
+        self._loss_pause_until: float = 0.0      # epoch time when pause expires
 
     # -- adaptive getters --------------------------------------------------
 
@@ -64,11 +70,35 @@ class RiskManager:
 
     def position_size(self, signal: TradeSignal) -> float:
         """Returns the USDC to spend. 0.0 = skip trade."""
-        # Daily trading floor: halt if live wallet balance drops below the
-        # configured floor. Recovers automatically when wins push balance back up.
-        # Only active when wallet balance is known (>0); falls back to pct cap otherwise.
-        # Floor / circuit-breaker checks disabled — trading continues regardless of balance.
-        pass
+        import time as _time
+
+        # ── Kill switch rules (enforced before every trade) ───────────────────
+        # Rule 2: Permanent drawdown halt — portfolio dropped 60%+ from peak
+        if self._kill_switch_active:
+            logger.warning("[KILL-SWITCH] Permanent halt active — manual restart required")
+            return 0.0
+
+        # Rule 3: Consecutive loss pause (5 losses → 30 min cooldown)
+        if _time.time() < self._loss_pause_until:
+            _mins_left = int((self._loss_pause_until - _time.time()) / 60)
+            logger.debug(f"[LOSS-PAUSE] Paused after {config.KILL_SWITCH_CONSEC_LOSSES} losses — {_mins_left}m remaining")
+            return 0.0
+
+        # Rule 1: Daily halt at -20% of day-start balance
+        _daily_cap = float(getattr(config, "KILL_SWITCH_DAILY_LOSS_PCT", 0.20))
+        _start_bal = self._day_start_balance or self._wallet_balance
+        if _start_bal > 0 and self._daily_pnl < -(_start_bal * _daily_cap):
+            logger.warning(
+                f"[DAILY-HALT] P&L ${self._daily_pnl:.2f} < -{_daily_cap:.0%} of "
+                f"${_start_bal:.2f} — no new trades until tomorrow"
+            )
+            return 0.0
+
+        # Rule 2 check: drawdown kill switch
+        _dd_pct = float(getattr(config, "KILL_SWITCH_DRAWDOWN_PCT", 0.60))
+        if self._peak_balance > 0 and self._wallet_balance < self._peak_balance * (1 - _dd_pct):
+            self._trigger_kill_switch()
+            return 0.0
 
         # Multi-asset correlated exposure cap: limit total exposure across BTC/ETH/BNB/SOL/XRP/DOGE/HYPE.
         # These assets are 90%+ correlated — simultaneous exposure multiplies directional risk.
@@ -138,6 +168,11 @@ class RiskManager:
 
         capped = min(usdc, pos_cap)
 
+        # Rule 4: Hard cap — never exceed 8% of portfolio in a single position
+        _hard_cap_pct = float(getattr(config, "POSITION_HARD_CAP_PCT", 0.08))
+        if self._wallet_balance > 0:
+            capped = min(capped, self._wallet_balance * _hard_cap_pct)
+
         # Exposure cap: MAX_EXPOSURE_PCT of wallet balance, or static fallback
         dynamic_cap = (
             self._wallet_balance * config.MAX_EXPOSURE_PCT
@@ -164,6 +199,10 @@ class RiskManager:
 
     def set_wallet_balance(self, balance: float) -> None:
         self._wallet_balance = max(0.0, balance)
+        if balance > self._peak_balance:
+            self._peak_balance = balance
+        if self._day_start_balance == 0.0 and balance > 0:
+            self._day_start_balance = balance  # capture first reading of day
 
     def record_open(self, cost_usdc: float = 0.0) -> None:
         """Call when a new trade is opened — tracks count and exposure."""
@@ -175,6 +214,13 @@ class RiskManager:
         self._daily_pnl += pnl_usdc
         # Free the capital that was deployed for this position.
         self._open_exposure = round(max(0.0, self._open_exposure - cost_usdc), 4)
+        # Rule 3: track consecutive losses
+        if pnl_usdc < 0:
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= int(getattr(config, "KILL_SWITCH_CONSEC_LOSSES", 5)):
+                self._trigger_loss_streak_pause()
+        else:
+            self._consecutive_losses = 0
 
     def total_exposure(self) -> float:
         """Live open exposure — purely internal counter, never reads from CLOB.
@@ -202,6 +248,44 @@ class RiskManager:
     def reset_daily(self) -> None:
         self._daily_pnl = 0.0
         self._trades_today = 0
+        self._day_start_balance = self._wallet_balance  # new day baseline
+
+    # ------------------------------------------------------------------
+    # Kill switch helpers
+    # ------------------------------------------------------------------
+
+    def _trigger_kill_switch(self) -> None:
+        if self._kill_switch_active:
+            return
+        self._kill_switch_active = True
+        import config as _cfg
+        _cfg.TRADING_PAUSED = True
+        dd = (self._wallet_balance / self._peak_balance - 1) if self._peak_balance > 0 else 0
+        msg = (
+            f"KILL-SWITCH: Portfolio ${self._wallet_balance:.2f} is {dd:.1%} below peak "
+            f"${self._peak_balance:.2f}. Trading PERMANENTLY halted. Restart bot manually."
+        )
+        logger.error(f"[KILL-SWITCH] {msg}")
+        self._send_risk_alert(msg)
+
+    def _trigger_loss_streak_pause(self) -> None:
+        import time as _time
+        pause_mins = float(getattr(config, "KILL_SWITCH_PAUSE_MINS", 30))
+        self._loss_pause_until = _time.time() + pause_mins * 60
+        self._consecutive_losses = 0  # reset counter
+        msg = (
+            f"LOSS-STREAK: {int(getattr(config, 'KILL_SWITCH_CONSEC_LOSSES', 5))} consecutive losses. "
+            f"Trading paused for {pause_mins:.0f} minutes."
+        )
+        logger.warning(f"[LOSS-PAUSE] {msg}")
+        self._send_risk_alert(msg)
+
+    def _send_risk_alert(self, message: str) -> None:
+        try:
+            from src.utils import Alerter
+            Alerter().send(f"⚠ {message}")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Internal

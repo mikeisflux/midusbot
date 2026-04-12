@@ -412,6 +412,33 @@ class ScannerMixin:
             if time.time() - _ts < config.COOLDOWN_SECS:
                 _cooled_out.add(_sym)
 
+        # ── Parallel order book pre-fetch ─────────────────────────────────────
+        # Serial: 7 markets × ~200ms = 1.4s blocking before any signal is evaluated.
+        # Parallel: all 7 fetched concurrently → ~200ms total.
+        # Build cache here; loop below uses it instead of calling get_order_book().
+        _ob_cache: dict = {}
+        _prefetch_ids = [
+            m.yes_token.token_id for m in updown_5m
+            if not self._already_positioned(m)
+            and m.yes_token.token_id not in self._positions
+            and m.no_token.token_id not in self._positions
+        ]
+        if _prefetch_ids:
+            with ThreadPoolExecutor(
+                max_workers=min(len(_prefetch_ids), 12),
+                thread_name_prefix="ob-prefetch",
+            ) as _pool:
+                _ob_futures = {
+                    _pool.submit(self._client.get_order_book, tid): tid
+                    for tid in _prefetch_ids
+                }
+                for _fut in _as_completed(_ob_futures):
+                    _tid = _ob_futures[_fut]
+                    try:
+                        _ob_cache[_tid] = _fut.result()
+                    except Exception:
+                        _ob_cache[_tid] = None
+
         # Collect all valid signals, then execute only the single best.
         # BTC/ETH/SOL/XRP/DOGE/BNB are 90%+ correlated — betting all at once
         # is 6× leverage on one direction, not diversification.
@@ -451,7 +478,7 @@ class ScannerMixin:
             if _secs is None or _secs < 2 or _secs > 240:
                 continue
 
-            ob = self._client.get_order_book(market.yes_token.token_id)
+            ob = _ob_cache.get(market.yes_token.token_id) or self._client.get_order_book(market.yes_token.token_id)
 
             # Skip markets with completely empty order books (MMs absent AND price is stale)
             if ob is None or (not ob.bids and not ob.asks):

@@ -154,6 +154,17 @@ MM_BUDGET_PCT:          float = float(_env("MM_BUDGET_PCT",         "0.17"))
 # Dual-side arb: maximum combined YES+NO ask to enter (profit = 1.0 - this)
 ARB_MAX_COST:           float = float(_env("ARB_MAX_COST",          "0.97"))
 
+# ── Kill switch rules (enforced before every trade) ──────────────────────────
+# Rule 1: Halt trading for the rest of the calendar day if daily P&L < -X%
+KILL_SWITCH_DAILY_LOSS_PCT:   float = float(_env("KILL_SWITCH_DAILY_LOSS_PCT",  "0.20"))
+# Rule 2: Permanent halt (requires manual restart) if portfolio drops X% from peak
+KILL_SWITCH_DRAWDOWN_PCT:     float = float(_env("KILL_SWITCH_DRAWDOWN_PCT",    "0.60"))
+# Rule 3: Pause trading for N minutes after X consecutive losses
+KILL_SWITCH_CONSEC_LOSSES:    int   = int(_env("KILL_SWITCH_CONSEC_LOSSES",     "5"))
+KILL_SWITCH_PAUSE_MINS:       float = float(_env("KILL_SWITCH_PAUSE_MINS",      "30"))
+# Rule 4: Hard cap — never exceed X% of portfolio in a single position
+POSITION_HARD_CAP_PCT:        float = float(_env("POSITION_HARD_CAP_PCT",       "0.08"))
+
 # Circuit breaker: pause ALL new entries if daily PnL drops below this threshold.
 # -5% is more aggressive than the default -3% live limit.
 CIRCUIT_BREAKER_PCT:    float = float(_env("CIRCUIT_BREAKER_PCT",   "-0.05"))
