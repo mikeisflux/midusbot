@@ -43,10 +43,11 @@ if not target:
     sys.exit(1)
 
 # Extract token_id and size
+# CLOB API requires the decimal 'asset' token_id, NOT conditionId
 token_id = (
+    target.get("asset") or      # data-api returns this — correct field for CLOB
     target.get("asset_id") or
     target.get("token_id") or
-    target.get("conditionId") or
     target.get("outcomeTokenId")
 )
 size = float(
@@ -72,7 +73,7 @@ if ob and ob.bids:
     sell_price = round(max(0.01, best_bid - 0.02), 4)
     print(f"Best bid: {best_bid:.4f} — placing SELL at {sell_price:.4f} (FOK)")
 else:
-    sell_price = 0.55  # fallback: well below current ~68.5¢ to guarantee fill
+    sell_price = 0.50  # fallback: cross the spread aggressively to guarantee fill
     print(f"No order book — placing SELL at {sell_price:.4f} (FOK fallback)")
 
 resp = client.place_limit_order(
