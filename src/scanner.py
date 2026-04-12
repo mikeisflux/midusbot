@@ -296,6 +296,28 @@ class ScannerMixin:
         self._process_sim_queue()
         self._manage_positions()
 
+        # Hourly heartbeat — confirm bot is alive and show key stats
+        # 240 loops × 15s = 3600s = 1 hour (fires on loop 240, 480, 720, …)
+        _loops_per_hour = max(1, 3600 // max(1, config.LOOP_INTERVAL_SECONDS))
+        if self._dash_state.loop_count > 0 and self._dash_state.loop_count % _loops_per_hour == 0:
+            try:
+                _bal  = self._dash_state.wallet_balance or 0.0
+                _exp  = self._risk.total_exposure()
+                _pnl  = self._risk.daily_pnl()
+                _npos = len(self._positions)
+                _mode = "DRY-RUN" if config.DRY_RUN else "LIVE"
+                _hb_msg = (
+                    f"💓 Hourly heartbeat [{_mode}] — "
+                    f"Balance ${_bal:.2f} | "
+                    f"Daily P&L {_pnl:+.2f} | "
+                    f"Exposure ${_exp:.2f} | "
+                    f"{_npos} open position{'s' if _npos != 1 else ''} | "
+                    f"Loop #{self._dash_state.loop_count}"
+                )
+                self._alerter.send(_hb_msg)
+            except Exception as _hb_exc:
+                logger.debug(f"Heartbeat send failed: {_hb_exc}")
+
         # Retrain ML classifier every 24h (non-blocking)
         if self._dash_state.loop_count % 3600 == 0:
             try:
