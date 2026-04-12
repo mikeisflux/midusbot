@@ -104,6 +104,9 @@ class BinanceWSFeed:
 
     # ------------------------------------------------------------------
 
+    # Maximum consecutive reconnect attempts before entering permanent-alert mode
+    MAX_RECONNECT_ATTEMPTS: int = 10
+
     def _run(self) -> None:
         """Background thread: connect and auto-reconnect on failure."""
         self._backoff = 1
@@ -117,18 +120,24 @@ class BinanceWSFeed:
                     on_close=self._on_close,
                     on_open=self._on_open,
                 )
-                # proxy=None bypasses HTTP_PROXY / HTTPS_PROXY env vars so
-                # restricted proxies (e.g. Claude Code egress control) don't
-                # block the Binance WebSocket connection.
                 self._ws.run_forever(ping_interval=20, ping_timeout=10,
                                      http_proxy_host=None)
             except Exception as exc:
                 logger.warning(f"BinanceWSFeed error: {exc}")
             if not self._running:
                 break
-            logger.info(f"BinanceWSFeed reconnecting in {self._backoff}s…")
+            self._reconnect_count += 1
+            if self._reconnect_count >= self.MAX_RECONNECT_ATTEMPTS:
+                logger.error(
+                    f"BinanceWSFeed: {self._reconnect_count} reconnect attempts failed. "
+                    "Entering slow-retry mode (60s interval). Check network."
+                )
+                self._send_reconnect_alert()
+                self._backoff = 60  # lock to slow retry, don't keep doubling
+            else:
+                self._backoff = min(self._backoff * 2, 60)
+            logger.info(f"BinanceWSFeed reconnecting in {self._backoff}s (attempt #{self._reconnect_count})…")
             time.sleep(self._backoff)
-            self._backoff = min(self._backoff * 2, 60)
 
     def is_stale(self, symbol: str = "BTC") -> bool:
         """Return True if price data for symbol is older than WS_STALE_SECS."""

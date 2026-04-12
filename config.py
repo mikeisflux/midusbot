@@ -157,8 +157,9 @@ ARB_MAX_COST:           float = float(_env("ARB_MAX_COST",          "0.97"))
 # ── Kill switch rules (enforced before every trade) ──────────────────────────
 # Rule 1: Halt trading for the rest of the calendar day if daily P&L < -X%
 KILL_SWITCH_DAILY_LOSS_PCT:   float = float(_env("KILL_SWITCH_DAILY_LOSS_PCT",  "0.20"))
-# Rule 2: Permanent halt (requires manual restart) if portfolio drops X% from peak
-KILL_SWITCH_DRAWDOWN_PCT:     float = float(_env("KILL_SWITCH_DRAWDOWN_PCT",    "0.60"))
+# Rule 2: Permanent halt if portfolio drops more than X% from all-time high.
+# 0.40 = halt when wallet < 60% of peak (40% drawdown). Per article: "-40% permanent halt".
+KILL_SWITCH_DRAWDOWN_PCT:     float = float(_env("KILL_SWITCH_DRAWDOWN_PCT",    "0.40"))
 # Rule 3: Pause trading for N minutes after X consecutive losses
 KILL_SWITCH_CONSEC_LOSSES:    int   = int(_env("KILL_SWITCH_CONSEC_LOSSES",     "5"))
 KILL_SWITCH_PAUSE_MINS:       float = float(_env("KILL_SWITCH_PAUSE_MINS",      "30"))

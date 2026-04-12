@@ -307,7 +307,7 @@ class ScannerMixin:
         # Async parallel price fetching — scan all assets concurrently instead of
         # sequentially (was: asset 7 signal was 3-5s stale by the time we got to it)
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-        _ASSETS_TO_FETCH = ("BTC", "XRP", "ETH", "SOL", "DOGE", "BNB")  # HYPE removed: coin-flip win rate (188W/190L)
+        _ASSETS_TO_FETCH = ("BTC", "XRP", "ETH", "DOGE", "BNB")  # SOL removed: 855W/928L = 47.9% (below 50%); HYPE removed earlier (188W/190L)
         with ThreadPoolExecutor(max_workers=len(_ASSETS_TO_FETCH), thread_name_prefix="pricefetch") as _pool:
             _futures = {_pool.submit(_fetch_price, sym): sym for sym in _ASSETS_TO_FETCH}
             for _fut in _as_completed(_futures):
@@ -319,7 +319,7 @@ class ScannerMixin:
             _now = _time.time()
             parts = []
             silent_assets = []
-            for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"):
+            for sym in ("BTC", "ETH", "XRP", "DOGE", "BNB"):
                 cached    = _PRICE_CACHE.get(sym)
                 hist      = _PRICE_HISTORY.get(sym, [])
                 ticks     = len(hist)
@@ -402,7 +402,7 @@ class ScannerMixin:
         # Cross-window correlation cooldown: block correlated assets for 1 full
         # 5-min window after a bet (300s). BTC/ETH/BNB/SOL/XRP/DOGE are highly
         # correlated — concurrent bets are ~6× leveraged on the same direction.
-        _CORRELATED = {"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE"}
+        _CORRELATED = {"BTC", "ETH", "BNB", "XRP", "DOGE"}
         _cooldown_map: dict[str, float] = getattr(self, "_asset_last_bet", {})
         if not hasattr(self, "_asset_last_bet"):
             self._asset_last_bet: dict[str, float] = {}
