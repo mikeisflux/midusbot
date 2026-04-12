@@ -118,10 +118,12 @@ class ClobMixin:
                             if key in data and isinstance(data[key], list) and data[key]:
                                 logger.info(f"get_positions: {len(data[key])} position(s) from data-api[{key}]")
                                 return data[key]
-                    # Empty response — no positions on this address format
+                    # Empty response — data-api confirmed no open positions.
+                    # Return immediately; do NOT fall through to CLOB trade history
+                    # which reconstructs phantom positions from all historical trades.
                     if isinstance(data, list) and len(data) == 0:
-                        logger.info(f"get_positions: data-api returned empty list for {addr_fmt[:10]}…")
-                        break   # don't retry other formats if API responded cleanly
+                        logger.info(f"get_positions: data-api confirmed 0 positions for {addr_fmt[:10]}…")
+                        return []
                 except Exception as exc:
                     logger.warning(f"get_positions data-api ({addr_fmt[:10]}…) failed: {exc}")
 
