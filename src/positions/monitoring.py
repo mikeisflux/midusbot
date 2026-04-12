@@ -206,7 +206,7 @@ class MonitoringMixin:
                 continue
 
             # ── WIN auto-claim ────────────────────────────────────────────────
-            if not config.DRY_RUN:
+            if not config.DRY_RUN and current_price is not None:
                 if current_price >= 0.90:
                     logger.info(
                         f"AUTO-CLAIM: WIN @ {current_price:.3f} "
