@@ -48,6 +48,9 @@ def _detect_updown_market(question: str) -> str | None:
         return None
     for kw, sym in _UPDOWN_ASSETS.items():
         if kw in q:
+            import config as _cfg
+            if _cfg.ALLOWED_ASSETS and sym not in _cfg.ALLOWED_ASSETS:
+                return None
             return sym
     return None
 

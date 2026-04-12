@@ -129,13 +129,6 @@ class RiskManager:
         if usdc <= 0:
             return 0.0
 
-        # Floor: if Kelly produces less than the minimum viable trade size,
-        # bump up to the floor so the signal actually fires. A minimum-size
-        # trade at positive edge is better than no trade.
-        _min_trade = config.MIN_ORDER_SHARES * 0.52  # 5 shares × $0.52 buffer
-        if usdc < _min_trade and signal.edge > 0:
-            usdc = _min_trade
-
         # UpDown HIGH-confidence signals allow larger positions to mirror
         # reference traders (200+ shares). Cap scales with confidence.
         # Bankroll-proportional: effective max = MC-optimal fraction × wallet,
@@ -172,6 +165,15 @@ class RiskManager:
         _hard_cap_pct = float(getattr(config, "POSITION_HARD_CAP_PCT", 0.08))
         if self._wallet_balance > 0:
             capped = min(capped, self._wallet_balance * _hard_cap_pct)
+
+        # Minimum viable trade floor — applied AFTER caps so it isn't negated.
+        # With a small wallet (e.g. $36), 2% × $36 = $0.72 → pos_cap = $2.16,
+        # but MIN_ORDER_SHARES × $0.52 = $2.60, so the floor must exceed pos_cap.
+        # A position below MIN_ORDER_SHARES is rejected by execution anyway,
+        # so bump to the floor rather than silently produce a no-op trade.
+        _min_trade = config.MIN_ORDER_SHARES * 0.52  # 5 shares × $0.52
+        if 0 < capped < _min_trade and signal.edge > 0:
+            capped = _min_trade
 
         # Exposure cap: MAX_EXPOSURE_PCT of wallet balance, or static fallback
         dynamic_cap = (

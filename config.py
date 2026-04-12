@@ -45,6 +45,12 @@ DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() != "false"
 TRADING_PAUSED: bool = os.getenv("TRADING_PAUSED", "false").lower() == "true"
 # Run only BTC penny bets — disables all other strategies.
 PENNY_ONLY: bool = os.getenv("PENNY_ONLY", "false").lower() == "true"
+# Restrict trading to specific assets only. Comma-separated uppercase symbols.
+# Example: ALLOWED_ASSETS=BTC   — trades only Bitcoin UpDown markets.
+# Empty string = trade all detected assets.
+ALLOWED_ASSETS: set[str] = set(
+    s.strip().upper() for s in _env("ALLOWED_ASSETS", "BTC").split(",") if s.strip()
+)
 # Hard stop all new trades if wallet drops below this threshold (USDC).
 # Prevents trading to zero. Override via env: CAPITAL_FLOOR_USDC=20
 CAPITAL_FLOOR_USDC: float = float(_env("CAPITAL_FLOOR_USDC", "100.0"))
