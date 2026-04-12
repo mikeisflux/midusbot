@@ -245,7 +245,13 @@ class MonitoringMixin:
             # News breaks → market is mispriced → MMs reprice over next few minutes.
             # Exit as soon as we've captured enough of that move. Win/loss of the
             # underlying prediction is irrelevant — we've already banked the spread.
-            if getattr(pos, "strategy", "") in ("news_arb", "price_velocity") and current_price is not None:
+            #
+            # Also applies to externally-reconciled positions that are not UpDown
+            # markets — these are news_arb trades from a previous session that
+            # were reloaded without the strategy tag.
+            _is_news_arb_pos = getattr(pos, "strategy", "") in ("news_arb", "price_velocity")
+            _is_ext_event = pos.is_external and _detect_updown_market(pos.question) is None
+            if (_is_news_arb_pos or _is_ext_event) and current_price is not None:
                 _scalp_target = float(getattr(config, "NEWS_ARB_SCALP_TARGET", 0.07))
                 _scalp_stop   = float(getattr(config, "NEWS_ARB_SCALP_STOP",   0.05))
                 _price_move   = current_price - pos.entry_price
@@ -349,7 +355,7 @@ class MonitoringMixin:
                         )
                         continue
 
-            if not pos.is_external and pos.entry_price > 0:
+            if pos.entry_price > 0:
                 if self._risk.should_stop_loss(pnl_pct):
                     logger.warning(f"STOP-LOSS {pos.side} {pos.question[:40]} ({pnl_pct:.1%})")
                     to_close.append((token_id, current_price))

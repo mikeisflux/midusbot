@@ -28,7 +28,15 @@ from loguru import logger
 # ── Config ────────────────────────────────────────────────────────────────────
 HAIKU_MODEL           = "claude-haiku-4-5-20251001"  # Stage 1: cheap semantic screening
 OPUS_MODEL            = "claude-opus-4-6"            # Stage 2: probability assessment
-NEWS_ARB_EDGE         = 0.08   # minimum probability divergence to fire signal (was 0.12 — too strict)
+# Edge threshold: read from config (default 0.12). Overridable via NEWS_ARB_EDGE_THRESHOLD in .env.
+# 0.08 was too low — fired on 8pp noise. 0.12 requires a meaningful mispricing.
+def _news_arb_edge() -> float:
+    try:
+        import config as _cfg
+        return float(getattr(_cfg, "NEWS_ARB_EDGE_THRESHOLD", 0.12))
+    except Exception:
+        return 0.12
+NEWS_ARB_EDGE         = 0.12   # fallback constant — actual value pulled via _news_arb_edge()
 MIN_LIQUIDITY         = 100    # minimum market liquidity USDC (was 300 — too restrictive)
 POLL_INTERVAL         = 15     # poll RSS every 15 seconds
 MARKET_CACHE_TTL      = 300    # refresh market list every 5 min
@@ -406,9 +414,9 @@ class NewsArbStrategy:
             "Format exactly: ID_PREFIX | NEW_YES_PROB | one-sentence reasoning\n\n"
             "Rules:\n"
             "- NEW_YES_PROB must be 0.00–1.00\n"
-            f"- Only output a line if the news moves the probability by >{int(NEWS_ARB_EDGE * 100)} percentage points\n"
+            f"- Only output a line if the news moves the probability by >{int(_news_arb_edge() * 100)} percentage points\n"
             "- Account for: how definitive the news is, source reliability, reversibility\n"
-            f"- If no market crosses the {int(NEWS_ARB_EDGE * 100)}-point threshold, reply: NO_SIGNAL"
+            f"- If no market crosses the {int(_news_arb_edge() * 100)}-point threshold, reply: NO_SIGNAL"
         )
 
         try:
@@ -450,7 +458,7 @@ class NewsArbStrategy:
 
             mid  = market.yes_price
             edge = abs(ai_prob - mid)
-            if edge < NEWS_ARB_EDGE:
+            if edge < _news_arb_edge():
                 continue
 
             direction = "YES" if ai_prob > mid else "NO"
@@ -521,7 +529,7 @@ class NewsArbStrategy:
             signals.extend(art_signals)
 
         if not signals and articles:
-            logger.info(f"[NEWS-ARB] {len(articles)} article(s) processed — no signals above {NEWS_ARB_EDGE:.0%} edge")
+            logger.info(f"[NEWS-ARB] {len(articles)} article(s) processed — no signals above {_news_arb_edge():.0%} edge")
         return signals
 
 
@@ -670,9 +678,9 @@ class NewsArbStrategy:
             return []
 
         edge = abs(ai_prob - current_price)
-        if edge < NEWS_ARB_EDGE:
+        if edge < _news_arb_edge():
             logger.debug(
-                f"[VELOCITY] edge {edge:.1%} < {NEWS_ARB_EDGE:.0%} threshold — skip"
+                f"[VELOCITY] edge {edge:.1%} < {_news_arb_edge():.0%} threshold — skip"
             )
             return []
 

@@ -139,6 +139,12 @@ NEWS_ARB_SCALP_STOP:   float = float(_env("NEWS_ARB_SCALP_STOP",   "0.03"))  # s
 # Max token price to enter news arb — only buy underpriced tokens with room to appreciate.
 # Tokens already at 0.78 have little upside; we want tokens priced low that news pushes up.
 NEWS_ARB_MAX_ENTRY:    float = float(_env("NEWS_ARB_MAX_ENTRY",    "0.60"))  # skip if token ask > 60¢
+# Minimum AI probability divergence to fire a news_arb signal.
+# 0.08 (8pp) fires too often on noise — raise to 0.12 for a cleaner signal.
+NEWS_ARB_EDGE_THRESHOLD: float = float(_env("NEWS_ARB_EDGE_THRESHOLD", "0.12"))
+# Set false to disable the price-velocity (smart-money) scanner.
+# Velocity signals use Haiku alone which is less reliable than Opus.
+NEWS_ARB_VELOCITY_ENABLED: bool = _env("NEWS_ARB_VELOCITY_ENABLED", "false").lower() != "false"
 CHAINLINK_BUDGET_PCT:   float = float(_env("CHAINLINK_BUDGET_PCT",  "0.13"))
 ARB_BUDGET_PCT:         float = float(_env("ARB_BUDGET_PCT",        "0.25"))
 MOMENTUM_BUDGET_PCT:    float = float(_env("MOMENTUM_BUDGET_PCT",   "0.30"))

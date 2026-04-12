@@ -779,7 +779,8 @@ class ScannerMixin:
             self._news_arb = NewsArbStrategy(api_key=_api_key, client=self._client)
 
         self._news_arb.maybe_poll()
-        self._news_arb.maybe_check_velocity()  # pre-publication: detect smart-money moves
+        if getattr(config, "NEWS_ARB_VELOCITY_ENABLED", False):
+            self._news_arb.maybe_check_velocity()  # pre-publication: detect smart-money moves
 
         for sig in self._news_arb.pop_signals():
             # Budget gate: news_arb gets NEWS_ARB_BUDGET_PCT of wallet
